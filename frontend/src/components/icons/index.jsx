@@ -1,0 +1,148 @@
+/**
+ * Every icon in the app, as inline SVG.
+ *
+ * Inlining is load-bearing, not a preference: all but two use
+ * `stroke="currentColor"`, which picks up --text-primary / --primary-color
+ * from the cascade. An <img src="*.svg"> cannot inherit a CSS colour, so the
+ * icons would stop following the theme. That is why src/assets/ is empty.
+ *
+ * Geometry is copied verbatim from templates/index.html and main.js.
+ */
+
+// The shared attribute set on all but the two noted exceptions.
+const stroked = {
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: '2',
+  strokeLinecap: 'round',
+  strokeLinejoin: 'round',
+};
+
+export const CompassIcon = () => (
+  <svg {...stroked} width="22" height="22">
+    <circle cx="12" cy="12" r="10" />
+    <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" />
+  </svg>
+);
+
+export const InfoIcon = () => (
+  <svg {...stroked} width="12" height="12">
+    <circle cx="12" cy="12" r="10" />
+    <line x1="12" y1="16" x2="12" y2="12" />
+    <line x1="12" y1="8" x2="12.01" y2="8" />
+  </svg>
+);
+
+export const CloseIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
+  </svg>
+);
+
+export const PlusIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <line x1="12" y1="5" x2="12" y2="19" />
+    <line x1="5" y1="12" x2="19" y2="12" />
+  </svg>
+);
+
+/** Used by both collapsibles; the rotation is applied by CSS, per container. */
+export const ChevronDownIcon = ({ className }) => (
+  <svg {...stroked} width="16" height="16" className={className}>
+    <polyline points="6 9 12 15 18 9" />
+  </svg>
+);
+
+export const BrainIcon = () => (
+  <svg {...stroked} width="18" height="18" className="capability-icon">
+    <path d="M11 2.2A6.5 6.5 0 0 0 4.5 8.7c0 2.2 1 4.2 2.7 5.4.6.4 1 1.1 1 1.8v2.6c0 1.2.9 2.2 2 2.4 2 .3 3.8-1.2 3.8-3.1v-2c0-.7.3-1.4.8-1.9.9-.9 1.5-2 1.5-3.3a6.5 6.5 0 0 0-6.5-6.5h0c.4 0 1.2 0 1.2 0z" />
+  </svg>
+);
+
+export const GlobeIcon = () => (
+  <svg {...stroked} width="18" height="18" className="highlight-icon">
+    <circle cx="12" cy="12" r="10" />
+    <line x1="2" y1="12" x2="22" y2="12" />
+    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+  </svg>
+);
+
+/**
+ * EXCEPTION 1: stroke is the literal #4e2277, not currentColor, and not the
+ * --primary-color variable either. That means it does NOT follow dark mode --
+ * shipped behaviour, reproduced as-is.
+ */
+export const WorkflowIcon = () => (
+  <svg
+    className="workflow-icon"
+    xmlns="http://www.w3.org/2000/svg"
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="#4e2277"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M6 3v12" />
+    <circle cx="6" cy="18" r="3" />
+    <path d="M6 9a9 9 0 0 1 9 9" />
+    <circle cx="15" cy="21" r="3" />
+  </svg>
+);
+
+export const MenuIcon = () => (
+  <svg {...stroked} width="24" height="24">
+    <line x1="3" y1="12" x2="21" y2="12" />
+    <line x1="3" y1="6" x2="21" y2="6" />
+    <line x1="3" y1="18" x2="21" y2="18" />
+  </svg>
+);
+
+export const SendIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <line x1="22" y1="2" x2="11" y2="13" />
+    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+  </svg>
+);
+
+/** The avatar on every agent/system bubble. */
+export const BotIcon = () => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width="28"
+    height="28"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className="lucide lucide-bot"
+  >
+    <path d="M12 8V4H8" />
+    <rect width="16" height="12" x="4" y="8" rx="2" />
+    <path d="M2 14h2" />
+    <path d="M20 14h2" />
+    <path d="M15 13v2" />
+    <path d="M9 13v2" />
+  </svg>
+);
+
+/** Injected next to each entry in the manual agent list (AGENT_ICON_SVG). */
+export const AgentIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <path d="M3 12a9 9 0 1 0 2.6-6.36" />
+    <polyline points="3 4 3 12 11 12" />
+  </svg>
+);
+
+/** The separator between workflow breadcrumb chips. */
+export const BreadcrumbSeparatorIcon = () => (
+  <svg {...stroked} width="14" height="14">
+    <polyline points="9 18 15 12 9 6" />
+  </svg>
+);

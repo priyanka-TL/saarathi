@@ -1,0 +1,138 @@
+# Saarthi frontend (React 19 + Vite 6)
+
+A single-screen chat client. Ported from a 1,344-line vanilla-JS file and one
+Jinja template, with the stylesheet copied **byte-for-byte**.
+
+## Setup
+
+```bash
+cp .env.example .env      # ONE config file
+npm install
+npm run dev               # http://localhost:5173 (APPLICATION_DEV_PORT)
+npm run build             # -> dist/
+npm test                  # vitest
+```
+
+The backend's `FRONTEND_ORIGINS` must list this origin, or the browser blocks
+every call.
+
+## Configuration
+
+Nothing is hardcoded — no backend host, port, or API path. Two sources, in
+priority order, resolved once in `src/config/env.js`:
+
+1. **`window.__APP_CONFIG__`**, set by `config.js` (from `public/config.js`,
+   copied to the `dist/` root). Read at **runtime**, so one built bundle can be
+   promoted dev → QA → prod by editing three lines next to `index.html` — no
+   rebuild. A blank value or a missing file falls through to (2).
+2. **`import.meta.env.APPLICATION_*`**, from `.env` at **build** time. Vite
+   inlines these into the bundle, which is why they alone cannot repoint a
+   deployed artifact — and why one `.env` is enough: environments differ
+   through `config.js`, not through a second file.
+
+| Variable | Meaning |
+|---|---|
+| `APPLICATION_API_BASE_URL` | Complete backend base URL, INCLUDING the service prefix and `/api/`, e.g. `http://127.0.0.1:8000/saarathi-service/api/`. Empty ⇒ same origin as the page |
+| `APPLICATION_DEV_PORT` | Vite dev server port (must be in the backend's `FRONTEND_ORIGINS`) |
+
+`API_BASE_URL` (from `APPLICATION_API_BASE_URL`, or `config.js` at runtime) is
+the axios `baseURL` directly — no prefix is appended to it. The paths
+themselves live in `src/api/endpoints.js` and stay relative. So repointing the
+app is a base-URL change and touches no call site.
+
+## Layout
+
+```
+src/
+├── main.jsx  App.jsx  routes/  pages/  layouts/
+├── styles/style.css      VERBATIM copy of the Flask stylesheet -- see below
+├── styles/root.css       additive rules only (currently one)
+├── api/                  http (axios) + endpoints (every path, in one place)
+│                         + agents · conversations · chat · sessions
+├── config/env.js         the ONE place a backend URL is resolved
+├── constants/            storage keys, poll intervals, breakpoint, ALL user-visible copy
+├── context/              ConversationContext -- the per-conversation state
+├── hooks/                useChatMessages · useSendMessage · useConversation
+│                         useSessionLifecycle · usePollRegistry · useAgents
+│                         useRecentConversations
+├── services/             resumeFlow (the 202 retry loop)
+├── utils/                time · markdown · url · storage
+└── components/           icons/ · sidebar/ · chat/ · common/
+```
+
+`assets/` is empty on purpose: every graphic is an inline SVG because
+`stroke="currentColor"` picks up CSS variables, which an `<img src="*.svg">`
+cannot do.
+
+## style.css is a verbatim copy — keep it that way
+
+```bash
+diff ../../saarathi-poc/static/css/style.css src/styles/style.css   # must be empty
+```
+
+That `diff` is the CSS parity gate. Additive rules go in `root.css`, never in
+`style.css`. The file carries a lot of load-bearing detail that would not
+survive being re-expressed: a deliberate specificity trick
+(`.message-content a.report-link:hover` exists to beat `.message-content
+a:hover`; scope it and the download link goes purple-on-purple invisible), two
+*different* collapse techniques (`max-height` for the Advanced panel, CSS-grid
+`1fr→0fr` for the workflow banner), five `@keyframes`, a 24px graph-paper body
+background, and one `@media (max-width: 768px)` block where the sidebar slides
+in **from the right**.
+
+### `#root { display: contents }`
+
+The single most important line in `root.css`. `style.css` builds its height
+chain as `body { height: 100vh } > .app-container { height: 100% }`. Vite
+inserts `<div id="root">` between them, so `height: 100%` would resolve against
+an auto-height box and the whole app would collapse to content height.
+`display: contents` makes `#root` generate no box at all.
+
+Verified: **0 differing pixels out of 1.6 million** against the Flask UI at
+1440×900 and 375×812.
+
+## Refs, not state
+
+Most conversation state lives in refs (`ConversationContext`), because every
+value is read inside an async callback mid-turn where a state read would be
+stale. The important one:
+
+**`busyRef` is a synchronous mutex.** `if (busy) return; busy = true;` must take
+effect immediately. React `setState` is asynchronous and batched, so a
+state-based guard lets two rapid clicks both through — and two user messages in
+flight is exactly what Mitra merges into one, **destroying an answer with no
+error surfaced anywhere**. The paired `isBusy` state exists only to disable the
+textarea and show the typing indicator.
+
+The capability buttons additionally hold a per-button `pendingRef`, because
+their handler `await`s `resetConversation()` and the global mutex is still free
+during that window.
+
+## Behaviours that look like bugs and are not
+
+* **The manual agent list renders empty.** `SIDEBAR_HIDDEN_KEYS` hides the
+  three current agents — two are reached via the capability buttons, one is
+  the router's default. Driven by live registry data, not dead code.
+* **Dark mode is unreachable.** The CSS is complete, but the toggle is
+  commented out in the original markup. `localStorage.theme` is still read at
+  boot, so a previously stored preference applies.
+* **`Public Sans` is requested but never loaded**, so the wordmark renders in
+  the fallback. Adding the font would change its metrics.
+* **Enter and Send validate differently.** The textarea is `required`; clicking
+  Send triggers native validation, while Enter dispatches a *synthetic* submit
+  event which skips it. Use `dispatchEvent`, never `requestSubmit()` — the
+  latter would run validation and silently change the Enter path.
+* **The textarea does not re-measure on submit**, so it snaps back to one row.
+* **Auto-scroll is unconditional** — no "user scrolled up" detection.
+* **The sidebar list is never refetched**, only patched locally after a turn.
+* **`<StrictMode>` is deliberately absent** (`main.jsx` says why): its dev-only
+  double-invocation would double-fire the boot fetches and double-create
+  conversations.
+
+## marked + dompurify are pinned exactly
+
+`marked@15.0.12` and `dompurify@3.4.12` — the exact versions jsDelivr was
+serving to the Flask app. `marked` changed heading-id, mangling and smart-quote
+defaults across majors, so an unpinned upgrade would silently alter every agent
+reply. Only agent messages are rendered as HTML; everything else renders as
+text, which React escapes.

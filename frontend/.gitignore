@@ -1,0 +1,9 @@
+node_modules/
+dist/
+
+# The single config file. See .env.example for the template.
+.env
+.env.local
+
+# A locally-pointed runtime config. public/config.js itself IS committed.
+public/config.local.js

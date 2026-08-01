@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Saarthi</title>
+    <!--
+        Runtime configuration. MUST stay in <head>, above everything: it is a
+        classic script (executes the moment it is parsed) and the app bundle is
+        a module (deferred), so this guarantees window.__APP_CONFIG__ exists
+        before src/config/env.js reads it. `vite build` injects the entry
+        module into <head> too -- putting this in <body> would leave the
+        ordering to defer semantics for no reason.
+
+        Relative src on purpose: an absolute /config.js would 404 if the SPA
+        were ever served under a sub-path. Not bundled -- Vite copies
+        public/config.js to the dist root, where a deploy overwrites it to
+        repoint the same build at another backend. Its absence is harmless:
+        env.js falls back to the build-time APPLICATION_* value.
+    -->
+    <script src="./config.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!--
+        Copied verbatim from the Flask template. Note that style.css asks for
+        'Public Sans' on .brand-text h1 and it is NOT in this list -- that is
+        the shipped behaviour, and the wordmark renders in the fallback.
+        Adding it here would change the wordmark's metrics.
+    -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <!--
+        The two CDN <script> tags (dompurify, marked) are gone: both are npm
+        dependencies now, pinned to the exact versions jsDelivr was serving, so
+        markdown rendering is byte-identical without the load-order hazard the
+        original HTML comment warned about. See src/utils/markdown.js.
+    -->
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+</body>
+
+</html>

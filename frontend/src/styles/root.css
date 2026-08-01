@@ -1,0 +1,26 @@
+/*
+ * Additive rules only. style.css is a BYTE-FOR-BYTE copy of the Flask app's
+ * stylesheet and must stay that way -- `diff` against it is a CI gate, so any
+ * new rule belongs here instead.
+ */
+
+/*
+ * THE ONE RULE THAT MAKES THE LAYOUT WORK.
+ *
+ * style.css builds its height chain as:
+ *     body { display: flex; height: 100vh / 100dvh; overflow: hidden }
+ *       > .app-container { width: 100vw; height: 100% }
+ *
+ * Vite inserts <div id="root"> between them. `.app-container`'s `height: 100%`
+ * would then resolve against #root, which has auto height -- so the whole app
+ * collapses to content height, the sidebar loses its scroll container, and
+ * .chat-messages' internal scrolling stops working.
+ *
+ * `display: contents` makes #root generate no box at all, so .app-container
+ * becomes a direct flex item of <body> exactly as it was under Flask. This is
+ * a zero-change fix: no second flex container, no extra percentage-height
+ * resolution step.
+ */
+#root {
+    display: contents;
+}
