@@ -1,0 +1,25 @@
+{
+  "_comment": "GET /api/get-story/?session=<id> — PDF has been generated. Walk results[0].story_media[], find entry where media_type == 'application/pdf', return public_url. URL must be https + allowlisted before being returned to callers.",
+  "count": 1,
+  "results": [
+    {
+      "id": "story-uuid-789xyz",
+      "session": "mitra-session-abc123",
+      "title": "Priya's Teaching Journey",
+      "story_media": [
+        {
+          "id": 101,
+          "media_type": "application/pdf",
+          "public_url": "https://mitra.example.com/media/stories/story-uuid-789xyz.pdf",
+          "created_at": "2026-07-28T10:05:00Z"
+        },
+        {
+          "id": 102,
+          "media_type": "image/png",
+          "public_url": "https://mitra.example.com/media/stories/story-uuid-789xyz-cover.png",
+          "created_at": "2026-07-28T10:05:01Z"
+        }
+      ]
+    }
+  ]
+}

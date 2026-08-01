@@ -1,0 +1,5 @@
+{
+  "_comment": "Legacy envelope type 'session_end' seen in Node bot reference client. No 'text' dict — top-level type field only.",
+  "type": "session_end",
+  "message": "Session has ended."
+}

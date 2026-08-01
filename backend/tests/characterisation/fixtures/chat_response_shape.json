@@ -1,0 +1,24 @@
+{
+  "_comment": "Shape of a successful POST /api/chat response. Types, not values -- LLM text is not a contract, but the key set is. Later phases may only ADD keys; removing or renaming one breaks static/js/main.js.",
+  "top_level_keys": ["agent_name", "flow", "response", "status", "conversation_id", "agent_key", "agent_type", "options", "session"],
+  "types": {
+    "agent_name": "str",
+    "response": "str",
+    "status": "str",
+    "flow": "dict",
+    "conversation_id": "str",
+    "agent_key": "str",
+    "agent_type": "str",
+    "options": "list",
+    "session": "NoneType | dict"
+  },
+  "constants": {
+    "status": "success"
+  },
+  "flow_keys": ["current_index", "stops", "title"],
+  "flow_types": {
+    "current_index": "int",
+    "stops": "list[str]",
+    "title": "str"
+  }
+}

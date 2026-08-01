@@ -1,0 +1,15 @@
+{
+  "_comment": "§1.3 extra_content shape 3 — {sources: [...]}. Free-flow RAG citations. Each source becomes a ParsedOption surfaced as a tappable citation.",
+  "text": {
+    "msg": "Here are some resources on teaching methodologies:",
+    "source": "bot",
+    "finish_reason": "stop",
+    "step": 0,
+    "extra_content": {
+      "sources": [
+        {"url": "https://example.com/teaching-101", "title": "Teaching 101", "text": "Intro to pedagogy"},
+        {"url": "https://example.com/active-learning", "title": "Active Learning", "text": "Engagement strategies"}
+      ]
+    }
+  }
+}

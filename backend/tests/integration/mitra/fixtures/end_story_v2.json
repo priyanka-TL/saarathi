@@ -1,0 +1,7 @@
+{
+  "_comment": "POST /api/end-story/v2/ — story synthesis completed. Token sent in Authorization: Bearer header (v2 endpoint). v1 read token from the body — do NOT use v1 shape. From chatbot/views/story_views.py:71-111.",
+  "status": "ok",
+  "message": "Story created",
+  "id": "story-uuid-789xyz",
+  "content": "Priya is a dedicated teacher who has spent 15 years nurturing young minds in rural Karnataka."
+}

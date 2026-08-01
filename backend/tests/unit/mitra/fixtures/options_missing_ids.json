@@ -1,0 +1,16 @@
+{
+  "_comment": "State machine options with no id field — parser must synthesise an id from ordinal position.",
+  "text": {
+    "msg": "Pick one:",
+    "source": "bot",
+    "finish_reason": "stop",
+    "step": 2,
+    "extra_content": {
+      "question": "Pick one:",
+      "options": [
+        {"text": "Yes"},
+        {"text": "No"}
+      ]
+    }
+  }
+}

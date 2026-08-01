@@ -1,0 +1,54 @@
+schema_version: 1
+key: capture_discussion
+name: "Capture Discussions"
+description: >-
+  Guided interview that distils the important points from a community discussion.
+  Use when the user wants to record, summarise or capture a meeting or group conversation.
+agent_type: remote_flow
+sort_order: 15
+capabilities: [guided_interview, discussion_capture, multilingual]
+remote:
+  provider: mitra
+  flow_name: guest-discussion
+  bot_route_env: MITRA_DISCUSSION_BOT_ROUTE
+  company_env: MITRA_COMPANY
+  # v1, NOT v2 -- and this one is about the PDF, not about which table resolves
+  # the bot. v1 (create_story_object) is the ONLY Mitra path with a chaupal
+  # branch: flow == GuestDiscussion -> save_chaupal_report -> get_story_html
+  # -> get_mom_report_html, the minutes-of-meeting report. v2 (generate_story)
+  # has no such branch: it always runs save_generic_story and renders through
+  # get_html_from_template, which RETURNS AN EMPTY STRING when no PDFTemplates
+  # row matches this flow -- and save_project_story feeds that empty string
+  # straight to Gotenberg. The result is a valid, downloadable, completely
+  # BLANK PDF: story created, story_media row present, get-story 200, nothing
+  # logged. That is the bug this setting fixes.
+  finalize_path: /api/end-story/
+  # The discussion flow uses NO token anywhere. MitraChannel._authenticate
+  # already sends `access_token: None` on the WebSocket, and Mitra's own client
+  # for this flow posts `access_token: null` to end-story
+  # (elevate-chat-bot-interface-service storyPostSessionService._callEndStory).
+  # Sending one here made Mitra set auth=True and look up an AUTH-typed PDF
+  # template instead of the GUEST one -- a second, independent route to the
+  # same empty-template branch above.
+  finalize_as_guest: true
+routing:
+  keywords: ["capture discussion", "capture a discussion", "record discussion",
+             "meeting notes", "community discussion", "chaupal"]
+  priority: 88
+  pin_session: true
+  # PHRASES, not the bare RoutingSpec defaults ["/exit", "cancel", "stop"].
+  # Exit matching is exact (RouterService._is_exit), but "stop" and "cancel" are
+  # perfectly ordinary one-word answers to this interview's own questions --
+  # "Is there any other challenge you'd like to share?" -- and abandoning the
+  # session is irreversible while a missed command is trivially recoverable.
+  # record_stories already uses phrases for the same reason.
+  exit_keywords: ["/exit", "cancel interview", "stop interview", "end discussion"]
+  router_selectable: true
+  direct_selectable: true
+
+memory: { strategy: none }              # mitra owns interview state entirely
+# Declared, and now actually enforced (RateLimits in services/orchestration.py;
+# it was a no-op stub, so every limits block in every agent YAML was decorative
+# and an interview had no turn ceiling at all). Matches record_stories.
+limits: { max_turns: 60, rate_limit_per_conversation_per_min: 20 }
+features: { emit_options: true }

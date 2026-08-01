@@ -1,0 +1,37 @@
+requests==2.34.2
+python-dotenv==1.2.2
+fastapi==0.115.14
+uvicorn[standard]==0.32.1
+langchain==1.3.11
+langchain-core==1.4.8
+langchain-community==0.4.2
+litellm==1.93.0
+langchain-litellm==0.7.0
+ddgs==9.14.4
+
+pytest==9.1.1
+pytest-socket==0.8.0
+# Starlette's TestClient transport. Also what the parity recorder uses.
+httpx
+
+SQLAlchemy>=2.0
+alembic
+psycopg[binary]
+pydantic>=2
+pydantic-settings
+PyYAML
+websocket-client
+json-repair
+pytest-cov
+responses
+PyJWT
+import-linter
+# scripts/verify_discussion_report.py only -- the app must never import this.
+# A blank report PDF is invisible to every in-app check (Mitra returns 200 with
+# a valid, empty file), so verifying it means extracting the text.
+pypdf
+
+# gunicorn is deliberately NOT here. MITRA_ENABLED=1 requires a single worker
+# process (MitraSessionManager pools live WebSockets in process memory), so the
+# only thing a process manager would add is a way to violate that. Run uvicorn
+# directly and scale with THREADPOOL_SIZE. See app/core/runtime.py.

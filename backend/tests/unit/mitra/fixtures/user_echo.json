@@ -1,0 +1,7 @@
+{
+  "_comment": "§1.2 — async_consumer.py:88-96. Mitra echoes the user's OWN message back with source:user before dispatching to Celery. Must be discarded — without this filter it appears as a second 'assistant' message in the transcript.",
+  "text": {
+    "msg": "Tell me your name",
+    "source": "user"
+  }
+}

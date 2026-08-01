@@ -1,0 +1,9 @@
+{
+  "_comment": "POST /api/profile/ — user ALREADY EXISTS (the POC uses one static token, so this profile is always found). Mitra upserts: same email+company pair returns the existing profile id. Response shape from chatbot/views/api_views.py.",
+  "id": 1355,
+  "email": "1355@shikshalokam.org",
+  "name": "Priyanka Pradeep",
+  "company": "shikshalokamstaging",
+  "latest_flow_used": "guest-mi-story",
+  "created": false
+}

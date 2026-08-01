@@ -1,0 +1,14 @@
+{
+  "_comment": "§1.3 extra_content shape 2 — {problem_statement, should_move_forward, validation}. mitra_bedrock_tasks.py:79-83. Machine signal, no UI choices.",
+  "text": {
+    "msg": "Your story looks complete. Let me proceed to the next step.",
+    "source": "bot",
+    "finish_reason": "stop",
+    "step": 5,
+    "extra_content": {
+      "problem_statement": "User has not mentioned their role clearly.",
+      "should_move_forward": true,
+      "validation": "Story is sufficient to proceed."
+    }
+  }
+}

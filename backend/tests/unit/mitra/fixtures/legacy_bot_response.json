@@ -1,0 +1,6 @@
+{
+  "_comment": "Legacy envelope type 'bot_response'. Node bot reference client variant.",
+  "type": "bot_response",
+  "msg": "Hello! How can I help you today?",
+  "finish_reason": "stop"
+}

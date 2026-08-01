@@ -1,0 +1,49 @@
+schema_version: 1
+key: record_stories
+name: "Record Stories"
+description: >-
+  Guided multi-turn interview that captures a practitioner's improvement story
+  and produces a written narrative and PDF report. Use when the user wants to
+  record, capture, narrate or submit a story or field experience.
+agent_type: remote_flow
+status: enabled
+sort_order: 10
+capabilities: [guided_interview, story_capture, pdf_report, multilingual]
+
+remote:
+  provider: mitra
+  flow_name: guest-mi-story
+  bot_route_env: MITRA_STORY_BOT_ROUTE      # §1.6 — explicit, never inferred from a name
+  company_env: MITRA_COMPANY                # §1.8 — (email, company) identifies the profile
+  default_language: en
+  supported_languages: [en, hi, kn, te]
+  handshake: { settle_ms: 1500, timeout_ms: 5000 }
+  turn:
+    first_turn_timeout_ms: 60000
+    turn_timeout_ms: 45000
+    idle_gap_ms: 8000
+  completion_poll_every_turn: true
+  # v1, NOT v2. v2 resolves the story bot via Flow.objects.get(flow_route=flow),
+  # and Mitra has no Flow row for 'guest-mi-story' -- only 'guest-discussion'
+  # is registered there (verified against QA: GET /api/flow-connection-info/
+  # ?flow_route=guest-mi-story returns 404). v2 turns that missing row into an
+  # HTTP 500, so every story finalisation failed. v1 resolves the same flow
+  # from the SessionFlowName enum -> CompanyBot '/guest-story', which does
+  # exist, and is what the Node bot uses for this flow too.
+  # Move back to /api/end-story/v2/ once Mitra registers the Flow row.
+  finalize_path: /api/end-story/
+  report_media_type: application/pdf
+
+routing:
+  keywords: ["record a story", "capture story", "share my story", "tell my story",
+             "listening at scale", "story capture", "my story"]
+  priority: 90
+  pin_session: true                         # ← the key setting, see §6
+  exit_keywords: ["/exit", "cancel interview", "stop interview", "start over"]
+  router_selectable: true
+  direct_selectable: true
+
+memory: { strategy: none }                  # mitra owns interview state entirely
+limits: { max_turns: 60, rate_limit_per_conversation_per_min: 20 }
+retry:  { max_attempts: 2, retry_on: [timeout, connection_error] }
+features: { emit_options: true }

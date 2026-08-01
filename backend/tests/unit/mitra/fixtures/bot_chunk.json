@@ -1,0 +1,11 @@
+{
+  "_comment": "§1.3 — free_flow_service.py:131-152. Fragment mid-stream. finish_reason is null. Must be accumulated, not emitted as a complete turn.",
+  "text": {
+    "msg": "I am going to ",
+    "source": "bot",
+    "type": "chunk",
+    "finish_reason": null,
+    "step": 3,
+    "extra_content": null
+  }
+}

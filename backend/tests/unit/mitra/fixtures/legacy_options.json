@@ -1,0 +1,9 @@
+{
+  "_comment": "Legacy envelope type 'options'. Top-level choices list.",
+  "type": "options",
+  "msg": "Please choose:",
+  "options": [
+    {"label": "Option A", "value": "a"},
+    {"label": "Option B", "value": "b"}
+  ]
+}

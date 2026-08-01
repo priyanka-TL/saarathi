@@ -1,0 +1,18 @@
+{
+  "_comment": "§1.3 extra_content shape 1 — {question, options}. State-machine with choice buttons. From celery_tasks/handle_message.py:32-62.",
+  "text": {
+    "msg": "Which language would you like to record your story in?",
+    "source": "bot",
+    "finish_reason": "stop",
+    "step": 1,
+    "extra_content": {
+      "question": "Which language would you like to record your story in?",
+      "options": [
+        {"id": "en", "label": "English", "value": "en"},
+        {"id": "hi", "label": "Hindi",   "value": "hi"},
+        {"id": "kn", "label": "Kannada", "value": "kn"},
+        {"id": "te", "label": "Telugu",  "value": "te"}
+      ]
+    }
+  }
+}

@@ -1,0 +1,67 @@
+[importlinter]
+root_package = app
+include_external_packages = True
+
+[importlinter:contract:agents_forbidden]
+name = Agents must not import repositories or a web framework
+type = forbidden
+source_modules =
+    app.agents
+forbidden_modules =
+    app.repositories
+    flask
+    fastapi
+    starlette
+# NOTE: the old `ignore_imports = src.logger -> flask` exemption is deliberately
+# gone. app.core.logger reads a ContextVar instead of flask.g, so nothing under
+# app.agents reaches a web framework even transitively.
+
+[importlinter:contract:repositories_forbidden]
+name = Repositories must not import services
+type = forbidden
+source_modules =
+    app.repositories
+forbidden_modules =
+    app.services
+
+[importlinter:contract:domain_pure]
+name = Domain layer must be pure and import nothing from other app packages
+type = forbidden
+source_modules =
+    app.domain
+forbidden_modules =
+    app.api
+    app.routers
+    app.dependencies
+    app.middleware
+    app.exceptions
+    app.schemas
+    app.utils
+    app.services
+    app.agents
+    app.llm
+    app.tools
+    app.integrations
+    app.repositories
+    app.database
+    app.models
+    app.core
+    app.main
+
+[importlinter:contract:core_is_framework_free]
+name = The framework-agnostic core must not import FastAPI, Starlette or Flask
+type = forbidden
+source_modules =
+    app.domain
+    app.repositories
+    app.services
+    app.agents
+    app.integrations
+    app.llm
+    app.tools
+    app.database
+    app.models
+forbidden_modules =
+    fastapi
+    starlette
+    flask

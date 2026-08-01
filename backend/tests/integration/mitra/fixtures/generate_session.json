@@ -1,0 +1,4 @@
+{
+  "_comment": "GET /api/generate-session/ — allocates a new Mitra session. Response from chatbot/views/api_views.py.",
+  "sessionid": "mitra-session-abc123"
+}

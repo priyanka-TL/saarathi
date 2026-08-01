@@ -1,0 +1,10 @@
+{
+  "_comment": "System/error frame — source:system with error message set.",
+  "text": {
+    "msg": "",
+    "source": "system",
+    "error": "Session timed out",
+    "finish_reason": null,
+    "step": 0
+  }
+}

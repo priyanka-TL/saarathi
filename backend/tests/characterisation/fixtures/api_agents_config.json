@@ -1,0 +1,39 @@
+[
+  {
+    "name": "Saarthi",
+    "description": "Automatically routes your request to the best agent"
+  },
+  {
+    "name": "Record Stories",
+    "description": "Guided multi-turn interview that captures a practitioner's improvement story and produces a written narrative and PDF report. Use when the user wants to record, capture, narrate or submit a story or field experience.",
+    "key": "record_stories",
+    "agent_type": "remote_flow",
+    "capabilities": ["guided_interview", "story_capture", "pdf_report", "multilingual"],
+    "status": "enabled",
+    "sort_order": 10,
+    "supports_options": true,
+    "pin_session": true
+  },
+  {
+    "name": "Capture Discussions",
+    "description": "Guided interview that distils the important points from a community discussion. Use when the user wants to record, summarise or capture a meeting or group conversation.",
+    "key": "capture_discussion",
+    "agent_type": "remote_flow",
+    "capabilities": ["guided_interview", "discussion_capture", "multilingual"],
+    "status": "enabled",
+    "sort_order": 15,
+    "supports_options": true,
+    "pin_session": true
+  },
+  {
+    "name": "General Support Agent",
+    "description": "Handles general inquiries, business hours, and fallback for unrecognized requests.",
+    "key": "general_support",
+    "agent_type": "llm",
+    "capabilities": ["general_qa", "fallback"],
+    "status": "enabled",
+    "sort_order": 30,
+    "supports_options": false,
+    "pin_session": false
+  }
+]

@@ -1,0 +1,30 @@
+{
+  "_comment": "GET /api/companychat/?session=<id> — interview still in progress. results[-1].status is NOT 'COMPLETED'. Per §1.3, finish_reason on the WS fires every turn — it is NOT the completion signal. Only this REST poll is authoritative.",
+  "count": 3,
+  "results": [
+    {
+      "id": 1,
+      "session": "mitra-session-abc123",
+      "sender": "bot",
+      "message": "Tell me about yourself.",
+      "status": "sent",
+      "created_at": "2026-07-28T10:00:00Z"
+    },
+    {
+      "id": 2,
+      "session": "mitra-session-abc123",
+      "sender": "user",
+      "message": "Priya, I am a teacher.",
+      "status": "sent",
+      "created_at": "2026-07-28T10:00:10Z"
+    },
+    {
+      "id": 3,
+      "session": "mitra-session-abc123",
+      "sender": "bot",
+      "message": "Thank you! Can you share more?",
+      "status": "in_progress",
+      "created_at": "2026-07-28T10:00:20Z"
+    }
+  ]
+}

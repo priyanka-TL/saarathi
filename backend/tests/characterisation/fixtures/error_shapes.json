@@ -1,0 +1,15 @@
+{
+  "_comment": "Error response bodies as of module 5.7. request_id is dynamic (a uuid per request) and is checked for presence separately in the test, not pinned here.",
+  "agent_not_found": {
+    "status_code": 404,
+    "body": { "status": "error", "error": "Agent not found", "error_code": "AGENT_NOT_FOUND" }
+  },
+  "no_message": {
+    "status_code": 400,
+    "body": { "status": "error", "error": "No message provided", "error_code": "INVALID_REQUEST" }
+  },
+  "empty_body": {
+    "status_code": 400,
+    "body": { "status": "error", "error": "No message provided", "error_code": "INVALID_REQUEST" }
+  }
+}

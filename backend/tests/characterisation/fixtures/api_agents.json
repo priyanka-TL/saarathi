@@ -1,0 +1,18 @@
+[
+  {
+    "name": "Saarthi",
+    "description": "Automatically routes your request to the best agent"
+  },
+  {
+    "name": "Record Stories",
+    "description": "Guided multi-turn interview that captures a practitioner's improvement story and produces a written narrative and PDF report. Use when the user wants to record, capture, narrate or submit a story or field experience."
+  },
+  {
+    "name": "Capture Discussions",
+    "description": "Guided interview that distils the important points from a community discussion. Use when the user wants to record, summarise or capture a meeting or group conversation."
+  },
+  {
+    "name": "General Support Agent",
+    "description": "Handles general inquiries, business hours, and fallback for unrecognized requests."
+  }
+]

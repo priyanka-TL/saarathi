@@ -1,0 +1,5 @@
+{
+  "_comment": "Legacy envelope type 'error'. Top-level error string.",
+  "type": "error",
+  "error": "Authentication failed"
+}

@@ -1,0 +1,15 @@
+[tool.pytest.ini_options]
+# The backend root must be on sys.path for `from app.llm import ...` to resolve
+# when pytest is invoked from this directory.
+pythonpath = ["."]
+testpaths = ["tests"]
+# --allow-unix-socket is REQUIRED and is not a loosening of the network ban:
+# asyncio's event loop builds its self-pipe with socket.socketpair() (AF_UNIX),
+# which bare --disable-socket blocks, so Starlette's TestClient cannot start at
+# all without it. INET sockets stay blocked, which is the property that keeps
+# the suite from reaching OpenRouter or Mitra. Verified empirically before the
+# characterisation tests were ported.
+addopts = "--disable-socket --allow-unix-socket"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

@@ -1,0 +1,12 @@
+{
+  "_comment": "GET /api/get-story/?session=<id> — PDF not yet generated. story_media is empty. Callers should poll until non-None.",
+  "count": 1,
+  "results": [
+    {
+      "id": "story-uuid-789xyz",
+      "session": "mitra-session-abc123",
+      "title": "Priya's Teaching Journey",
+      "story_media": []
+    }
+  ]
+}
