@@ -41,8 +41,8 @@ APP_ENV=qa MITRA_ENABLED=0 make run
 ```
 app/
 ├── main.py            create_app() + lifespan + middleware + routers
-├── api/router.py      aggregates the five routers IN A FIXED ORDER
-├── routers/           chat · conversations · agents · sessions · admin
+├── api/router.py      aggregates the six routers IN A FIXED ORDER
+├── routers/           chat · conversations · agents · sessions · ui · admin
 ├── dependencies/      db · identity · container · request_context · admin_gate · body
 ├── middleware/        request_id (pure ASGI, not BaseHTTPMiddleware)
 ├── exceptions/        envelope (the standard error body) + handlers
@@ -50,7 +50,9 @@ app/
 ├── utils/             responses (json_response, parse_uuid) · serializers
 ├── core/              settings · logger · context · container · bootstrap
 │                      · runtime (startup guards) · concurrency (threadpool)
-├── config/agents/     the three agent YAMLs
+├── config/agents/     the three agent YAMLs -- a bad one ABORTS STARTUP
+├── config/ui/         capabilities.yaml, presentation config -- a bad one is a
+│                      logged warning and a 404, and never aborts startup
 ├── database/engine.py · models/orm.py
 └── domain/ repositories/ services/ agents/ integrations/mitra/ llm/ tools/
                         <- copied verbatim from the Flask app
@@ -168,6 +170,29 @@ pair is load-bearing: the two endpoints read the user token from different
 places and select different PDF renderers, so `ConfigSyncService` asserts at
 startup that every agent YAML's `finalize_path` matches one of the configured
 pair.
+
+### Presentation config: `app/config/ui/capabilities.yaml`
+
+`GET /api/ui/capabilities` serves the capability cards the frontend's ADVANCED
+panel renders. **This file is the single source for them** — the frontend keeps
+no bundled copy, so if the route 404s the panel renders nothing and the Mitra
+interview entry points are unreachable from the UI.
+
+* It is **not** an agent registry — `GET /api/agents` is. A capability card can
+  group several agents, or none (SG Commons Portal), which the agent catalogue
+  cannot express. An `agentKey` here is a reference, not a registration;
+  `tests/integration/test_ui_capabilities.py` checks every referenced key is
+  defined in `app/config/agents/`.
+* A missing or malformed file is a logged warning and a **404**, not a startup
+  abort. That is *not* because it is unimportant — see above — but because the
+  failure is recoverable by fixing the file, where a bad agent YAML must kill
+  the process to stop it routing real traffic wrongly. **Watch the startup and
+  request logs for the warning**; the symptom otherwise is a silently empty
+  panel.
+
+The file is read per request, not cached at import, so it can be edited and
+picked up with a browser reload — this process must run as a single uvicorn
+worker, so a restart is expensive.
 
 `MITRA_COMPANY`, `MITRA_STORY_BOT_ROUTE` and `MITRA_DISCUSSION_BOT_ROUTE` are
 **not** `Settings` fields — they are resolved by `${VAR}` substitution inside

@@ -1,8 +1,9 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 
-import { CAPABILITY_ACTIONS, SIDEBAR_HIDDEN_KEYS } from '../../constants';
+import { SIDEBAR_HIDDEN_KEYS } from '../../constants';
 import { cx } from '../../utils/cx';
-import { AgentIcon, BrainIcon, ChevronDownIcon, GlobeIcon } from '../icons';
+import { AgentIcon, ChevronDownIcon } from '../icons';
+import CapabilityCard from './CapabilityCard';
 
 /**
  * The collapsible "ADVANCED" panel.
@@ -13,52 +14,20 @@ import { AgentIcon, BrainIcon, ChevronDownIcon, GlobeIcon } from '../icons';
  * relative to the banner's: this one is rotated 180deg when COLLAPSED
  * (`.advanced-toggle[aria-expanded="false"] .chevron`), so aria-expanded must
  * be a real attribute, not just state.
- */
-
-/**
- * One capability action button.
  *
- * Holds its own re-entrancy latch, ported from the original's
- * `dataset.pending`. The global busy flag is NOT enough here: the handler
- * awaits resetConversation() before sending, and during that await the global
- * flag is still false, so a second click would get through.
+ * TWO LISTS, TWO SOURCES. The capability cards come from the capability
+ * document (src/config/capabilities.js and the layers above it); the manual
+ * list underneath comes from GET /api/agents and always did. They are
+ * separate catalogues and are not merged -- an agent reachable from a
+ * capability button is deliberately hidden from the manual list, which is what
+ * SIDEBAR_HIDDEN_KEYS does.
  */
-function CapabilityActionButton({ action, onActivate, isBusy }) {
-  const pendingRef = useRef(false);
-
-  async function handleClick(e) {
-    // The parent card has its own display-only handler; without this it would
-    // also fire and reset the conversation a second time.
-    e.stopPropagation();
-    if (isBusy() || pendingRef.current) return;
-    pendingRef.current = true;
-    try {
-      await onActivate(action);
-    } finally {
-      pendingRef.current = false;
-    }
-  }
-
-  return (
-    <button
-      type="button"
-      className="capability-action-btn"
-      data-agent-key={action.agentKey}
-      data-agent-label={action.label}
-      data-autostart={action.autostart}
-      onClick={handleClick}
-    >
-      {action.label}
-    </button>
-  );
-}
-
 export default function AdvancedSection({
+  capabilities,
   agents,
   activeCard,
   activeAgentKey,
-  onActivateCapability,
-  onSelectDisplayCard,
+  onRunAction,
   onSelectAgent,
   isBusy,
 }) {
@@ -87,47 +56,18 @@ export default function AdvancedSection({
       <div className={cx('advanced-content', collapsed && 'collapsed')} id="advanced-content">
         <div className="capabilities-label">CAPABILITIES</div>
 
-        {/*
-          The CARD carries no agent key -- deliberately. It used to, while
-          containing BOTH action buttons, so any click a few pixels off a
-          button (in the padding, title, description or badge) reset the
-          conversation and pinned the wrong agent, with the banner then
-          showing the raw routing key. The card is display-only; only the
-          buttons route.
-        */}
-        <div
-          className={cx('capability-card', activeCard === 'capability' && 'active')}
-          onClick={() => onSelectDisplayCard('capability', 'Listening at Scale')}
-        >
-          <div className="capability-header">
-            <BrainIcon />
-            <span className="capability-title">Listening at Scale</span>
-          </div>
-          <div className="capability-desc">Synthesize field insights into actionable knowledge</div>
-          <div className="capability-badge">SHIKSHALOKAM</div>
-          <div className="capability-actions">
-            {CAPABILITY_ACTIONS.map((action) => (
-              <CapabilityActionButton
-                key={action.agentKey}
-                action={action}
-                onActivate={onActivateCapability}
-                isBusy={isBusy}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* Display-only too: clicking sets the banner but never routes. */}
-        <div
-          className={cx('highlight-card', activeCard === 'highlight' && 'active')}
-          onClick={() => onSelectDisplayCard('highlight', 'SG Commons Portal')}
-        >
-          <div className="highlight-header">
-            <GlobeIcon />
-            <span className="highlight-title">SG Commons Portal</span>
-          </div>
-          <div className="highlight-desc">AI search for ecosystem assets</div>
-        </div>
+        {capabilities.map((capability) => (
+          <CapabilityCard
+            key={capability.id}
+            capability={capability}
+            // activeCard holds a capability id, so a card only ever compares
+            // the value against its own -- adding capabilities cannot make two
+            // of them light up.
+            isActive={activeCard === capability.id}
+            onRun={onRunAction}
+            isBusy={isBusy}
+          />
+        ))}
 
         <ul id="agent-list" className="agent-list">
           {listedAgents.map((agent) => (

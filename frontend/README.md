@@ -35,6 +35,55 @@ priority order, resolved once in `src/config/env.js`:
 | `APPLICATION_API_BASE_URL` | Complete backend base URL, INCLUDING the service prefix and `/api/`, e.g. `http://127.0.0.1:8000/saarathi-service/api/`. Empty ⇒ same origin as the page |
 | `APPLICATION_DEV_PORT` | Vite dev server port (must be in the backend's `FRONTEND_ORIGINS`) |
 
+## Capabilities are configuration
+
+The cards in the ADVANCED panel are **data**, not markup. Adding a capability,
+reordering one, hiding one, disabling one or attaching another agent to one is
+an edit to `backend/app/config/ui/capabilities.yaml`.
+
+**`GET /api/ui/capabilities` is the only source.** The frontend keeps no
+bundled catalogue and reads no override from `config.js` — one place a
+capability can be defined, so the sidebar cannot disagree with the backend or
+go stale against it.
+
+The consequence is deliberate and worth knowing before you debug it: **with the
+backend unreachable, or the route 404ing, the panel renders no capability
+cards.** An empty panel is honest about the backend being down; a bundled
+fallback would draw buttons whose `POST /api/reset` is going to fail anyway.
+`agents` and `conversations` already degrade to empty the same way.
+
+`src/config/capabilities.js` documents the document shape and holds the two
+closed sets that are code rather than config; `src/hooks/useCapabilities.js`
+does the fetching.
+
+Only `id` + `title` are required (`id` + `label` for an agent). `status` is
+`enabled` | `disabled` | `coming_soon`, `visible: false` removes an entry, and
+`order` defaults to declaration position.
+
+**`action.type` is a closed set**, so configuration selects a behaviour and can
+never inject one:
+
+| type | Behaviour |
+|---|---|
+| `start_agent` | full reset → pin the agent → autostart. Needs `agentKey` |
+| `display_card` | sets the header banner only; never routes |
+| `coming_soon` | raises the sidebar toast. No navigation, no request |
+| `none` | inert |
+
+The table lives in `ChatPage`. A new capability reusing an existing type is a
+pure data change; a genuinely new *kind* of action is one entry there.
+
+`src/config/capabilitySchema.js` normalises the response before a component
+sees it and **never throws**: a single bad entry is dropped, an unknown
+`status` becomes `enabled`, an unknown `action.type` becomes `none`, and an
+unknown `icon` falls back to a default glyph. This config arrives from a file
+an operator edits at deploy time, so a typo must cost one wrong card, not the
+whole panel.
+
+The manual agent list underneath is a **separate** catalogue, from
+`GET /api/agents`, and always was. The two are not merged — see
+`SIDEBAR_HIDDEN_KEYS`.
+
 `API_BASE_URL` (from `APPLICATION_API_BASE_URL`, or `config.js` at runtime) is
 the axios `baseURL` directly — no prefix is appended to it. The paths
 themselves live in `src/api/endpoints.js` and stay relative. So repointing the
@@ -50,6 +99,9 @@ src/
 ├── api/                  http (axios) + endpoints (every path, in one place)
 │                         + agents · conversations · chat · sessions
 ├── config/env.js         the ONE place a backend URL is resolved
+├── config/capabilities.js + capabilitySchema.js
+│                         the capability document's contract + validator.
+│                         The DATA lives on the backend -- see below
 ├── constants/            storage keys, poll intervals, breakpoint, ALL user-visible copy
 ├── context/              ConversationContext -- the per-conversation state
 ├── hooks/                useChatMessages · useSendMessage · useConversation
@@ -113,6 +165,11 @@ during that window.
 * **The manual agent list renders empty.** `SIDEBAR_HIDDEN_KEYS` hides the
   three current agents — two are reached via the capability buttons, one is
   the router's default. Driven by live registry data, not dead code.
+* **No backend ⇒ no capability cards.** The panel has no bundled fallback by
+  design; `GET /api/ui/capabilities` is its only source. If the cards are
+  missing, check that request before suspecting the config.
+* **The `.highlight-*` rules in `style.css` are now unused.** SG Commons Portal
+  renders as a capability card. They stay because `style.css` is byte-for-byte.
 * **Dark mode is unreachable.** The CSS is complete, but the toggle is
   commented out in the original markup. `localStorage.theme` is still read at
   boot, so a previously stored preference applies.

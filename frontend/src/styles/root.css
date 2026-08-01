@@ -24,3 +24,107 @@
 #root {
     display: contents;
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * Config-driven capability states.
+ *
+ * The enabled capability card is styled entirely by style.css and is NOT
+ * touched here -- these rules only add the two states that did not exist when
+ * the cards were hand-written markup: "not enterable yet" and "switched off".
+ *
+ * Every colour below is an existing custom property, so dark mode follows for
+ * free without a second [data-theme="dark"] block.
+ * ---------------------------------------------------------------------------
+ */
+
+/* Status pill: 'Coming soon', next to a capability title or in an agent
+ * button. Sized off the .capability-badge it sits near, but neutral rather
+ * than green -- the badge means "who owns this", the pill means "not yet". */
+.capability-status-pill {
+    display: inline-block;
+    margin-left: auto;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.55rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 2px 5px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+/* `margin-left: auto` pushes the pill to the right edge of .capability-header,
+ * which is already a flex row. An agent button is not a flex container, so the
+ * pill trails the label there instead. */
+.capability-action-btn .capability-status-pill {
+    margin-left: 6px;
+}
+
+/*
+ * status: 'disabled' -- present, visibly inert. Kept legible rather than
+ * ghosted (0.55 not 0.3) because the label is the only explanation the user
+ * gets for why nothing happens.
+ */
+.capability-card.is-disabled,
+.capability-action-btn.is-blocked {
+    opacity: 0.55;
+}
+
+.capability-card.is-disabled,
+.capability-card.is-disabled:hover,
+.capability-action-btn.is-blocked:hover {
+    cursor: default;
+    background: var(--card-bg);
+    border-color: var(--border-color);
+}
+
+/*
+ * A coming-soon CARD is not dimmed: it keeps its normal hover, because it is
+ * still clickable -- the click raises the toast. Only the pill marks it.
+ */
+
+/*
+ * ---------------------------------------------------------------------------
+ * Sidebar toast.
+ *
+ * Last child of .sidebar, in normal flow rather than position: fixed, so it
+ * cannot cover the chat pane or the composer -- "non-intrusive" is a layout
+ * property here, not just a duration. It renders nothing when there is no
+ * message, so it reserves no space.
+ * ---------------------------------------------------------------------------
+ */
+.sidebar-toast {
+    flex-shrink: 0;
+    margin-top: 12px;
+    padding: 10px 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    line-height: 1.4;
+    cursor: pointer;
+    animation: sidebar-toast-in 0.2s ease;
+}
+
+@keyframes sidebar-toast-in {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* The app has no other motion-reduction handling, but this is the only piece
+ * of chrome that animates itself into view unprompted. */
+@media (prefers-reduced-motion: reduce) {
+    .sidebar-toast {
+        animation: none;
+    }
+}

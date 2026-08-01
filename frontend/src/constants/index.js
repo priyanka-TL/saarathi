@@ -82,20 +82,9 @@ export const COPY = {
   checkForReply: 'Check for reply',
   checking: 'Checking…',
   checkAgain: 'Check again',
-};
 
-// The two hardcoded capability buttons. These are the real entry points into
-// the Mitra interviews; `autostart` is sent with autostart:true so the server
-// does not title the conversation from it.
-export const CAPABILITY_ACTIONS = [
-  {
-    agentKey: 'record_stories',
-    label: 'Record Stories',
-    autostart: 'I want to record a story',
-  },
-  {
-    agentKey: 'capture_discussion',
-    label: 'Capture Discussions',
-    autostart: 'I want to capture a discussion',
-  },
-];
+  // Appended to a capability's title when its config supplies no explicit
+  // `action.message`. Capability TITLES are not here on purpose -- they are
+  // configuration (src/config/capabilities.js), not fixed copy.
+  comingSoonSuffix: 'is coming soon.',
+};

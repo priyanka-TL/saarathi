@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.routers import admin, agents, chat, conversations, sessions
+from app.routers import admin, agents, chat, conversations, sessions, ui
 
 api_router = APIRouter()
 
@@ -27,4 +27,5 @@ api_router.include_router(chat.router)
 api_router.include_router(conversations.router)
 api_router.include_router(agents.router)
 api_router.include_router(sessions.router)
+api_router.include_router(ui.router)
 api_router.include_router(admin.router)

@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import ChatInput from '../components/chat/ChatInput.jsx';
 import MessageList from '../components/chat/MessageList.jsx';
 import TypingIndicator from '../components/chat/TypingIndicator.jsx';
 import WorkflowBanner from '../components/chat/WorkflowBanner.jsx';
+import { useToast } from '../components/common/Toast.jsx';
 import Sidebar from '../components/sidebar/Sidebar.jsx';
+import { ACTION_TYPES } from '../config/capabilities';
 import { COPY, MOBILE_MAX_WIDTH } from '../constants';
 import { useConversationContext } from '../context/ConversationContext.jsx';
 import { useAgents } from '../hooks/useAgents';
+import { useCapabilities } from '../hooks/useCapabilities';
 import { useChatMessages } from '../hooks/useChatMessages';
 import { useConversation } from '../hooks/useConversation';
 import { usePollRegistry } from '../hooks/usePollRegistry';
@@ -41,7 +44,9 @@ export default function ChatPage() {
   const messages = useChatMessages();
   const polls = usePollRegistry();
   const { agents, loadAgents } = useAgents();
+  const { capabilities, loadCapabilities } = useCapabilities();
   const { conversations, loadRecent, upsert } = useRecentConversations();
+  const toast = useToast();
 
   const [banner, setBanner] = useState(HIDDEN_BANNER);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -119,6 +124,9 @@ export default function ChatPage() {
 
     loadAgents();
     loadRecent();
+    // Last of the three, and the only one whose failure is invisible: the
+    // sidebar already rendered from config.js / the bundled default.
+    loadCapabilities();
     if (conversationId) loadConversationHistory(conversationId);
     // Intentionally runs once; `conversationId` is read from storage at mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -154,14 +162,17 @@ export default function ChatPage() {
 
   /** A capability action button: full reset, pin the agent, autostart. */
   const handleActivateCapability = useCallback(
-    async (action) => {
+    async (action, { capabilityId, label }) => {
       // MUST await: startNewConversation assigns the new id, and sending
       // before it resolves would post against the conversation being left.
       await startNewConversation();
       clearActiveItems();
-      setActiveCard('capability');
+      // The card that owns the button lights up. Before capabilities were
+      // configuration this was the literal 'capability'; the value is only
+      // ever compared against a card's own id, so behaviour is unchanged.
+      setActiveCard(capabilityId);
       currentAgentKeyRef.current = action.agentKey;
-      setContextBanner(action.label, COPY.storyCapture);
+      setContextBanner(label, COPY.storyCapture);
       closeSidebarOnMobile();
       if (action.autostart) {
         // autostart:true so the server does not title the conversation from it.
@@ -178,15 +189,59 @@ export default function ChatPage() {
     ],
   );
 
-  /** The capability/highlight CARDS are display-only: they never route. */
+  /** The capability CARDS are display-only: they never route. */
   const handleSelectDisplayCard = useCallback(
-    (card, title) => {
+    (action, { capabilityId, label }) => {
       clearActiveItems();
-      setActiveCard(card);
-      setContextBanner(title, title);
+      setActiveCard(capabilityId);
+      setContextBanner(label, label);
       closeSidebarOnMobile();
     },
     [clearActiveItems, closeSidebarOnMobile, setContextBanner],
+  );
+
+  /**
+   * A capability that cannot be entered yet.
+   *
+   * Does exactly one thing: shows the sidebar toast. In particular it does NOT
+   * close the sidebar on mobile (that would hide the toast it just raised),
+   * does not touch the banner, does not clear the active card, and issues no
+   * request. "Non-intrusive, and navigates nowhere."
+   */
+  const handleComingSoon = useCallback(
+    (action, { label }) => {
+      toast.show(action.message || `${label} ${COPY.comingSoonSuffix}`);
+    },
+    [toast],
+  );
+
+  /**
+   * type -> handler. The ONE bridge between configuration and behaviour.
+   *
+   * Config selects from this table; it can never introduce a behaviour that is
+   * not in it. So a new capability that reuses an existing type is a pure data
+   * change, while a genuinely new KIND of action is one entry here -- which is
+   * the right place for that decision to be visible.
+   */
+  const capabilityActions = useMemo(
+    () => ({
+      [ACTION_TYPES.startAgent]: handleActivateCapability,
+      [ACTION_TYPES.displayCard]: handleSelectDisplayCard,
+      [ACTION_TYPES.comingSoon]: handleComingSoon,
+      [ACTION_TYPES.none]: () => {},
+    }),
+    [handleActivateCapability, handleComingSoon, handleSelectDisplayCard],
+  );
+
+  const handleRunAction = useCallback(
+    (action, context) => {
+      const run = capabilityActions[action?.type];
+      // Unknown types are already normalised to 'none', so this only guards
+      // against a future action type reaching an older bundle.
+      if (!run) return undefined;
+      return run(action, context);
+    },
+    [capabilityActions],
   );
 
   const handleSelectAgent = useCallback(
@@ -274,12 +329,13 @@ export default function ChatPage() {
           onSelectConversation={handleSelectConversation}
           onNewChat={handleNewChat}
           agents={agents}
+          capabilities={capabilities}
           activeCard={activeCard}
           activeAgentKey={activeAgentKey}
-          onActivateCapability={handleActivateCapability}
-          onSelectDisplayCard={handleSelectDisplayCard}
+          onRunAction={handleRunAction}
           onSelectAgent={handleSelectAgent}
           isBusy={isBusyNow}
+          toast={toast}
         />
       }
       banner={<WorkflowBanner banner={banner} />}

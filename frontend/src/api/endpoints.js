@@ -13,6 +13,10 @@
 
 export const AGENTS = 'agents';
 
+// Presentation config for the sidebar -- its ONLY source. A 404 here means the
+// ADVANCED panel renders no capability cards.
+export const UI_CAPABILITIES = 'ui/capabilities';
+
 export const CHAT = 'chat';
 export const RESET = 'reset';
 

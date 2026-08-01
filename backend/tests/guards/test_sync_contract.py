@@ -127,6 +127,13 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
     """The full route surface, pinned.
 
     GET / is deliberately absent -- the React app serves the shell now.
+
+    GET /api/ui/capabilities is the one ADDITION to the Flask surface. It
+    serves the sidebar's capability document, which under Flask was literal
+    markup in templates/index.html and so had no route. It is optional by
+    contract: the frontend ships an identical bundled copy and treats a 404 as
+    "no server opinion" (app/routers/ui.py). Every other entry below is a Flask
+    path that must keep existing.
     """
     expected = {
         ("POST", "/api/chat"),
@@ -146,6 +153,7 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
         ("POST", "/api/agents/{key}/config/{version}/activate"),
         ("POST", "/api/agents/reload"),
         ("GET", "/api/tools"),
+        ("GET", "/api/ui/capabilities"),
     }
     actual = {
         (m, r.path)

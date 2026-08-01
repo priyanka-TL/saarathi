@@ -107,6 +107,7 @@ Everything below is intentional and was verified not to affect any client.
 | Change | Why |
 |---|---|
 | `GET /` and `/static/*` are gone; `GET /healthz` added | React serves the shell now |
+| `GET /api/ui/capabilities` added | The sidebar's capability cards were literal markup in `templates/index.html` and are configuration now, served from `app/config/ui/capabilities.yaml`. The frontend keeps no copy, so this route is **required** for the ADVANCED panel to show anything. See `backend/app/routers/ui.py` |
 | Malformed UUID path segments return a **JSON** 404 instead of Werkzeug's **HTML** 404 | Same status code; the frontend already treats 404 as "forget this conversation". A JSON API should not emit HTML |
 | Unhandled exceptions return the standard JSON envelope instead of an HTML 500 | Same reason |
 | Admin `config/{version}` with a non-integer returns JSON 400 instead of HTML 404 | Same reason; route has no frontend |

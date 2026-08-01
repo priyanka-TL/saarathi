@@ -1,4 +1,5 @@
 import { cx } from '../../utils/cx';
+import Toast from '../common/Toast.jsx';
 import { CloseIcon, PlusIcon } from '../icons';
 import AdvancedSection from './AdvancedSection';
 import BrandCard from './BrandCard';
@@ -23,12 +24,13 @@ export default function Sidebar({
   onSelectConversation,
   onNewChat,
   agents,
+  capabilities,
   activeCard,
   activeAgentKey,
-  onActivateCapability,
-  onSelectDisplayCard,
+  onRunAction,
   onSelectAgent,
   isBusy,
+  toast,
 }) {
   return (
     <aside className={cx('sidebar', open && 'active')} id="sidebar">
@@ -87,14 +89,21 @@ export default function Sidebar({
       </div>
 
       <AdvancedSection
+        capabilities={capabilities}
         agents={agents}
         activeCard={activeCard}
         activeAgentKey={activeAgentKey}
-        onActivateCapability={onActivateCapability}
-        onSelectDisplayCard={onSelectDisplayCard}
+        onRunAction={onRunAction}
         onSelectAgent={onSelectAgent}
         isBusy={isBusy}
       />
+
+      {/*
+        Last child, so it sits at the bottom of the rail under the Advanced
+        panel. Renders nothing when there is no message, which is why it can
+        live in the flex column without reserving space.
+      */}
+      <Toast message={toast?.message} onDismiss={toast?.dismiss} />
     </aside>
   );
 }

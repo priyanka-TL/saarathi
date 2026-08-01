@@ -1,0 +1,80 @@
+# The capability catalogue the sidebar renders, served by GET /api/ui/capabilities.
+#
+# THIS FILE IS PRESENTATION CONFIG, NOT AGENT CONFIG. It decides what the
+# ADVANCED panel shows and what clicking it does. It does NOT register, route to
+# or configure an agent -- that is app/config/agents/*.yaml, which is validated
+# against a pydantic schema and synced into the database at startup. An
+# `agentKey` here is only a reference: naming an unregistered agent produces a
+# button that fails to route, exactly as a mistyped key in the frontend would.
+#
+# UNLIKE the agent YAML, a mistake here does NOT abort startup. The route logs a
+# warning and answers 404, and the frontend falls back to its own bundled copy
+# of this document -- so a bad edit degrades to the shipped UI instead of taking
+# the service down. Keep it that way: presentation config must not be able to
+# stop the API from booting.
+#
+# The frontend mirror is saarathi-poc-new/frontend/src/config/capabilities.js,
+# which documents every field. Summary:
+#
+#   status   enabled | disabled | coming_soon
+#   order    ascending; ties break by declaration order
+#   visible  false removes the entry entirely
+#   icon     a key into the frontend's icon registry, never a path
+#   action   type is one of start_agent | display_card | coming_soon | none
+#
+# Anything unrecognised is dropped or neutralised by the frontend normaliser
+# rather than rendered, so an older bundle tolerates a newer document.
+
+version: 1
+
+capabilities:
+  - id: listening_at_scale
+    title: Listening at Scale
+    description: Synthesize field insights into actionable knowledge
+    icon: brain
+    badge: SHIKSHALOKAM
+    status: enabled
+    order: 10
+    visible: true
+    # The card is display-only. It used to carry an agent key while containing
+    # both buttons, so a click a few pixels off a button reset the conversation
+    # and pinned the wrong agent. Only the buttons route.
+    action:
+      type: display_card
+    agents:
+      # `autostart` is sent with autostart:true so the server does not title the
+      # conversation from it.
+      - id: record_stories
+        label: Record Stories
+        status: enabled
+        order: 10
+        visible: true
+        action:
+          type: start_agent
+          agentKey: record_stories
+          autostart: I want to record a story
+
+      - id: capture_discussion
+        label: Capture Discussions
+        status: enabled
+        order: 20
+        visible: true
+        action:
+          type: start_agent
+          agentKey: capture_discussion
+          autostart: I want to capture a discussion
+
+  - id: sg_commons
+    title: SG Commons Portal
+    description: AI search for ecosystem assets
+    icon: globe
+    badge: null
+    status: coming_soon
+    order: 20
+    visible: true
+    action:
+      type: coming_soon
+      message: SG Commons Portal is coming soon.
+    # No agents yet. The card renders without an actions block rather than with
+    # an empty one.
+    agents: []
