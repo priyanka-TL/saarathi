@@ -14,7 +14,7 @@ def setup_db():
     Session = sessionmaker(bind=engine)
     session = Session()
     
-    session.execute(text("DELETE FROM agent_configurations"))
+    session.execute(text("DELETE FROM agent_configs"))
     session.execute(text("DELETE FROM agents"))
     session.commit()
     
@@ -71,11 +71,11 @@ def test():
         print("--- Run 4: DB Override ---")
         agent_id = session.execute(text("SELECT id FROM agents WHERE key = 'test_agent'")).scalar()
         # deactivate previous
-        session.execute(text("UPDATE agent_configurations SET is_active = false WHERE agent_id = :aid AND version = 1"), {"aid": agent_id})
+        session.execute(text("UPDATE agent_configs SET is_active = false WHERE agent_id = :aid AND version = 1"), {"aid": agent_id})
         
         # insert a DB config
         session.execute(text("""
-            INSERT INTO agent_configurations (agent_id, version, source, checksum, config, is_active, activated_at)
+            INSERT INTO agent_configs (agent_id, version, source, checksum, config, is_active, activated_at)
             VALUES (:aid, 2, 'db', 'fake_sum', '{"agent_type": "llm", "key": "test_agent", "name": "Test Agent"}', true, now())
         """), {"aid": agent_id})
         

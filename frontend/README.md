@@ -39,12 +39,22 @@ priority order, resolved once in `src/config/env.js`:
 
 The cards in the ADVANCED panel are **data**, not markup. Adding a capability,
 reordering one, hiding one, disabling one or attaching another agent to one is
-an edit to `backend/app/config/ui/capabilities.yaml`.
+a **database** change, made through the backend's admin API
+(`/api/admin/capabilities`) — no file edit, no rebuild, no restart.
 
 **`GET /api/ui/capabilities` is the only source.** The frontend keeps no
 bundled catalogue and reads no override from `config.js` — one place a
 capability can be defined, so the sidebar cannot disagree with the backend or
 go stale against it.
+
+**The response is resolved by tenant/organization scope on the backend**, but
+in this deployment every browser session resolves to the SAME identity —
+identity is decided once from the backend's own `.env`, not per request, since
+this frontend has no login flow and sends no credential of its own (see
+`backend/app/dependencies/identity.py`). So two people opening this app right
+now will always see the same cards; per-tenant differences only show up
+through the backend admin API acting on an explicit scope, or once this
+frontend gains a real per-user identity to send.
 
 The consequence is deliberate and worth knowing before you debug it: **with the
 backend unreachable, or the route 404ing, the panel renders no capability

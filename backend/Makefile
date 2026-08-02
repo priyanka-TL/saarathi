@@ -1,4 +1,4 @@
-.PHONY: install run test migrate migrate-down db-shell lint venv verify-copy parity
+.PHONY: install run run-no-migrate test migrate migrate-down db-shell lint venv verify-copy parity
 
 venv:
 	test -d .venv || uv venv --python 3.10
@@ -17,7 +17,24 @@ install: venv
 # live WebSockets in process memory, so a second worker would open a second
 # Mitra channel for the same interview (assert_single_worker enforces it).
 # Scale with THREADPOOL_SIZE instead.
-run:
+#
+# DEPENDS ON `migrate` so the app can never start against an un-migrated
+# database. Booting one fails inside config sync with
+# `relation "agents" does not exist`, which names a missing TABLE when the real
+# cause is a missing STEP -- and that is now easier to hit than it used to be,
+# because the sidebar's capabilities live in the schema too.
+#
+# `alembic upgrade head` is idempotent: already at head it is one SELECT
+# against alembic_version and prints nothing, so a normal start is unchanged.
+run: migrate
+	uv run python -m app.main
+
+# Start WITHOUT touching the schema.
+#
+# The escape hatch for when applying migrations is not this process's job:
+# several instances starting together would race on the same upgrade, and a
+# deployment usually wants schema changes as a separate, reviewable step.
+run-no-migrate:
 	uv run python -m app.main
 
 test:

@@ -1,63 +1,180 @@
-"""GET /api/ui/capabilities -- the sidebar's presentation config.
+"""GET /api/ui/capabilities -- the sidebar's capability document.
 
-This file is the SINGLE source for those cards -- the frontend keeps no bundled
-copy -- so the document's content is now part of the product, not a hint. Hence
-the assertions on what it actually contains.
+This is the single source for those cards: the frontend keeps no bundled copy,
+so what this route answers IS the sidebar. Two things are pinned here.
 
-The degradation path still matters, for a different reason than before: a
-broken file must answer 404 with a logged warning rather than raising, because
-a 500 tells an operator nothing and a silent empty document is
-indistinguishable from a panel that is meant to be empty.
+1. THE DOCUMENT'S CONTENT, because it is now product rather than a hint.
+
+2. THE SCOPE RULE the resolver applies for whatever tenant a caller resolves
+   to:
+
+       (tenant, org)  >  (tenant, 'default')  >  ('default', 'default')
+
+   A tenant with no rows of its own inherits the default catalogue -- so
+   onboarding costs zero writes -- and a tenant's own row shadows the default
+   for that tenant ONLY.
+
+READING THE DOCUMENT FOR A SPECIFIC TENANT. Identity is resolved once from
+configuration, not per request (app/dependencies/identity.py -- there is no
+login flow upstream of this API that could supply a caller-specific token), so
+an HTTP client cannot be made to look like a different tenant's browser. The
+scope-resolution tests below call `resolve_for_user` directly instead -- the
+exact function this route calls -- which is what actually proves the
+precedence rule, independent of how a caller's tenant reaches it.
 """
 from __future__ import annotations
 
+import json
+import uuid
+
 import pytest
+from sqlalchemy import text
+
+from app.database.engine import SessionLocal
+from app.domain.core import UserContext
+from app.services.capability_service import resolve_for_user
 
 
-def test_serves_the_capability_document(client):
+def _document_for(tenant_code: str, *, org_id: str = "default") -> dict:
+    """What a caller with this tenant_code (and, optionally, org) sees."""
+    session = SessionLocal()
+    try:
+        user = UserContext(
+            user_id="fixture", email="fixture@example.com", display_name="Fixture",
+            tenant_code=tenant_code, active_org_id=org_id,
+        )
+        return resolve_for_user(session, user)
+    finally:
+        session.close()
+
+
+@pytest.fixture()
+def scoped():
+    """Insert scoped capability rows, and remove exactly them afterwards.
+
+    Every row created here is tagged with a unique tenant code, so this file
+    can never disturb the 'default'-scope rows the migration seeded (which are
+    what every other test in the suite sees).
+    """
+    created_tenants: list[str] = []
+    session = SessionLocal()
+
+    def _capability(*, tenant_id, key, name="Scoped", status="active",
+                    display_order=50, organization_id="default", metadata=None):
+        created_tenants.append(tenant_id)
+        session.execute(
+            text("""
+                INSERT INTO capabilities (tenant_id, organization_id, key, name,
+                                          description, icon, status, display_order, metadata)
+                VALUES (:tenant_id, :organization_id, :key, :name, 'desc', 'brain',
+                        CAST(:status AS capability_status_enum), :display_order,
+                        CAST(:metadata AS jsonb))
+                RETURNING id
+            """),
+            {"tenant_id": tenant_id, "organization_id": organization_id, "key": key,
+             "name": name, "status": status, "display_order": display_order,
+             "metadata": json.dumps(metadata or {"action": {"type": "display_card"}})},
+        )
+        session.commit()
+
+    yield _capability
+
+    for tenant_id in set(created_tenants):
+        session.execute(text("DELETE FROM capabilities WHERE tenant_id = :t"), {"t": tenant_id})
+    session.commit()
+    session.close()
+
+
+@pytest.fixture()
+def interview_agents_enabled():
+    """Force the two Mitra interview agents `enabled`, and restore after.
+
+    NOT redundant. `record_stories` and `capture_discussion` are `remote_flow`
+    agents, and ConfigSyncService forces every remote_flow agent to `disabled`
+    when MITRA_ENABLED is off -- deliberately, so the UI never lists an agent
+    nothing can serve. tests/integration/test_config_sync_mitra_gating.py
+    exercises exactly that and leaves them disabled, and it sorts before this
+    file, so without this fixture the membership assertions below fail on a
+    full-suite run and pass in isolation.
+
+    Mirrors the snapshot/restore pattern
+    test_config_versioning_lifecycle.py::_protect_real_agent_statuses already
+    uses for the same class of cross-file leakage.
+    """
+    keys = ("record_stories", "capture_discussion")
+    session = SessionLocal()
+    before = {
+        row[0]: row[1]
+        for row in session.execute(
+            text("SELECT key, status FROM agents WHERE key = ANY(:keys)"), {"keys": list(keys)}
+        ).fetchall()
+    }
+    session.execute(
+        text("UPDATE agents SET status = 'enabled' WHERE key = ANY(:keys)"),
+        {"keys": list(keys)},
+    )
+    session.commit()
+
+    yield
+
+    for key, status in before.items():
+        session.execute(
+            text("UPDATE agents SET status = CAST(:status AS agent_status_enum) WHERE key = :key"),
+            {"status": status, "key": key},
+        )
+    session.commit()
+    session.close()
+
+
+def _doc(client):
     response = client.get("/api/ui/capabilities")
     assert response.status_code == 200
-
-    body = response.json()
-    assert isinstance(body["capabilities"], list)
-
-    ids = [c["id"] for c in body["capabilities"]]
-    assert ids == ["listening_at_scale", "sg_commons"]
+    return response.json()
 
 
-def test_listening_at_scale_groups_both_interview_agents(client):
+def _ids(document):
+    return [c["id"] for c in document["capabilities"]]
+
+
+def _by_id(document, key):
+    """Look a capability up by key, never by position.
+
+    Ordering is itself configurable -- a tenant that reorders its catalogue
+    moves the index of everything -- so indexing into the list would make
+    unrelated tests fail for the wrong reason.
+    """
+    return next(c for c in document["capabilities"] if c["id"] == key)
+
+
+# ---------------------------------------------------------------------------
+# The default catalogue
+# ---------------------------------------------------------------------------
+
+
+def test_serves_the_seeded_catalogue(client):
+    body = _doc(client)
+    assert body["version"] == 1
+    assert _ids(body) == ["listening_at_scale", "sg_commons"]
+
+
+def test_listening_at_scale_groups_both_interview_agents(client, interview_agents_enabled):
     """The capability -> many agents shape the sidebar renders as one card."""
-    body = client.get("/api/ui/capabilities").json()
-    listening = body["capabilities"][0]
+    listening = _by_id(_doc(client), "listening_at_scale")
 
     assert [a["action"]["agentKey"] for a in listening["agents"]] == [
         "record_stories",
         "capture_discussion",
     ]
-    # Every referenced key must name a real agent, or the button fails at click
-    # time with no warning anywhere. This file is the only thing that connects
-    # the two catalogues, so it is the only place to check.
-    #
-    # Checked against the agent YAML rather than against
-    # `agent_registry.routable()`: the registry is Mitra-gated, so with
-    # MITRA_ENABLED=0 both of these agents are legitimately absent from it and
-    # only general_support remains. "Is this key defined?" is the invariant
-    # here; "is it enabled right now?" is a deployment question.
-    import yaml
-
-    from app.core.bootstrap import AGENTS_YAML_DIR
-
-    defined = {
-        yaml.safe_load(path.read_text(encoding="utf-8"))["key"]
-        for path in AGENTS_YAML_DIR.glob("*.yaml")
-    }
+    assert listening["badge"] == "SHIKSHALOKAM"
+    # `agentKey` is injected from the join, never read out of stored JSON, so a
+    # renamed agent key cannot leave a stale copy behind.
     for agent in listening["agents"]:
-        assert agent["action"]["agentKey"] in defined
+        assert agent["action"]["type"] == "start_agent"
+        assert agent["action"]["autostart"]
 
 
 def test_sg_commons_is_coming_soon_and_routes_nowhere(client):
-    body = client.get("/api/ui/capabilities").json()
-    sg_commons = body["capabilities"][1]
+    sg_commons = _by_id(_doc(client), "sg_commons")
 
     assert sg_commons["status"] == "coming_soon"
     assert sg_commons["agents"] == []
@@ -66,45 +183,128 @@ def test_sg_commons_is_coming_soon_and_routes_nowhere(client):
     assert sg_commons["action"]["type"] == "coming_soon"
 
 
-@pytest.mark.parametrize(
-    "content",
-    [
-        None,                       # file absent
-        "",                         # empty
-        "just a string",            # valid YAML, wrong shape
-        "capabilities: not-a-list",
-        "{{{ not yaml",             # unparseable
-    ],
-    ids=["absent", "empty", "scalar", "wrong-type", "unparseable"],
-)
-def test_a_broken_document_answers_404_instead_of_500(client, tmp_path, monkeypatch, content):
-    from app.routers import ui
+def test_membership_can_only_name_real_agents(client, interview_agents_enabled):
+    """capability_agents holds a real FK to agents, so a dangling reference is
+    unrepresentable. This asserts the resulting guarantee end to end."""
+    session = SessionLocal()
+    try:
+        defined = {
+            row[0] for row in session.execute(text("SELECT key FROM agents")).fetchall()
+        }
+    finally:
+        session.close()
 
-    if content is None:
-        target = tmp_path / "does_not_exist.yaml"
-    else:
-        target = tmp_path / "capabilities.yaml"
-        target.write_text(content, encoding="utf-8")
+    for capability in _doc(client)["capabilities"]:
+        for agent in capability["agents"]:
+            assert agent["action"]["agentKey"] in defined
 
-    monkeypatch.setattr(ui, "CAPABILITIES_YAML", target)
+
+# ---------------------------------------------------------------------------
+# Scope resolution
+# ---------------------------------------------------------------------------
+
+
+def test_a_tenant_with_no_rows_inherits_the_default_catalogue():
+    """Onboarding a tenant costs zero writes -- the headline property of the
+    default-scope model."""
+    newcomer = _document_for(f"t_{uuid.uuid4().hex[:8]}")
+    assert _ids(newcomer) == ["listening_at_scale", "sg_commons"]
+
+
+def test_a_tenant_row_shadows_the_default_for_that_tenant_only(scoped):
+    tenant = f"t_{uuid.uuid4().hex[:8]}"
+    scoped(tenant_id=tenant, key="listening_at_scale", name="Listening, Rebranded")
+
+    mine = _document_for(tenant)
+    theirs = _document_for(f"t_{uuid.uuid4().hex[:8]}")
+
+    assert _by_id(mine, "listening_at_scale")["title"] == "Listening, Rebranded"
+    # The other tenant is untouched -- this is the assertion that would catch a
+    # missing scope filter, which is the failure mode that leaks config across
+    # tenants.
+    assert _by_id(theirs, "listening_at_scale")["title"] == "Listening at Scale"
+
+
+def test_a_tenant_can_disable_a_capability_for_itself(scoped):
+    tenant = f"t_{uuid.uuid4().hex[:8]}"
+    scoped(tenant_id=tenant, key="sg_commons", status="disabled")
+
+    mine = _document_for(tenant)
+    theirs = _document_for(f"t_{uuid.uuid4().hex[:8]}")
+
+    assert "sg_commons" not in _ids(mine)
+    assert "sg_commons" in _ids(theirs)
+
+
+def test_a_tenant_can_add_a_capability_nobody_else_sees(scoped):
+    tenant = f"t_{uuid.uuid4().hex[:8]}"
+    scoped(tenant_id=tenant, key="tenant_only", name="Tenant Only")
+
+    mine = _document_for(tenant)
+    theirs = _document_for(f"t_{uuid.uuid4().hex[:8]}")
+
+    assert "tenant_only" in _ids(mine)
+    assert "tenant_only" not in _ids(theirs)
+
+
+def test_a_tenant_can_reorder_its_own_catalogue(scoped):
+    tenant = f"t_{uuid.uuid4().hex[:8]}"
+    # sg_commons seeds at display_order 20, behind listening_at_scale's 10.
+    scoped(tenant_id=tenant, key="sg_commons", name="SG Commons Portal",
+           status="coming_soon", display_order=1)
+
+    mine = _document_for(tenant)
+    assert _ids(mine)[0] == "sg_commons"
+
+
+def test_an_organization_row_beats_a_tenant_row(scoped):
+    """The third level of the precedence rule -- the one an ORDER BY with the
+    CASE expressions in the wrong order would silently get backwards."""
+    tenant = f"t_{uuid.uuid4().hex[:8]}"
+    scoped(tenant_id=tenant, key="listening_at_scale", name="Tenant Wide")
+    scoped(tenant_id=tenant, organization_id="62", key="listening_at_scale",
+           name="Org Specific")
+
+    in_org = _document_for(tenant, org_id="62")
+    other_org = _document_for(tenant, org_id="77")
+
+    assert _by_id(in_org, "listening_at_scale")["title"] == "Org Specific"
+    # A different org in the same tenant falls back to the tenant-wide row,
+    # not to the global default.
+    assert _by_id(other_org, "listening_at_scale")["title"] == "Tenant Wide"
+
+
+# ---------------------------------------------------------------------------
+# Failure shapes
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_catalogue_is_200_with_an_empty_list_not_404(client, monkeypatch):
+    """"This tenant has no capabilities" is a real answer. A 404 would claim
+    the route does not exist, making a misconfigured deployment
+    indistinguishable from a deliberately empty one."""
+    from app.services import capability_service
+
+    monkeypatch.setattr(
+        capability_service, "resolve_for_user",
+        lambda session, user: {"version": 1, "capabilities": []},
+    )
+    monkeypatch.setattr(
+        "app.routers.ui.resolve_for_user",
+        lambda session, user: {"version": 1, "capabilities": []},
+    )
 
     response = client.get("/api/ui/capabilities")
-    assert response.status_code == 404
-    # The shared envelope, so every non-admin 4xx in this service looks alike.
-    assert response.json()["error_code"] == "NOT_FOUND"
+    assert response.status_code == 200
+    assert response.json()["capabilities"] == []
 
 
-def test_the_route_takes_no_database_connection(client, monkeypatch):
-    """It declares no `get_db`, and must keep declaring none.
-
-    One request holds one thread and one DB connection for its whole lifetime
-    (app/main.py), so a route that reads a small file has no business consuming
-    either. Asserting on the dependency list rather than on behaviour, because
-    adding `get_db` back would not change any response.
-    """
-    from app.dependencies.db import get_db
-
-    route = next(
-        r for r in client.app.routes if getattr(r, "path", None) == "/api/ui/capabilities"
-    )
-    assert get_db not in [d.call for d in route.dependant.dependencies]
+def test_the_route_needs_no_credential(anonymous_client):
+    """Identity comes from configuration, not the request (see
+    app/dependencies/identity.py) -- a caller that sends no `Authorization`
+    header at all still gets 200, because there is nothing about the request
+    the resolver ever reads. This is the frontend's actual traffic pattern: it
+    has no login flow and sends no such header, ever."""
+    response = anonymous_client.get("/api/ui/capabilities")
+    assert response.status_code == 200
+    assert response.json()["capabilities"]

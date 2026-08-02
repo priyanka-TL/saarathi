@@ -84,7 +84,18 @@ class Settings(BaseSettings):
 
     # ---- registry ----
     registry_ttl_s: int = 30
-    config_sync_mode: Literal["safe", "force", "off"] = "safe"
+    # DEFAULTS TO `off`: the DATABASE is the source of truth for agent config.
+    #
+    # `agents` + `agent_configs` have been the runtime source since migration
+    # 0002 -- AgentRegistry reads them, the admin API writes them, and since
+    # migration 0006 a tenant can have its own active config per agent. The
+    # YAML in app/config/agents/ is a SEED for a fresh environment, not the
+    # authority.
+    #
+    # `off` therefore suppresses reconciliation entirely, so a deploy can never
+    # revert a live override or orphan-disable a tenant's agent. Set `safe`
+    # once to seed a new database, then leave it off.
+    config_sync_mode: Literal["safe", "force", "off"] = "off"
 
     # ---- web tier (new in the FastAPI port) ----
     # Comma-separated browser origins allowed to call this API. The React dev

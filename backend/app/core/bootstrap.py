@@ -40,6 +40,26 @@ def sync_and_reload(container) -> None:
         # either way to release the connection back to the pool.
         session.close()
 
+    # Membership links capabilities (seeded by migration 0006) to agents
+    # (seeded from YAML just above). It has to run HERE, between the two:
+    # a migration cannot create it, because on a fresh database the agents do
+    # not exist yet and capability_agents holds a real FK. Only ever fills a
+    # default-scope capability that has no members at all -- see
+    # app/services/capability_seed.py for why that is safe on every boot.
+    session_seed = container.session_factory()
+    try:
+        from app.services.capability_seed import seed_default_membership
+
+        seed_default_membership(session_seed)
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately NOT fatal, unlike agent config. This is presentation
+        # data: a failure here costs the sidebar its buttons, where a bad agent
+        # config would route real traffic wrongly. Log and continue.
+        logger.warning("capability membership seed failed: %s", exc)
+        session_seed.rollback()
+    finally:
+        session_seed.close()
+
     session2 = container.session_factory()
     try:
         container.agent_registry.reload(session2)
@@ -55,5 +75,5 @@ def sync_and_reload(container) -> None:
         # initial load.
         raise RuntimeError(
             "AgentRegistry loaded 0 agents at startup in config mode; "
-            "check the config_sync report above and the agents/agent_configurations tables."
+            "check the config_sync report above and the agents/agent_configs tables."
         )

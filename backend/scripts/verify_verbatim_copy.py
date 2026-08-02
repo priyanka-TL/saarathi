@@ -57,7 +57,31 @@ EXPECTED_EDITS = {
         "finalize_path relaxed from a Literal to str -- the endpoints are configurable "
         "now and the domain layer cannot import Settings; ConfigSyncService validates it"
     ),
-    "app/services/config_sync.py": "asserts finalize_path against the CONFIGURED Mitra endpoints",
+    "app/services/config_sync.py": (
+        "asserts finalize_path against the CONFIGURED Mitra endpoints; "
+        "agent_configurations renamed to agent_configs (migration 0006)"
+    ),
+    # Multi-tenancy pass (migration 0006). The agent catalogue gained a
+    # tenant/organization scope, and the table holding versioned configs was
+    # renamed. These three files are the only copied ones that had to follow.
+    "app/services/agent_registry.py": (
+        "agent_configurations renamed to agent_configs (migration 0006); reload() "
+        "now filters to the default scope, because an agent may have one active "
+        "config PER TENANT and an unfiltered join would make the global snapshot "
+        "non-deterministic; adds resolve_for_scope()"
+    ),
+    "app/services/orchestration.py": (
+        "resolves the selected agent for the caller's tenant/organization at ONE "
+        "point (step 4b), so every later agent.spec read and the "
+        "HandlerFactory (key, checksum) cache key are tenant-correct"
+    ),
+    "app/models/orm.py": (
+        "adds the migration-0006 models -- Agent, AgentConfig, Capability, "
+        "CapabilityAgent -- which did not exist under Flask. The pre-existing "
+        "models are untouched; only the AgentSession FK comment was rewritten, "
+        "because an Agent class is now registered and the historical reason for "
+        "deferring that FK no longer applies"
+    ),
 }
 
 

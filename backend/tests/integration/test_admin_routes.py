@@ -29,7 +29,7 @@ def db(flask_app):
         session.execute(text("SELECT id FROM agents WHERE key ~ '^test_agent_[0-9a-f]{6}$'")).fetchall()
     ]
     for agent_id in ids:
-        session.execute(text("DELETE FROM agent_configurations WHERE agent_id = :id"), {"id": agent_id})
+        session.execute(text("DELETE FROM agent_configs WHERE agent_id = :id"), {"id": agent_id})
         session.execute(text("DELETE FROM audit_logs WHERE entity_id = :id"), {"id": agent_id})
         session.execute(text("DELETE FROM agents WHERE id = :id"), {"id": agent_id})
     session.commit()
@@ -57,7 +57,7 @@ def _make_agent_and_config(db, name_prefix="TestAdminAgent"):
     }
     
     db.execute(
-        text("INSERT INTO agent_configurations (agent_id, version, config, checksum, source, is_active, activated_at) VALUES (:id, 1, :config, 'chk', 'db', TRUE, now())"),
+        text("INSERT INTO agent_configs (agent_id, version, config, checksum, source, is_active, activated_at) VALUES (:id, 1, :config, 'chk', 'db', TRUE, now())"),
         {"id": agent_id, "config": json.dumps(config)}
     )
     db.commit()
@@ -80,15 +80,22 @@ def test_get_agent_redacts_secrets(flask_app, client, db):
 @patch("app.services.identity.Authenticator.authenticate")
 def test_admin_endpoints(mock_authenticate, flask_app, db):
     flask_app.state.container.settings.saarthi_admin_enabled = 1
-    
+
     mock_user = UserContext(
         user_id="u", email="e", display_name="n", tenant_code="t",
         orgs=(OrgMembership(org_id="o", org_code="o", roles=("admin",)),),
         active_org_id="o"
     )
+    # Identity is resolved once from configuration, not per request -- there is
+    # no login flow upstream of this API -- so patching `authenticate()` is
+    # sufficient; the header below is inert but harmless to send.
     mock_authenticate.return_value = mock_user
-    
-    client = TestClient(flask_app, raise_server_exceptions=False)
+
+    client = TestClient(
+        flask_app,
+        raise_server_exceptions=False,
+        headers={"Authorization": "Bearer test-admin-token"},
+    )
     agent_id, key = _make_agent_and_config(db, "End")
     container = flask_app.state.container
     container.agent_registry.reload(db)

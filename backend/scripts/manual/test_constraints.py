@@ -21,7 +21,7 @@ if __name__ == "__main__":
     Session = sessionmaker(bind=engine)
     session = Session()
 
-    session.execute(text("DELETE FROM agent_configurations"))
+    session.execute(text("DELETE FROM agent_configs"))
     session.execute(text("DELETE FROM agents"))
     session.commit()
 
@@ -40,8 +40,8 @@ if __name__ == "__main__":
 
     try:
         cfg = '{"agent_type": "llm", "key": "a1", "name": "A1", "prompt": "hi", "model": {"name": "test"}}'
-        session.execute(text(f"INSERT INTO agent_configurations (agent_id, version, source, checksum, config, is_active) VALUES ('{agent_id}', 1, 'yaml', 'c1', '{cfg}', true)"))
-        session.execute(text(f"INSERT INTO agent_configurations (agent_id, version, source, checksum, config, is_active) VALUES ('{agent_id}', 2, 'yaml', 'c2', '{cfg}', true)"))
+        session.execute(text(f"INSERT INTO agent_configs (agent_id, version, source, checksum, config, is_active) VALUES ('{agent_id}', 1, 'yaml', 'c1', '{cfg}', true)"))
+        session.execute(text(f"INSERT INTO agent_configs (agent_id, version, source, checksum, config, is_active) VALUES ('{agent_id}', 2, 'yaml', 'c2', '{cfg}', true)"))
         session.commit()
         print("FAILED: Allowed two active configs")
     except Exception as e:

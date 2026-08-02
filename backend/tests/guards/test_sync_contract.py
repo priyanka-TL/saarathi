@@ -128,12 +128,19 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
 
     GET / is deliberately absent -- the React app serves the shell now.
 
-    GET /api/ui/capabilities is the one ADDITION to the Flask surface. It
-    serves the sidebar's capability document, which under Flask was literal
-    markup in templates/index.html and so had no route. It is optional by
-    contract: the frontend ships an identical bundled copy and treats a 404 as
-    "no server opinion" (app/routers/ui.py). Every other entry below is a Flask
-    path that must keep existing.
+    Two groups of ADDITIONS to the Flask surface, both from making the sidebar
+    database-driven and multi-tenant:
+
+      * GET /api/ui/capabilities -- the capability document the sidebar
+        renders. Under Flask this was literal markup in templates/index.html,
+        so it had no route. It is now the SINGLE source for those cards: the
+        frontend keeps no bundled copy.
+
+      * /api/admin/capabilities... -- the CRUD that makes "add a capability
+        without a deployment" true. Admin-gated, so a deployment with
+        SAARTHI_ADMIN_ENABLED=0 answers 404 to all of them.
+
+    Every other entry below is a Flask path that must keep existing.
     """
     expected = {
         ("POST", "/api/chat"),
@@ -154,6 +161,11 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
         ("POST", "/api/agents/reload"),
         ("GET", "/api/tools"),
         ("GET", "/api/ui/capabilities"),
+        ("GET", "/api/admin/capabilities"),
+        ("POST", "/api/admin/capabilities"),
+        ("PATCH", "/api/admin/capabilities/{key}"),
+        ("DELETE", "/api/admin/capabilities/{key}"),
+        ("PUT", "/api/admin/capabilities/{key}/agents"),
     }
     actual = {
         (m, r.path)

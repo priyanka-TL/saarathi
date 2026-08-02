@@ -82,7 +82,13 @@ def _seed_message(
 
 @pytest.fixture()
 def as_user(monkeypatch):
-    """Authenticate the test client as a fresh, controlled identity."""
+    """Authenticate the test client as a fresh, controlled identity.
+
+    `get_current_user` reads only `Authenticator.authenticate()` -- identity is
+    resolved once from configuration, not per request (there is no login flow
+    upstream of this API that could supply a caller-specific token) -- so
+    patching that one method is sufficient.
+    """
     def _patch(user: UserContext):
         monkeypatch.setattr(
             "app.services.identity.Authenticator.authenticate",

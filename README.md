@@ -107,7 +107,10 @@ Everything below is intentional and was verified not to affect any client.
 | Change | Why |
 |---|---|
 | `GET /` and `/static/*` are gone; `GET /healthz` added | React serves the shell now |
-| `GET /api/ui/capabilities` added | The sidebar's capability cards were literal markup in `templates/index.html` and are configuration now, served from `app/config/ui/capabilities.yaml`. The frontend keeps no copy, so this route is **required** for the ADVANCED panel to show anything. See `backend/app/routers/ui.py` |
+| `GET /api/ui/capabilities` added | The sidebar's capability cards were literal markup in `templates/index.html` and are database rows now, resolved by **tenant/organization scope**. The frontend keeps no copy, so this route is **required** for the ADVANCED panel to show anything. See `backend/app/routers/ui.py` |
+| `/api/admin/capabilities…` added (admin-gated) | The CRUD that makes "add a capability without a deployment" true — `tenant_id`/`organization_id` are explicit parameters on these routes, not derived from the caller. 404s entirely when `SAARTHI_ADMIN_ENABLED=0` |
+| Identity is resolved from `.env`, same as before | Considered making it per-request (from the caller's `Authorization` header) so `tenant_code` could vary per caller — reverted: the frontend is a bare SPA with no login flow and no way to supply a caller-specific token, so a per-request design just 401s every real browser request. `SAARTHI_STATIC_TOKEN` remains the one identity every request resolves to; tenant-scoped *configuration* is still real and is reached through the admin API's explicit scope parameters, not through caller identity |
+| `GET /api/agents` now applies `AccessSpec` | **Bug fix.** `RouterService` has always filtered by `access`; this route did not, so the sidebar advertised agents the router would refuse for that caller and selecting one silently fell through to the default agent |
 | Malformed UUID path segments return a **JSON** 404 instead of Werkzeug's **HTML** 404 | Same status code; the frontend already treats 404 as "forget this conversation". A JSON API should not emit HTML |
 | Unhandled exceptions return the standard JSON envelope instead of an HTML 500 | Same reason |
 | Admin `config/{version}` with a non-integer returns JSON 400 instead of HTML 404 | Same reason; route has no frontend |

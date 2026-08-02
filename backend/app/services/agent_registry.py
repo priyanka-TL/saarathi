@@ -12,6 +12,9 @@ _agent_spec_adapter = TypeAdapter(AgentSpec)
 
 logger = get_logger("agent_registry")
 
+#: Matches migration 0006. The scope meaning "applies to every tenant".
+DEFAULT_SCOPE = "default"
+
 @dataclass
 class RegisteredAgent:
     id: str
@@ -31,15 +34,33 @@ class AgentRegistry:
         self._version: int = 0
         self._loaded_at: float = 0.0
         self._max_updated_at = None
+        # Keyed by (registry_version, tenant, org, agent_key), so a reload
+        # invalidates every scoped entry for free -- the version is part of the
+        # key, and stale entries age out when the cache is cleared on overflow.
+        self._scope_cache: Dict[tuple, "RegisteredAgent"] = {}
 
     def reload(self, session) -> int:
         try:
-            # Query enabled agents joined with their active configuration
+            # Query enabled agents joined with their active DEFAULT-SCOPE
+            # configuration.
+            #
+            # THE SCOPE FILTER IS LOAD-BEARING, not decoration. Since migration
+            # 0006 an agent may have SEVERAL active configs -- one per
+            # (tenant_id, organization_id) -- so an unfiltered join returns one
+            # row per scope and the dict assignment below would keep whichever
+            # arrived last. That is non-deterministic, and it would let one
+            # tenant's configuration become the global snapshot every other
+            # tenant is served from.
+            #
+            # The snapshot is the DEFAULT scope, i.e. what a tenant sees when
+            # it has not customised anything. Tenant-specific configs are
+            # applied per request by resolve_for_scope() below.
             query = text("""
                 SELECT a.id, a.key, a.name, a.description, a.agent_type, a.is_default, a.updated_at, c.config, c.checksum
                 FROM agents a
-                JOIN agent_configurations c ON a.id = c.agent_id
+                JOIN agent_configs c ON a.id = c.agent_id
                 WHERE a.status = 'enabled' AND c.is_active = TRUE
+                  AND c.tenant_id = 'default' AND c.organization_id = 'default'
             """)
             result = session.execute(query).fetchall()
 
@@ -133,3 +154,100 @@ class AgentRegistry:
             if agent.is_default:
                 return agent
         return None
+
+    # ------------------------------------------------------------------
+    # Tenant-scoped resolution
+    # ------------------------------------------------------------------
+    #
+    # THE CROSS-TENANT HAZARD THIS EXISTS TO AVOID
+    # --------------------------------------------
+    # HandlerFactory caches built handlers by `(spec.key, checksum)`. If two
+    # tenants' specs differed while sharing a checksum, the first tenant's
+    # handler -- including its system prompt -- would be served to the second.
+    #
+    # That cannot happen here, by construction rather than by care: a
+    # tenant-scoped config is a WHOLE row in agent_configs with its OWN
+    # checksum, computed from its own content by the writer. Two tenants with
+    # byte-identical configs DO share a checksum and therefore a handler, which
+    # is correct -- the same spec deserves the same handler.
+    #
+    # This is why per-tenant config is a scoped row rather than a JSON patch
+    # merged over a base: a patch would have to be re-canonicalised and
+    # re-checksummed at exactly the right moment, and forgetting once would
+    # leak a prompt.
+
+    _SCOPE_CACHE_MAX = 512
+
+    def resolve_for_scope(self, session, agent: "RegisteredAgent",
+                          tenant_id: str, organization_id: str) -> "RegisteredAgent":
+        """`agent` as this tenant/organization should see it.
+
+        Returns the argument unchanged when the scope has no config of its own,
+        which is the overwhelmingly common case -- so the default path costs
+        one indexed lookup and nothing else.
+
+        Resolution is most-specific-wins, matching capability_service:
+            (tenant, org) > (tenant, 'default') > ('default', 'default')
+        """
+        if not tenant_id or tenant_id == DEFAULT_SCOPE:
+            return agent
+
+        cache_key = (self._version, tenant_id, organization_id, agent.key)
+        cached = self._scope_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        resolved = agent
+        try:
+            row = session.execute(
+                text("""
+                    SELECT c.config, c.checksum
+                    FROM agent_configs c
+                    WHERE c.agent_id = :agent_id
+                      AND c.is_active
+                      AND c.tenant_id IN (:tenant_id, :default_scope)
+                      AND c.organization_id IN (:organization_id, :default_scope)
+                      AND NOT (c.tenant_id = :default_scope
+                               AND c.organization_id = :default_scope)
+                    ORDER BY CASE WHEN c.organization_id = :organization_id THEN 0 ELSE 1 END,
+                             CASE WHEN c.tenant_id = :tenant_id THEN 0 ELSE 1 END
+                    LIMIT 1
+                """),
+                {
+                    "agent_id": agent.id,
+                    "tenant_id": tenant_id,
+                    "organization_id": organization_id or DEFAULT_SCOPE,
+                    "default_scope": DEFAULT_SCOPE,
+                },
+            ).fetchone()
+
+            if row is not None:
+                # Re-validated, not trusted: a scoped config is written through
+                # the admin API and could predate a schema change. A spec that
+                # will not parse falls back to the default rather than failing
+                # the turn -- same posture as reload(), which logs and keeps
+                # its cached snapshot.
+                spec = _agent_spec_adapter.validate_python(row.config)
+                resolved = RegisteredAgent(
+                    id=agent.id,
+                    key=agent.key,
+                    name=agent.name,
+                    description=agent.description,
+                    agent_type=agent.agent_type,
+                    is_default=agent.is_default,
+                    # The scoped row's OWN checksum. This is what separates
+                    # this tenant's entry in HandlerFactory's cache.
+                    checksum=row.checksum,
+                    spec=spec,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "Failed to resolve scoped config for agent=%s tenant=%s: %s. Using default.",
+                agent.key, tenant_id, e,
+            )
+            return agent
+
+        if len(self._scope_cache) >= self._SCOPE_CACHE_MAX:
+            self._scope_cache.clear()
+        self._scope_cache[cache_key] = resolved
+        return resolved

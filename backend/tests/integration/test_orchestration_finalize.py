@@ -436,6 +436,12 @@ class _FakeRegistry:
     def default(self):
         return None
 
+    def resolve_for_scope(self, session, agent, tenant_id, organization_id):
+        """Mirrors the real method's no-op path: a tenant with no scoped config
+        gets the agent back unchanged. This test's agent has no scoped config,
+        so returning the argument IS the faithful behaviour."""
+        return agent
+
 
 def test_handle_turn_with_terminal_delta_actually_reaches_completed():
     """The concrete end-to-end regression test for the bug described above."""

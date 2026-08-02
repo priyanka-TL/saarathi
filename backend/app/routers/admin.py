@@ -16,7 +16,7 @@ TWO THINGS THAT LOOK LIKE BUGS AND ARE NOT
    wrote. The dependency's later commit is then a harmless no-op.
 
 Raw `sqlalchemy.text()` is used rather than repositories because `agents` and
-`agent_configurations` have no ORM model -- see app/models/orm.py.
+`agent_configs` have no ORM model -- see app/models/orm.py.
 """
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ def list_config_versions(
     rows = db.execute(
         text("""
             SELECT version, source, checksum, is_active, created_at
-            FROM agent_configurations
+            FROM agent_configs
             WHERE agent_id = :agent_id
             ORDER BY version DESC
         """),
@@ -137,7 +137,7 @@ def activate_config_version(
         return _admin_error("INVALID_REQUEST", 400, msg="Version not found")
 
     exists = db.execute(
-        text("SELECT 1 FROM agent_configurations WHERE agent_id = :agent_id AND version = :version"),
+        text("SELECT 1 FROM agent_configs WHERE agent_id = :agent_id AND version = :version"),
         {"agent_id": agent_row.id, "version": version_int},
     ).scalar()
 
@@ -146,12 +146,12 @@ def activate_config_version(
         return _admin_error("INVALID_REQUEST", 400, msg="Version not found")
 
     db.execute(
-        text("UPDATE agent_configurations SET is_active = FALSE WHERE agent_id = :agent_id"),
+        text("UPDATE agent_configs SET is_active = FALSE WHERE agent_id = :agent_id"),
         {"agent_id": agent_row.id},
     )
     db.execute(
         text(
-            "UPDATE agent_configurations SET is_active = TRUE, activated_at = now() "
+            "UPDATE agent_configs SET is_active = TRUE, activated_at = now() "
             "WHERE agent_id = :agent_id AND version = :version"
         ),
         {"agent_id": agent_row.id, "version": version_int},
@@ -214,18 +214,18 @@ def create_config_version(
     # partial unique index with no DEFERRABLE, so insert-then-deactivate raises
     # a UniqueViolation.
     db.execute(
-        text("UPDATE agent_configurations SET is_active = FALSE WHERE agent_id = :agent_id"),
+        text("UPDATE agent_configs SET is_active = FALSE WHERE agent_id = :agent_id"),
         {"agent_id": agent_row.id},
     )
 
     new_version = db.execute(
-        text("SELECT COALESCE(MAX(version), 0) + 1 FROM agent_configurations WHERE agent_id = :agent_id"),
+        text("SELECT COALESCE(MAX(version), 0) + 1 FROM agent_configs WHERE agent_id = :agent_id"),
         {"agent_id": agent_row.id},
     ).scalar()
 
     row = db.execute(
         text("""
-            INSERT INTO agent_configurations (agent_id, version, config, checksum, source, is_active, activated_at)
+            INSERT INTO agent_configs (agent_id, version, config, checksum, source, is_active, activated_at)
             VALUES (:agent_id, :version, :config, :checksum, 'db', TRUE, now())
             RETURNING created_at
         """),
@@ -263,7 +263,7 @@ def get_agent_detail(key: str, db: Session = Depends(get_db)) -> JSONResponse:
             SELECT a.id, a.name, a.description, a.agent_type, a.status,
                    c.config, c.version, c.source, c.created_at
             FROM agents a
-            LEFT JOIN agent_configurations c ON a.id = c.agent_id AND c.is_active = TRUE
+            LEFT JOIN agent_configs c ON a.id = c.agent_id AND c.is_active = TRUE
             WHERE a.key = :key
         """),
         {"key": key},

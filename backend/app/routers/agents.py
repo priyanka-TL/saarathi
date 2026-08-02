@@ -39,7 +39,26 @@ def get_agents(
     ]
 
     registered = sorted(container.agent_registry.routable(), key=lambda r: r.spec.sort_order)
+
+    # Resolve each agent for THIS caller's scope, then apply AccessSpec.
+    #
+    # THE ACCESS FILTER IS A FIX, not a refactor. This route previously listed
+    # every routable agent regardless of `access`, while RouterService._visible
+    # has always filtered by the same AccessSpec -- so the sidebar advertised
+    # agents the router would refuse for that caller, and selecting one
+    # silently fell through to the default agent. The two now agree, and they
+    # agree by calling the SAME AccessSpec.matches(): there must never be a
+    # second access check here to drift out of step with routing.
+    tenant_id = getattr(user, "tenant_code", "") or "default"
+    organization_id = getattr(user, "active_org_id", None) or "default"
+
+    visible = []
     for reg in registered:
+        scoped = container.agent_registry.resolve_for_scope(db, reg, tenant_id, organization_id)
+        if scoped.spec.access.matches(user):
+            visible.append(scoped)
+
+    for reg in visible:
         spec = reg.spec
         agents_list.append({
             "name": reg.name,

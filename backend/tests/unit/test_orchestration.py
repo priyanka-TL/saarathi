@@ -63,6 +63,13 @@ def test_no_transaction_held_during_handler():
     mock_registry.get_by_key_exact.return_value = mock_agent
     mock_registry.default.return_value = mock_agent
     mock_registry.routable.return_value = [mock_agent]
+    # Model the real method: with no tenant-scoped config, resolve_for_scope
+    # returns its argument unchanged. A bare Mock would return a Mock here, and
+    # every `agent.spec.*` read downstream would silently become truthy --
+    # `pin_session` in particular, which would then hit the database.
+    mock_registry.resolve_for_scope.side_effect = (
+        lambda session, agent, tenant_id, organization_id: agent
+    )
     
     mock_handler = MockHandler(session)
     mock_factory = Mock()

@@ -147,7 +147,7 @@ class ConfigSyncService:
                 
                 session.execute(
                     text("""
-                        INSERT INTO agent_configurations (agent_id, version, source, checksum, config, is_active, activated_at)
+                        INSERT INTO agent_configs (agent_id, version, source, checksum, config, is_active, activated_at)
                         VALUES (:agent_id, 1, 'yaml', :checksum, :config, true, now())
                     """),
                     {"agent_id": agent_id, "checksum": checksum, "config": canonical}
@@ -195,7 +195,7 @@ class ConfigSyncService:
             
             latest_yaml = session.execute(
                 text("""
-                    SELECT version, checksum FROM agent_configurations
+                    SELECT version, checksum FROM agent_configs
                     WHERE agent_id = :agent_id AND source = 'yaml'
                     ORDER BY version DESC LIMIT 1
                 """),
@@ -204,7 +204,7 @@ class ConfigSyncService:
 
             active_cfg = session.execute(
                 text("""
-                    SELECT version, source, config FROM agent_configurations
+                    SELECT version, source, config FROM agent_configs
                     WHERE agent_id = :agent_id AND is_active = true
                 """),
                 {"agent_id": agent_id}
@@ -220,11 +220,11 @@ class ConfigSyncService:
                         # Reclaim control even though the YAML content didn't
                         # change -- force means "the YAML is truth," full stop.
                         session.execute(
-                            text("UPDATE agent_configurations SET is_active = false WHERE agent_id = :agent_id AND version != :keep_v"),
+                            text("UPDATE agent_configs SET is_active = false WHERE agent_id = :agent_id AND version != :keep_v"),
                             {"agent_id": agent_id, "keep_v": latest_yaml[0]}
                         )
                         session.execute(
-                            text("UPDATE agent_configurations SET is_active = true, activated_at = now() WHERE agent_id = :agent_id AND version = :version"),
+                            text("UPDATE agent_configs SET is_active = true, activated_at = now() WHERE agent_id = :agent_id AND version = :version"),
                             {"agent_id": agent_id, "version": latest_yaml[0]}
                         )
                         audit_repo.insert(
@@ -248,7 +248,7 @@ class ConfigSyncService:
             adopt = (mode == "force") or (not active_cfg) or (active_cfg[1] == "yaml")
             
             new_v_row = session.execute(
-                text("SELECT COALESCE(MAX(version), 0) + 1 FROM agent_configurations WHERE agent_id = :agent_id"),
+                text("SELECT COALESCE(MAX(version), 0) + 1 FROM agent_configs WHERE agent_id = :agent_id"),
                 {"agent_id": agent_id}
             ).scalar()
             
@@ -264,13 +264,13 @@ class ConfigSyncService:
                 # (sync_and_reload has no try/except, by design), which is why
                 # this only ever showed up when a shipped agent config changed.
                 session.execute(
-                    text("UPDATE agent_configurations SET is_active = false WHERE agent_id = :agent_id AND is_active = true"),
+                    text("UPDATE agent_configs SET is_active = false WHERE agent_id = :agent_id AND is_active = true"),
                     {"agent_id": agent_id}
                 )
 
             session.execute(
                 text("""
-                    INSERT INTO agent_configurations (agent_id, version, source, checksum, config, is_active, activated_at)
+                    INSERT INTO agent_configs (agent_id, version, source, checksum, config, is_active, activated_at)
                     VALUES (:agent_id, :version, 'yaml', :checksum, :config, :is_active, CASE WHEN :is_active THEN now() ELSE NULL END)
                 """),
                 {"agent_id": agent_id, "version": new_v_row, "checksum": checksum, "config": canonical, "is_active": adopt}
@@ -298,7 +298,7 @@ class ConfigSyncService:
             text("""
                 SELECT a.id, a.key FROM agents a
                 WHERE a.id IN (
-                    SELECT agent_id FROM agent_configurations WHERE source = 'yaml' AND is_active = true
+                    SELECT agent_id FROM agent_configs WHERE source = 'yaml' AND is_active = true
                 )
             """)
         ).fetchall()

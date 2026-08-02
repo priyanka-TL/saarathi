@@ -77,7 +77,7 @@ def _protect_real_agent_statuses(flask_app):
             row[0] for row in session.execute(text("SELECT id FROM agents")).fetchall()
         } - snapshot_ids
         for agent_id in new_ids:
-            session.execute(text("DELETE FROM agent_configurations WHERE agent_id = :id"), {"id": agent_id})
+            session.execute(text("DELETE FROM agent_configs WHERE agent_id = :id"), {"id": agent_id})
             session.execute(text("DELETE FROM audit_logs WHERE entity_id = :id"), {"id": agent_id})
             session.execute(text("DELETE FROM agents WHERE id = :id"), {"id": agent_id})
 
@@ -110,7 +110,7 @@ def _configs(session, agent_id: uuid.UUID):
     """[(version, source, is_active, checksum), ...] ordered by version."""
     rows = session.execute(
         text("""
-            SELECT version, source, is_active, checksum FROM agent_configurations
+            SELECT version, source, is_active, checksum FROM agent_configs
             WHERE agent_id = :agent_id ORDER BY version
         """),
         {"agent_id": agent_id},
@@ -142,11 +142,18 @@ def admin_client(flask_app, monkeypatch):
         tenant_code="t", orgs=(OrgMembership(org_id="o", org_code="o", roles=("admin",)),),
         active_org_id="o",
     )
+    # Identity is resolved once from configuration, not per request -- there
+    # is no login flow upstream of this API -- so patching `authenticate()` is
+    # sufficient.
     monkeypatch.setattr(
         "app.services.identity.Authenticator.authenticate",
         lambda self: admin_user,
     )
-    return TestClient(flask_app, raise_server_exceptions=False)
+    return TestClient(
+        flask_app,
+        raise_server_exceptions=False,
+        headers={"Authorization": "Bearer test-admin-token"},
+    )
 
 
 def _v2_body(key: str) -> dict:

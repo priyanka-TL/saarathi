@@ -97,7 +97,7 @@ def second_llm_agent(flask_app):
             "model": {"provider": "openrouter", "name": "test-model"}, "tools": [],
         }
         db.execute(text("""
-            INSERT INTO agent_configurations (agent_id, version, config, checksum, source, is_active, activated_at)
+            INSERT INTO agent_configs (agent_id, version, config, checksum, source, is_active, activated_at)
             VALUES (:agent_id, 1, :config, 'test-checksum', 'db', TRUE, now())
         """), {"agent_id": agent_id, "config": json.dumps(config)})
         db.commit()

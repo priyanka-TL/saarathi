@@ -213,7 +213,7 @@ def test_the_turn_lock_is_released_so_the_next_turn_succeeds(client, script):
 
 
 def test_max_turns_is_enforced(client, script, as_user, monkeypatch):
-    """`limits:` was validated, checksummed into agent_configurations, and then
+    """`limits:` was validated, checksummed into agent_configs, and then
     consulted by nobody -- RateLimits.check was a no-op stub named
     RateLimitsDummy. An interview had no turn ceiling at all.
     """

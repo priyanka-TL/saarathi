@@ -13,11 +13,16 @@ PREFIX = "/saarathi-service"
 
 
 @pytest.fixture()
-def prefixed_client(app_module, monkeypatch):
+def prefixed_client(app_module, monkeypatch, auth_headers):
     from app.core.settings import settings
 
     monkeypatch.setattr(settings, "api_prefix", PREFIX)
-    return TestClient(app_module.create_app(), raise_server_exceptions=False)
+    # Authenticated like the shared `client` fixture: identity is per-request,
+    # so a bare client would 401 before any of these routes is reached and the
+    # prefix assertions would pass for the wrong reason.
+    return TestClient(
+        app_module.create_app(), raise_server_exceptions=False, headers=auth_headers
+    )
 
 
 def test_api_routes_move_under_the_prefix(prefixed_client):

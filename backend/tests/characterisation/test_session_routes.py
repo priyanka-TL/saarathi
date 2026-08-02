@@ -3,7 +3,7 @@
 Real Flask app + real Postgres (matching this directory's established
 convention); only the Mitra REST client and channel pool are faked, and the
 agent registry lookup is stubbed so a session can be seeded directly via
-repositories without needing a full agent_configurations row synced in.
+repositories without needing a full agent_configs row synced in.
 """
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ def fake_mitra(flask_app, monkeypatch):
 def stub_registry(flask_app, monkeypatch):
     """Session routes resolve the owning agent via
     container.agent_registry.get_by_id -- stub it so a session can be seeded
-    directly via repositories without a synced agent_configurations row."""
+    directly via repositories without a synced agent_configs row."""
     container = flask_app.state.container
 
     def _patch(agent_id: uuid.UUID):

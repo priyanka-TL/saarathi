@@ -1,19 +1,36 @@
-"""Caller identity, resolved once at startup by a single Authenticator.
+"""Caller identity, resolved once from configuration.
 
 AUTH_CHECK is the only switch:
 
-  AUTH_CHECK=true   The token comes from the environment (SAARTHI_STATIC_TOKEN)
-                    and is DECODED, not validated -- no signature check, no
-                    expiry check. Saarthi has already validated it upstream and
-                    is the only component allowed to; re-validating here can
-                    only reject a request Saarthi already accepted.
+  AUTH_CHECK=true   SAARTHI_STATIC_TOKEN (from .env) is DECODED, not
+                    validated -- no signature check, no expiry check. Saarthi
+                    has already validated it upstream and is the only component
+                    allowed to; re-validating here can only reject a request
+                    Saarthi already accepted.
 
-  AUTH_CHECK=false  No token is read at all. The Authenticator returns the
-                    hardcoded identity below.
+  AUTH_CHECK=false  No token is read at all. Every request resolves to the
+                    hardcoded development identity below.
 
-Both branches collapse into one immutable UserContext in __init__, so every
-caller downstream -- routes, repositories, AccessSpec, the admin gate -- is
-unaware of which mode is active and no auth logic exists anywhere else.
+Resolved ONCE, at container build time, and reused for every request
+(`authenticate()` just returns the cached result). This is the identity source
+for the whole app; there is no per-request alternative. That is a deliberate
+choice, not an oversight: the frontend is a bare SPA with no login flow and
+nothing that could supply a real per-caller JWT, so there is no request-borne
+identity to read in the first place. An undecodable SAARTHI_STATIC_TOKEN is
+therefore a STARTUP failure, which is the right shape for a misconfiguration --
+it cannot reach a user.
+
+TENANCY STILL EXISTS, just not per end-user request. `tenant_id` /
+`organization_id` are explicit parameters on the admin API
+(`/api/admin/capabilities`, ...), not derived from the caller's own identity,
+so per-tenant configuration remains fully writable and readable there. What
+does not exist is an ordinary request resolving to more than one tenant --
+there is currently nothing upstream of this class that could assert who a
+browser's user is.
+
+Downstream -- routes, repositories, AccessSpec, the admin gate -- reads a
+UserContext and is unaware of which mode produced it. No auth logic exists
+anywhere else.
 
 This module stays free of any web framework (the .importlinter contracts forbid
 app.services importing fastapi/starlette). Nothing here reads a request: the
@@ -135,10 +152,10 @@ def default_context(settings: Settings) -> UserContext:
 class Authenticator:
     """The single source of caller identity for the whole application.
 
-    Resolution happens once, here, at container build time -- before the server
-    accepts traffic. An undecodable SAARTHI_STATIC_TOKEN is therefore a startup
-    failure rather than a per-request 401, which is the right shape for a
-    misconfiguration: it cannot reach a user.
+    Resolution happens once, here, at container build time -- before the
+    server accepts traffic. An undecodable SAARTHI_STATIC_TOKEN is therefore a
+    startup failure rather than a per-request 401, which is the right shape
+    for a misconfiguration: it cannot reach a user.
     """
 
     def __init__(self, settings: Settings) -> None:

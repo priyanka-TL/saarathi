@@ -27,6 +27,14 @@ os.environ["OPENROUTER_MODEL"] = "test/scripted-model"
 os.environ["LLM_TIMEOUT"] = "1"
 os.environ["LLM_MAX_RETRIES"] = "1"
 os.environ["LOG_LEVEL"] = "ERROR"
+# The whole suite is written against the unprefixed default (`client.post
+# ("/api/reset")`, not "/saarathi-service/api/reset"). A developer's local
+# `.env` sets API_PREFIX for THEIR OWN dev server -- e.g. to match a frontend
+# deployed under a path -- and without this override that value leaks into
+# the test run and 404s nearly every characterisation test. Prefix behaviour
+# itself is exercised by tests/integration/test_api_prefix.py, which builds
+# its own prefixed app rather than relying on the ambient one.
+os.environ["API_PREFIX"] = ""
 
 # ---------------------------------------------------------------------------
 # 1b. DATABASE_URL --> A DEDICATED TEST DATABASE. NON-NEGOTIABLE.
@@ -177,6 +185,25 @@ def flask_app(api_app):
 
 
 @pytest.fixture()
+def auth_headers():
+    """An `Authorization` header, for tests that construct their own TestClient
+    (because they need a differently-configured app) and want their intent to
+    read clearly even though nothing in the app examines this header.
+
+    Identity is resolved once from configuration, not from the request (see
+    app/dependencies/identity.py) -- there is no login flow upstream of this
+    API that could supply a caller-specific token. Sending this header is
+    therefore inert, not required; it costs nothing to include and documents
+    "this client represents an authenticated caller" at the call site.
+    """
+    from app.core.settings import settings
+
+    if not settings.saarthi_static_token:
+        return {}
+    return {"Authorization": f"Bearer {settings.saarthi_static_token}"}
+
+
+@pytest.fixture()
 def client(api_app):
     """A test client for the API.
 
@@ -186,6 +213,30 @@ def client(api_app):
     themselves, so anything reaching this is a genuine regression -- and this
     flag keeps it visible as a failing assertion on a 500 body rather than as a
     traceback from inside the client.
+
+    Sends the static token's `Authorization` header for documentation value
+    only -- see `auth_headers`. `anonymous_client` below sends none at all and
+    resolves identically, which is itself the thing worth testing (see
+    tests/integration/test_identity_per_request.py).
+    """
+    from starlette.testclient import TestClient
+
+    from app.core.settings import settings
+
+    headers = {}
+    if settings.saarthi_static_token:
+        headers["Authorization"] = f"Bearer {settings.saarthi_static_token}"
+
+    return TestClient(api_app, raise_server_exceptions=False, headers=headers)
+
+
+@pytest.fixture()
+def anonymous_client(api_app):
+    """A client that sends no credential.
+
+    Resolves to the SAME identity `client` does -- there is no per-caller
+    identity for it to be missing. Exists to make that equivalence an explicit
+    test fixture rather than something asserted ad hoc.
     """
     from starlette.testclient import TestClient
 

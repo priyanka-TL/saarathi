@@ -280,6 +280,23 @@ class OrchestrationService:
         decision = self._router.select(conv, ctx_partial, explicit_key=ctx_in.agent_key)
         agent = decision.agent
 
+        # 4b. Resolve the agent for THIS caller's tenant/organization.
+        #
+        # ONE PLACE, deliberately. `agent.spec` is read a dozen times below and
+        # `agent.checksum` keys HandlerFactory's cache, so resolving once here
+        # makes every one of those tenant-correct with no further changes --
+        # and means there is a single line to audit when asking "can one tenant
+        # be served another's configuration?".
+        #
+        # A no-op for a tenant that has not customised anything, which is the
+        # common case: one indexed lookup, then the unchanged agent.
+        agent = self._registry.resolve_for_scope(
+            self._db,
+            agent,
+            getattr(ctx_in.user, "tenant_code", "") or "default",
+            getattr(ctx_in.user, "active_org_id", None) or "default",
+        )
+
         # 5. enforce limits
         self._rate_limits.check(conv.id, ctx_in.user, agent.spec.limits)
 
