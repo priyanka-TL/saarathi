@@ -78,7 +78,7 @@ def _stub_agent(agent_id: uuid.UUID) -> _RegisteredAgentStub:
         routing=RoutingSpec(pin_session=True, exit_keywords=["/exit"]),
         remote=RemoteSpec(
             provider="mitra", flow_name="guest-mi-story",
-            bot_route_env="TEST_BOT_ROUTE", company_env="TEST_COMPANY",
+            bot_route="/test-bot-route", company="test-company",
             report_media_type="application/pdf",
         ),
     )
@@ -91,12 +91,20 @@ def fake_mitra(flask_app, monkeypatch):
     swap in fakes for the duration of one test, restored afterward."""
     container = flask_app.state.container
     orig_rest, orig_sessions = container.mitra_rest, container.mitra_sessions
+    orig_clients = container.mitra_clients
     rest, sessions = _FakeMitraRest(), _FakeMitraSessions()
     object.__setattr__(container, "mitra_rest", rest)
     object.__setattr__(container, "mitra_sessions", sessions)
+    # The registry must go too, not just the client. OrchestrationService.rest_for
+    # prefers the registry and would otherwise build a REAL MitraRestClient from
+    # the resolved connection -- which reaches the network, and pytest-socket
+    # turns that into a 500 rather than a refusal anyone can read. None makes
+    # rest_for fall back to the fake above, which is what these tests assert on.
+    object.__setattr__(container, "mitra_clients", None)
     yield rest, sessions
     object.__setattr__(container, "mitra_rest", orig_rest)
     object.__setattr__(container, "mitra_sessions", orig_sessions)
+    object.__setattr__(container, "mitra_clients", orig_clients)
 
 
 @pytest.fixture()

@@ -15,17 +15,19 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 # Populate os.environ from .env, explicitly and first.
 #
 # Settings itself does NOT need this -- pydantic-settings reads the file
-# directly. But the agent YAML's `${VAR}` / `${VAR:-default}` substitution and
-# `RemoteSpec.bot_route_env` / `company_env` are resolved with os.getenv, so
-# MITRA_COMPANY, MITRA_STORY_BOT_ROUTE and MITRA_DISCUSSION_BOT_ROUTE must be
-# real environment variables or every remote_flow agent fails: ConfigSyncService
-# asserts on the bot route at startup, and RemoteFlowAgentHandler raises on it
-# per turn.
+# directly. ONE thing still does: `RemoteSpec.origin_env`, which names the
+# variable holding a scope's Mitra Origin credential and is resolved with
+# os.getenv (app/integrations/mitra/connection.py). It is the only remaining
+# environment indirection in agent configuration, and it exists because the
+# Origin header is a credential that must not be stored in a config row.
+#
+# The agent YAML's `${VAR}` substitution and the `bot_route_env` / `company_env`
+# fields used to depend on this too. Both are gone -- agent config lives in the
+# database and carries literal values.
 #
 # Under Flask this worked by accident twice over -- `flask run` loads .env, and
 # so does litellm on import. Neither applies under uvicorn as a guarantee, and
-# depending on a transitive import side effect for the Mitra path is not a
-# dependency worth keeping.
+# depending on a transitive import side effect is not worth keeping.
 #
 # PRECEDENCE (highest first):
 #
@@ -83,19 +85,15 @@ class Settings(BaseSettings):
     db_max_overflow: int = 8
 
     # ---- registry ----
+    # How long the in-process agent snapshot may be stale before the next
+    # /api/ request re-checks MAX(updated_at). This is also the upper bound on
+    # how long a config change takes to go live, since there is no restart and
+    # no file to redeploy.
+    #
+    # CONFIG_SYNC_MODE is gone. There is no YAML to reconcile against: the
+    # catalogue is seeded by migration 0007 and edited through the config API,
+    # so there is nothing for the database to drift from.
     registry_ttl_s: int = 30
-    # DEFAULTS TO `off`: the DATABASE is the source of truth for agent config.
-    #
-    # `agents` + `agent_configs` have been the runtime source since migration
-    # 0002 -- AgentRegistry reads them, the admin API writes them, and since
-    # migration 0006 a tenant can have its own active config per agent. The
-    # YAML in app/config/agents/ is a SEED for a fresh environment, not the
-    # authority.
-    #
-    # `off` therefore suppresses reconciliation entirely, so a deploy can never
-    # revert a live override or orphan-disable a tenant's agent. Set `safe`
-    # once to seed a new database, then leave it off.
-    config_sync_mode: Literal["safe", "force", "off"] = "off"
 
     # ---- web tier (new in the FastAPI port) ----
     # Comma-separated browser origins allowed to call this API. The React dev
@@ -140,6 +138,15 @@ class Settings(BaseSettings):
     # Comma-separated EXTRA hostnames allowed in returned URLs (the
     # mitra_base_url hostname is always included automatically).
     mitra_allowed_hosts: str = ""
+    # The operator's BACKSTOP on the above, once an agent config can override
+    # it. `mitra_allowed_hosts` is an SSRF control (MitraRestClient._validate_url),
+    # so a config write that widens it must not be able to widen it without
+    # bound; a spec-supplied allowlist is intersected with this.
+    #
+    # EMPTY MEANS NO CEILING, deliberately -- every existing deployment keeps
+    # today's behaviour until it opts in. Set it to the full set of hosts any
+    # tenant may ever be pointed at.
+    mitra_host_ceiling: str = ""
     mitra_connect_timeout_s: float = 10.0
     mitra_read_timeout_s: float = 30.0
 

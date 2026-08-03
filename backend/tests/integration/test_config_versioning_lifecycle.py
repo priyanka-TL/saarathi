@@ -1,65 +1,53 @@
-"""The full config versioning lifecycle (design doc §5.5, §10.2):
+"""The config versioning lifecycle, end to end through the real admin API.
 
-  YAML v1 -> API override v2 -> restart -> YAML v3 stored inactive, v2 still
-  active, drift reported -> rollback to v1 -> works.
+  seed v1 -> API override v2 -> v3 -> roll back to v1 -> still works.
 
-Real Postgres, an isolated tmp_path YAML directory (never touches the real
-src/config/agents/*.yaml files) with one throwaway `agent_type: llm` test
-agent. Config overrides are posted through the real admin API (not simulated
-by hand), exercising the actual POST /config and /activate endpoints.
+THIS FILE USED TO BE ABOUT YAML. It tested `ConfigSyncService` reconciling
+`app/config/agents/*.yaml` against the database: drift detection, `force` mode
+reclaiming a live override, `off` mode skipping reconciliation, and
+orphan-disabling agents whose file had been deleted. None of that exists any
+more -- the database is the only source of agent configuration, seeded by
+migration 0007 and edited here.
 
-IMPORTANT: sync()'s orphan-detection (§5.5 case 3) disables every agent whose
-active config is yaml-sourced and whose key isn't present in the yaml_dir
-being synced. Since these tests deliberately point sync() at an ISOLATED
-tmp_path containing only one throwaway agent, every real shipped agent
-(general_support, research, ...) would otherwise get disabled as a side
-effect -- confirmed the hard way: an earlier run of this file left the real
-`agents` table with general_support/health_wellness/research/technical_support
-all 'disabled', which cascaded into unrelated test failures across the whole
-suite. The autouse fixture below snapshots and restores every agent's status
-around each test so this file can never do that again.
+What survives is the part that was always the point: **a config change is a new
+VERSION, the previous one stays readable, and activating an older version is a
+complete rollback.** That is what makes editing production configuration at
+runtime a safe operation rather than a destructive one, and it is now the only
+way configuration changes at all.
+
+Real Postgres, a throwaway `agent_type: llm` agent per test, and the real
+`POST /config` / `POST /{version}/activate` endpoints rather than hand-written
+SQL.
 """
 from __future__ import annotations
-from starlette.testclient import TestClient
 
-import json
 import uuid
 
 import pytest
 from sqlalchemy import text
+from starlette.testclient import TestClient
 
 from app.database.engine import SessionLocal
 from app.domain.core import OrgMembership, UserContext
-from app.services.config_sync import ConfigSyncService
 
 
 @pytest.fixture(autouse=True)
-def _protect_real_agent_statuses(flask_app):
-    """See the module docstring: sync() against an isolated tmp_path
-    orphan-disables every agent it doesn't know about. Snapshot every
-    agent's status before the test and restore it after, so this file's
-    isolated syncs can never leak damage into the shared dev database. Also
-    deletes any agent rows THIS test created (its own vertest_* throwaway
-    agent) -- a repeated `pytest` run must not accumulate a new enabled
-    agent row every time, which would eventually break test_agents_endpoint.py's
-    "exactly 5 agents" golden assertion exactly as test_admin_routes.py's own
-    uncleaned test fixtures were separately found to do.
+def _cleanup_created_agents(flask_app):
+    """Delete any agent row THIS test created.
 
-    Also forces one final container.agent_registry.reload() after cleanup:
-    the admin API calls this test makes (POST /config, /activate) force a
-    LIVE reload of the session-scoped, in-memory registry mid-test, so
-    without this it would keep serving a stale snapshot that still includes
-    the just-deleted vertest agent for the rest of the pytest process.
+    A repeated `pytest` run must not accumulate a new enabled agent row every
+    time, which would eventually break test_agents_endpoint.py's "exactly N
+    agents" golden assertion -- exactly as this file's own uncleaned fixtures
+    were once found to do.
+
+    Also forces one final registry reload after cleanup: the admin calls here
+    force a LIVE reload of the in-memory registry mid-test, so without this it
+    would keep serving a snapshot that still includes the deleted agent for the
+    rest of the pytest process.
     """
     session = SessionLocal()
     try:
-        snapshot_ids = {
-            row[0] for row in session.execute(text("SELECT id FROM agents")).fetchall()
-        }
-        status_snapshot = {
-            row[0]: row[1]
-            for row in session.execute(text("SELECT id, status FROM agents")).fetchall()
-        }
+        before = {row[0] for row in session.execute(text("SELECT id FROM agents")).fetchall()}
     finally:
         session.close()
 
@@ -67,74 +55,20 @@ def _protect_real_agent_statuses(flask_app):
 
     session = SessionLocal()
     try:
-        for agent_id, status in status_snapshot.items():
-            session.execute(
-                text("UPDATE agents SET status = :status WHERE id = :id"),
-                {"status": status, "id": agent_id},
-            )
-
-        new_ids = {
-            row[0] for row in session.execute(text("SELECT id FROM agents")).fetchall()
-        } - snapshot_ids
-        for agent_id in new_ids:
+        after = {row[0] for row in session.execute(text("SELECT id FROM agents")).fetchall()}
+        for agent_id in after - before:
             session.execute(text("DELETE FROM agent_configs WHERE agent_id = :id"), {"id": agent_id})
             session.execute(text("DELETE FROM audit_logs WHERE entity_id = :id"), {"id": agent_id})
             session.execute(text("DELETE FROM agents WHERE id = :id"), {"id": agent_id})
-
         session.commit()
         flask_app.state.container.agent_registry.reload(session)
     finally:
         session.close()
 
 
-def _write_yaml(yaml_dir, key: str, name: str, description: str) -> None:
-    (yaml_dir / "agent.yaml").write_text(f"""
-schema_version: 1
-key: {key}
-name: "{name}"
-description: "{description}"
-agent_type: llm
-prompt: "You are a versioning test agent."
-model: {{ provider: openrouter, name: test-model }}
-tools: []
-""")
-
-
-def _agent_id(session, key: str) -> uuid.UUID:
-    row = session.execute(text("SELECT id FROM agents WHERE key = :key"), {"key": key}).fetchone()
-    assert row is not None
-    return row[0]
-
-
-def _configs(session, agent_id: uuid.UUID):
-    """[(version, source, is_active, checksum), ...] ordered by version."""
-    rows = session.execute(
-        text("""
-            SELECT version, source, is_active, checksum FROM agent_configs
-            WHERE agent_id = :agent_id ORDER BY version
-        """),
-        {"agent_id": agent_id},
-    ).fetchall()
-    return [(r[0], r[1], r[2], r[3]) for r in rows]
-
-
-def _active(session, agent_id: uuid.UUID):
-    return next(c for c in _configs(session, agent_id) if c[2])
-
-
-def _drift_audit_rows(session, agent_id: uuid.UUID):
-    return session.execute(
-        text("""
-            SELECT action, note FROM audit_logs
-            WHERE entity_id = :agent_id AND note LIKE 'drift:%'
-        """),
-        {"agent_id": agent_id},
-    ).fetchall()
-
-
 @pytest.fixture()
 def admin_client(flask_app, monkeypatch):
-    """A Flask test client authenticated as an admin -- mirrors
+    """A test client authenticated as an admin -- mirrors
     tests/integration/test_admin_routes.py's own established pattern."""
     flask_app.state.container.settings.saarthi_admin_enabled = 1
     admin_user = UserContext(
@@ -142,12 +76,11 @@ def admin_client(flask_app, monkeypatch):
         tenant_code="t", orgs=(OrgMembership(org_id="o", org_code="o", roles=("admin",)),),
         active_org_id="o",
     )
-    # Identity is resolved once from configuration, not per request -- there
-    # is no login flow upstream of this API -- so patching `authenticate()` is
+    # Identity is resolved once from configuration, not per request -- there is
+    # no login flow upstream of this API -- so patching `authenticate()` is
     # sufficient.
     monkeypatch.setattr(
-        "app.services.identity.Authenticator.authenticate",
-        lambda self: admin_user,
+        "app.services.identity.Authenticator.authenticate", lambda self: admin_user,
     )
     return TestClient(
         flask_app,
@@ -156,188 +89,184 @@ def admin_client(flask_app, monkeypatch):
     )
 
 
-def _v2_body(key: str) -> dict:
+@pytest.fixture()
+def seeded_agent():
+    """One agent with an active v1, standing in for what migration 0007 does
+    for the shipped catalogue."""
+    session = SessionLocal()
+    key = f"vertest_{uuid.uuid4().hex[:8]}"
+    agent_id = session.execute(
+        text("""
+            INSERT INTO agents (key, name, description, agent_type, status)
+            VALUES (:key, :name, 'versioning fixture', 'llm', 'enabled')
+            RETURNING id
+        """),
+        {"key": key, "name": f"Versioning {key}"},
+    ).scalar()
+
+    from app.domain.agent_spec import AgentSpec, canonical_json
+    from pydantic import TypeAdapter
+
+    spec = TypeAdapter(AgentSpec).validate_python(_body(key, "v1 -- the seeded config"))
+    config, checksum = canonical_json(spec)
+    session.execute(
+        text("""
+            INSERT INTO agent_configs (agent_id, tenant_id, organization_id, version,
+                                       source, checksum, config, is_active, activated_at)
+            VALUES (:agent_id, 'default', 'default', 1, 'db', :checksum,
+                    CAST(:config AS jsonb), TRUE, now())
+        """),
+        {"agent_id": agent_id, "checksum": checksum, "config": config},
+    )
+    session.commit()
+    session.close()
+    return key, agent_id
+
+
+def _body(key: str, prompt: str) -> dict:
     return {
         "key": key,
-        "name": "Versioning Test Agent",
-        "description": "v2 -- posted through the admin API",
+        "name": f"Versioning {key}",
+        "description": "posted through the admin API",
         "agent_type": "llm",
-        "prompt": "You are the v2 override.",
+        "prompt": prompt,
         "model": {"name": "test-model"},
         "tools": [],
     }
 
 
-def test_full_versioning_lifecycle(tmp_path, admin_client):
-    key = f"vertest_{uuid.uuid4().hex[:8]}"
-    name = f"Versioning Test {uuid.uuid4().hex[:8]}"
-    _write_yaml(tmp_path, key, name, "v1 -- original yaml")
+def _configs(session, agent_id):
+    return session.execute(
+        text("""
+            SELECT version, source, is_active, checksum FROM agent_configs
+            WHERE agent_id = :id ORDER BY version
+        """),
+        {"id": agent_id},
+    ).fetchall()
 
-    svc = ConfigSyncService()
+
+def _active(session, agent_id):
+    return session.execute(
+        text("SELECT version, source FROM agent_configs WHERE agent_id = :id AND is_active"),
+        {"id": agent_id},
+    ).fetchone()
+
+
+def _prompt_in_registry(flask_app, key: str) -> str:
     session = SessionLocal()
     try:
-        report1 = svc.sync(session, tmp_path, mode="safe")
-        assert key in report1.created
-        agent_id = _agent_id(session, key)
-        v1 = _active(session, agent_id)
-        assert v1 == (1, "yaml", True, v1[3])
+        flask_app.state.container.agent_registry.reload(session)
     finally:
         session.close()
+    return flask_app.state.container.agent_registry.get(key).spec.prompt
 
-    # API override -> v2, source='db', activated.
-    res = admin_client.post(f"/api/agents/{key}/config", json=_v2_body(key))
+
+# ---------------------------------------------------------------------------
+
+
+def test_full_versioning_lifecycle(admin_client, seeded_agent, flask_app):
+    key, agent_id = seeded_agent
+
+    res = admin_client.post(f"/api/agents/{key}/config", json=_body(key, "v2 -- the override"))
     assert res.status_code == 200, res.json()
     assert res.json()["version"] == 2
 
-    verify = SessionLocal()
+    res = admin_client.post(f"/api/agents/{key}/config", json=_body(key, "v3 -- another edit"))
+    assert res.status_code == 200
+    assert res.json()["version"] == 3
+
+    session = SessionLocal()
     try:
-        active = _active(verify, agent_id)
-        assert active[0] == 2
-        assert active[1] == "db"
+        assert _active(session, agent_id)[0] == 3
+        # EXACTLY ONE active row per scope -- uq_agent_cfg_one_active. A second
+        # would make which config serves a turn a matter of row order.
+        assert sum(1 for c in _configs(session, agent_id) if c.is_active) == 1
     finally:
-        verify.close()
+        session.close()
 
-    # "Restart": the YAML changes (v3) while the db override is still active.
-    _write_yaml(tmp_path, key, name, "v3 -- yaml changed after the override")
-    session2 = SessionLocal()
-    try:
-        report2 = svc.sync(session2, tmp_path, mode="safe")
-        assert key in report2.drifted
-        assert key not in report2.updated
+    assert _prompt_in_registry(flask_app, key) == "v3 -- another edit"
 
-        configs = _configs(session2, agent_id)
-        v3 = next(c for c in configs if c[0] == 3)
-        assert v3[1] == "yaml"
-        assert v3[2] is False  # stored inactive
-
-        active = _active(session2, agent_id)
-        assert active[0] == 2
-        assert active[1] == "db"
-
-        drift_rows = _drift_audit_rows(session2, agent_id)
-        assert len(drift_rows) == 1
-        assert drift_rows[0][0] == "config_sync"
-    finally:
-        session2.close()
-
-    # Rollback to v1 via the real admin API.
+    # ROLL BACK to the seeded config. This is the whole reason versions exist:
+    # a bad production edit is undone by one call, not by re-deriving what the
+    # config used to say.
     res = admin_client.post(f"/api/agents/{key}/config/1/activate")
     assert res.status_code == 200, res.json()
+    assert res.json()["version"] == 1
 
-    final = SessionLocal()
-    try:
-        active = _active(final, agent_id)
-        assert active[0] == 1
-        assert active[1] == "yaml"
-
-        rollback_audit = final.execute(
-            text("""
-                SELECT action FROM audit_logs
-                WHERE entity_id = :agent_id AND action = 'config_activate'
-                AND note LIKE 'Activated version 1%'
-            """),
-            {"agent_id": agent_id},
-        ).fetchone()
-        assert rollback_audit is not None
-    finally:
-        final.close()
-
-
-def test_drift_reported_on_every_subsequent_boot(tmp_path, admin_client):
-    key = f"vertest_{uuid.uuid4().hex[:8]}"
-    name = f"Versioning Test {uuid.uuid4().hex[:8]}"
-    _write_yaml(tmp_path, key, name, "v1")
-
-    svc = ConfigSyncService()
     session = SessionLocal()
-    svc.sync(session, tmp_path, mode="safe")
-    agent_id = _agent_id(session, key)
-    session.close()
-
-    res = admin_client.post(f"/api/agents/{key}/config", json=_v2_body(key))
-    assert res.status_code == 200
-
-    _write_yaml(tmp_path, key, name, "v3 -- yaml changed")
-    session2 = SessionLocal()
-    report_boot2 = svc.sync(session2, tmp_path, mode="safe")
-    session2.close()
-    assert key in report_boot2.drifted
-
-    # "boot 3" -- no further yaml edits, but the db override is still active.
-    session3 = SessionLocal()
     try:
-        report_boot3 = svc.sync(session3, tmp_path, mode="safe")
-        assert key in report_boot3.drifted, "drift must be reported again, not silently 'unchanged'"
-        assert key not in report_boot3.unchanged
-
-        drift_rows = _drift_audit_rows(session3, agent_id)
-        assert len(drift_rows) == 2, "each boot with a live override must write its own drift audit row"
+        assert _active(session, agent_id)[0] == 1
+        # Nothing is deleted by a rollback -- v2 and v3 are still there to roll
+        # forward to.
+        assert [c.version for c in _configs(session, agent_id)] == [1, 2, 3]
     finally:
-        session3.close()
+        session.close()
+
+    assert _prompt_in_registry(flask_app, key) == "v1 -- the seeded config"
 
 
-def test_force_mode_discards_override_even_when_yaml_unchanged(tmp_path, admin_client):
-    key = f"vertest_{uuid.uuid4().hex[:8]}"
-    name = f"Versioning Test {uuid.uuid4().hex[:8]}"
-    _write_yaml(tmp_path, key, name, "v1")
+def test_version_list_is_newest_first_and_marks_the_active_one(admin_client, seeded_agent):
+    key, _agent_id = seeded_agent
+    admin_client.post(f"/api/agents/{key}/config", json=_body(key, "v2"))
 
-    svc = ConfigSyncService()
+    res = admin_client.get(f"/api/agents/{key}/config/versions")
+    assert res.status_code == 200
+    versions = res.json()
+
+    assert [v["version"] for v in versions] == [2, 1]
+    assert [v["is_active"] for v in versions] == [True, False]
+
+
+def test_each_version_carries_its_own_checksum(admin_client, seeded_agent):
+    """The checksum is HandlerFactory's cache key alongside the agent key, so
+    two different configs sharing one would serve the wrong handler -- and,
+    across tenants, the wrong system prompt. See tests/guards/test_tenant_isolation.py."""
+    key, agent_id = seeded_agent
+    admin_client.post(f"/api/agents/{key}/config", json=_body(key, "v2 -- different content"))
+
     session = SessionLocal()
-    svc.sync(session, tmp_path, mode="safe")
-    agent_id = _agent_id(session, key)
-    session.close()
-
-    res = admin_client.post(f"/api/agents/{key}/config", json=_v2_body(key))
-    assert res.status_code == 200
-
-    _write_yaml(tmp_path, key, name, "v3 -- yaml changed")
-    session2 = SessionLocal()
-    svc.sync(session2, tmp_path, mode="safe")
-    session2.close()
-
-    # Force, with NO further yaml edits since the last sync (still v3 content).
-    session3 = SessionLocal()
     try:
-        report = svc.sync(session3, tmp_path, mode="force")
-        assert key in report.updated
-        assert key not in report.drifted
-
-        active = _active(session3, agent_id)
-        assert active[1] == "yaml"
-
-        configs = _configs(session3, agent_id)
-        db_version = next(c for c in configs if c[1] == "db")
-        assert db_version[2] is False, "the db override must be deactivated"
+        checksums = [c.checksum for c in _configs(session, agent_id)]
     finally:
-        session3.close()
+        session.close()
+
+    assert len(set(checksums)) == len(checksums)
 
 
-def test_mode_off_skips_reconciliation_entirely(tmp_path, admin_client):
-    key = f"vertest_{uuid.uuid4().hex[:8]}"
-    name = f"Versioning Test {uuid.uuid4().hex[:8]}"
-    _write_yaml(tmp_path, key, name, "v1")
+def test_activating_an_unknown_version_is_a_400_and_changes_nothing(admin_client, seeded_agent):
+    key, agent_id = seeded_agent
 
-    svc = ConfigSyncService()
+    res = admin_client.post(f"/api/agents/{key}/config/99/activate")
+    assert res.status_code == 400
+    assert res.json()["error"] == "INVALID_REQUEST"
+
     session = SessionLocal()
-    svc.sync(session, tmp_path, mode="safe")
-    agent_id = _agent_id(session, key)
-    session.close()
-
-    res = admin_client.post(f"/api/agents/{key}/config", json=_v2_body(key))
-    assert res.status_code == 200
-
-    _write_yaml(tmp_path, key, name, "v3 -- yaml changed, but mode=off must ignore this entirely")
-    before = SessionLocal()
-    configs_before = _configs(before, agent_id)
-    before.close()
-
-    session2 = SessionLocal()
     try:
-        report = svc.sync(session2, tmp_path, mode="off")
-        assert report.as_dict() == {
-            "created": [], "updated": [], "unchanged": [], "drifted": [], "orphaned": [],
-        }
-        configs_after = _configs(session2, agent_id)
-        assert configs_after == configs_before, "mode=off must not write anything at all"
+        # Still exactly one active row: the failed activate must not have run
+        # its blanket deactivate and left the agent with none.
+        assert _active(session, agent_id)[0] == 1
     finally:
-        session2.close()
+        session.close()
+
+
+def test_an_invalid_config_is_rejected_and_writes_no_version(admin_client, seeded_agent):
+    key, agent_id = seeded_agent
+    bad = _body(key, "v2")
+    bad["model"] = {"name": "test-model", "temperature": 99}  # ModelSpec caps at 2.0
+
+    res = admin_client.post(f"/api/agents/{key}/config", json=bad)
+    assert res.status_code == 422
+    assert res.json()["error"] == "CONFIG_INVALID"
+
+    session = SessionLocal()
+    try:
+        assert [c.version for c in _configs(session, agent_id)] == [1]
+        assert _active(session, agent_id)[0] == 1
+    finally:
+        session.close()
+
+
+def test_config_for_an_unknown_agent_is_a_404(admin_client):
+    res = admin_client.post("/api/agents/nosuchagent/config", json=_body("nosuchagent", "x"))
+    assert res.status_code == 404
+    assert res.json()["error"] == "AGENT_NOT_FOUND"

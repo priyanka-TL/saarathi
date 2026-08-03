@@ -1,29 +1,47 @@
-"""Pins the settings that matter in src/config/agents/capture_discussion.yaml.
+"""Pins the settings that matter in the seeded `capture_discussion` config.
 
-The sibling file test_record_stories_config.py explains why this is necessary:
-RemoteSpec, RoutingSpec, LimitsSpec and FeaturesSpec do NOT set
-extra="forbid" (only BaseAgentSpec does -- verified in src/domain/agent_spec.py),
-so a typo'd field name inside `remote:`, `routing:` or `limits:` is silently
-dropped rather than rejected at config-sync time. Until now this agent had only
-two of its fields asserted anywhere, while its sibling had ten.
+These used to read app/config/agents/capture_discussion.yaml. There is no YAML any
+more -- the catalogue is seeded by migration 0007 and edited through the config
+API -- so the source of truth these assert against is the migration's own
+SEED_AGENTS list, validated through the real adapter exactly as the application
+validates a row read out of agent_configs.
+
+RemoteSpec and its nested models don't set extra="forbid" (only BaseAgentSpec
+does), so a typo'd field name inside `remote:`/`routing:` would be silently
+ignored rather than rejected. These assertions are what catch that instead.
 """
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
-import yaml
 from pydantic import TypeAdapter
 
 from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 
-YAML_PATH = Path(__file__).parents[2] / "app" / "config" / "agents" / "capture_discussion.yaml"
+_MIGRATION = Path(__file__).parents[2] / "migrations" / "versions" / "0007_seed_agents.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
 
+def _seed_specs() -> dict:
+    """SEED_AGENTS, loaded by path.
+
+    Imported as a file rather than a module because `migrations/versions` is not
+    a package and alembic revision filenames are not importable identifiers.
+    """
+    spec = importlib.util.spec_from_file_location("_seed_0007", _MIGRATION)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return {a["key"]: a for a in module.SEED_AGENTS}
+
+
+def _raw() -> dict:
+    return _seed_specs()["capture_discussion"]
+
+
 def _load_spec() -> RemoteFlowAgentSpec:
-    raw = yaml.safe_load(YAML_PATH.read_text())
-    spec = _adapter.validate_python(raw)
+    spec = _adapter.validate_python(_raw())
     assert isinstance(spec, RemoteFlowAgentSpec)
     return spec
 
@@ -40,22 +58,31 @@ def test_pin_session_is_true():
     assert _load_spec().routing.pin_session is True
 
 
-def test_remote_env_var_names():
+def test_bot_route_and_company_are_stored_literals():
     """These three are how the interview lands on the SAME company bot the
     Mitra portal's chaupal socket uses: both consumers resolve it as
     CompanyBot.objects.get(company=profile.company, route=bot_route), so
-    bot_route_env (-> /shikshalokam_chaupal) and company_env (-> the company
-    slug) together pick the bot, and flow_name selects the story branch at
+    bot_route (-> /shikshalokam_chaupal) and company (-> the company slug)
+    together pick the bot, and flow_name selects the story branch at
     finalisation. Nothing else in Mitra's story or PDF path distinguishes
-    Saarthi's socket from the portal's."""
+    Saarthi's socket from the portal's.
+
+    They are plain stored fields rather than the old `*_env` indirection, which
+    is what lets a tenant-scoped agent_configs row point this agent at its own
+    company.
+    """
     remote = _load_spec().remote
     assert remote.provider == "mitra"
     assert remote.flow_name == "guest-discussion"
-    # NOT MITRA_STORY_BOT_ROUTE. These two agents differ by exactly one env var
-    # and one flow name, and swapping either sends the interview to the wrong
-    # Mitra bot with no error -- just the wrong questions.
-    assert remote.bot_route_env == "MITRA_DISCUSSION_BOT_ROUTE"
-    assert remote.company_env == "MITRA_COMPANY"
+
+    raw = _raw()["remote"]
+    # NOT the story bot route. These two agents differ by exactly one route and
+    # one flow name, and swapping either sends the interview to the wrong Mitra
+    # bot with no error -- just the wrong questions.
+    assert raw["bot_route"] == "/shikshalokam_chaupal"
+    assert raw["company"] == "shikshalokamstaging"
+    for value in (raw["bot_route"], raw["company"]):
+        assert "${" not in value
 
 
 def test_finalize_is_v1_and_tokenless_because_only_that_renders_the_mom_report():
@@ -141,8 +168,7 @@ def test_limits_are_declared_so_an_interview_has_a_ceiling():
 def test_priority_is_below_record_stories():
     """Both agents match on story/discussion-ish keywords and Gate 3 takes the
     highest priority hit, so the ordering between them is load-bearing."""
-    raw_sibling = yaml.safe_load((YAML_PATH.parent / "record_stories.yaml").read_text())
-    sibling = _adapter.validate_python(raw_sibling)
+    sibling = _adapter.validate_python(_seed_specs()["record_stories"])
     assert _load_spec().routing.priority < sibling.routing.priority
 
 

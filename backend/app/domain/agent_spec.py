@@ -1,5 +1,3 @@
-import os
-import re
 import json
 import hashlib
 import copy
@@ -78,29 +76,6 @@ class FeaturesSpec(BaseModel):
     streaming:              bool = False
     record_tool_executions: bool = True
 
-def _resolve_env_string(value: str) -> str:
-    def replacer(match):
-        var_name = match.group(1)
-        default = match.group(3)
-        if var_name in os.environ:
-            return os.environ[var_name]
-        elif default is not None:
-            return default
-        else:
-            return "" # Bash-like behavior: substitute empty string if missing and no default
-            
-    pattern = re.compile(r'\$\{([A-Za-z0-9_]+)(:-(.*?))?\}')
-    return pattern.sub(replacer, value)
-
-def _resolve_env_in_dict(d: Any) -> Any:
-    if isinstance(d, dict):
-        return {k: _resolve_env_in_dict(v) for k, v in d.items()}
-    elif isinstance(d, list):
-        return [_resolve_env_in_dict(v) for v in d]
-    elif isinstance(d, str):
-        return _resolve_env_string(d)
-    return d
-
 class BaseAgentSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     
@@ -119,16 +94,31 @@ class BaseAgentSpec(BaseModel):
     access:   AccessSpec   = Field(default_factory=AccessSpec)
     features: FeaturesSpec = Field(default_factory=FeaturesSpec)
 
-    _unresolved_dict: dict = PrivateAttr(default_factory=dict)
+    #: The dict this spec was validated FROM, kept verbatim.
+    #:
+    #: `canonical_json` checksums this rather than `model_dump()`, and that is
+    #: deliberate: model_dump emits every default the schema fills in, so adding
+    #: an optional field with a default would change the checksum of every
+    #: stored config -- invalidating every HandlerFactory cache entry and making
+    #: a schema change look like a configuration change in the audit log.
+    _source_dict: dict = PrivateAttr(default_factory=dict)
 
     @model_validator(mode='wrap')
     @classmethod
-    def resolve_and_store(cls, v: Any, handler: Any) -> Any:
+    def store_source(cls, v: Any, handler: Any) -> Any:
+        """Capture the input dict before validation fills in defaults.
+
+        This used to also expand ${VAR} references against os.environ, which is
+        how the YAML seed carried per-deployment values. There is no YAML any
+        more and no environment indirection: a config row holds literal values,
+        and a deployment or a tenant differs by having its own row. The one
+        exception is `RemoteSpec.origin_env`, which names a variable rather than
+        holding a value, because the Origin header is a credential.
+        """
         if isinstance(v, dict):
-            unresolved = copy.deepcopy(v)
-            resolved = _resolve_env_in_dict(v)
-            model = handler(resolved)
-            model._unresolved_dict = unresolved
+            source = copy.deepcopy(v)
+            model = handler(v)
+            model._source_dict = source
             return model
         return handler(v)
 
@@ -148,11 +138,73 @@ class MitraTurnSpec(BaseModel):
     turn_timeout_ms:       int = 45000
     idle_gap_ms:           int = 8000
 
+class MitraPathsSpec(BaseModel):
+    """Per-scope overrides for Mitra's own endpoint paths.
+
+    EVERY FIELD IS OPTIONAL AND None MEANS "use the env value". That is what
+    keeps this additive: a deployment with no overrides resolves to exactly the
+    MITRA_*_PATH settings it did before these fields existed.
+    """
+    profile:          Optional[str] = None
+    generate_session: Optional[str] = None
+    chat:             Optional[str] = None
+    get_story:        Optional[str] = None
+    finalize_v1:      Optional[str] = None
+    finalize_v2:      Optional[str] = None
+
+class MitraConnectionSpec(BaseModel):
+    """Which Mitra deployment this agent talks to, at this scope.
+
+    Set nothing and the agent uses the deployment's own MITRA_* settings, which
+    is the case for every agent until a tenant is deliberately pointed
+    elsewhere. Merged onto the env floor by
+    app/integrations/mitra/connection.resolve_connection -- this module cannot
+    do the merging itself, because the domain layer is import-pure by contract
+    and cannot reach Settings.
+
+    THE ORIGIN URL IS ABSENT ON PURPOSE. Mitra gates admission on it, so it is
+    a credential and must never be stored in a config row; a scope needing its
+    own uses `RemoteSpec.origin_env` to name an environment variable instead.
+    """
+    base_url:             Optional[str] = None
+    ws_url:               Optional[str] = None
+    user_agent:           Optional[str] = None
+    # Extra hosts whose presigned report URLs may be fetched. An SSRF control
+    # (MitraRestClient._validate_url), so it is intersected with
+    # MITRA_HOST_CEILING when the operator has set one.
+    allowed_hosts:        Optional[List[str]] = None
+    paths:                Optional[MitraPathsSpec] = None
+    connect_timeout_s:    Optional[float] = Field(None, gt=0, le=300)
+    read_timeout_s:       Optional[float] = Field(None, gt=0, le=300)
+    ws_connect_timeout_s: Optional[float] = Field(None, gt=0, le=300)
+    ip_city:              Optional[str] = None
+    ip_state:             Optional[str] = None
+    ip_zip:               Optional[str] = None
+
 class RemoteSpec(BaseModel):
     provider:  Literal["mitra"]
     flow_name: Literal["guest-mi-story", "guest-discussion"]
-    bot_route_env: str
-    company_env:   str = "MITRA_COMPANY"
+    # REQUIRED, and stored literally.
+    #
+    # These were read from os.environ (via `bot_route_env` / `company_env`),
+    # which made them process-global -- and since Mitra identifies a profile by
+    # (email, company), that meant one Saarthi process could serve exactly one
+    # Mitra company with one set of bot routes. As plain spec fields they live
+    # in agent_configs, so a tenant-scoped row carries its own values and two
+    # tenants get genuinely separate Mitra profiles and story histories.
+    #
+    # min_length=1 rather than Optional: an empty company or bot route does not
+    # fail loudly at Mitra, it silently resolves the wrong CompanyBot or splits
+    # a user's profile. Rejecting it at validation is the only cheap place.
+    bot_route: str = Field(min_length=1)
+    company:   str = Field(min_length=1)
+    # Names the variable holding this scope's Origin credential -- never the
+    # value. THE ONE REMAINING ENVIRONMENT INDIRECTION, and it exists precisely
+    # because Mitra gates admission on the Origin header, which makes it a
+    # credential that must not be stored in a config row. Unset means the
+    # deployment-wide MITRA_ORIGIN_URL.
+    origin_env: Optional[str] = None
+    connection: Optional[MitraConnectionSpec] = None
     default_language:    Literal["en","hi","kn","te"] = "en"
     supported_languages: List[str] = Field(default_factory=lambda: ["en","hi","kn","te"])
     handshake: MitraHandshakeSpec = Field(default_factory=MitraHandshakeSpec)
@@ -166,10 +218,10 @@ class RemoteSpec(BaseModel):
     # endpoints are configurable now (MITRA_FINALIZE_V1_PATH /
     # MITRA_FINALIZE_V2_PATH) and this module is import-pure by contract, so it
     # cannot reach Settings to build the Literal. The guard is not lost, only
-    # moved and widened: ConfigSyncService asserts at startup that this value
-    # equals one of the CONFIGURED finalize endpoints, which also catches a
-    # YAML/settings mismatch the Literal could not see. A typo still fails
-    # before any interview runs, with the agent key in the message.
+    # moved: POST /api/agents/{key}/config asserts that this value equals one
+    # of the endpoints THIS spec resolves to, which also catches a mismatch
+    # between a scoped connection override and the path. A typo is rejected at
+    # write time rather than discovered as a blank PDF.
     finalize_path:     str = "/api/end-story/v2/"
     # Finalize WITHOUT a user token -- v1 sends `access_token: null` in the
     # body, v2 sends no Authorization header.
@@ -202,19 +254,20 @@ from typing_extensions import Annotated
 AgentSpec = Annotated[Union[LlmAgentSpec, RemoteFlowAgentSpec], Field(discriminator="agent_type")]
 
 def canonical_json(spec: Any) -> tuple[str, str]:
+    """Deterministic JSON for a spec, plus its SHA256.
+
+    The checksum is what separates one tenant's cached handler from another's
+    (HandlerFactory keys on `(spec.key, checksum)`), so it must be a function of
+    the CONTENT that was written, not of the schema that read it.
+
+    That is why the source dict is preferred over `model_dump()`: model_dump
+    emits every default the schema supplies, so adding one optional field would
+    change the checksum of every stored config at once. Migration 0007 relies on
+    this too -- it computes the same digest with the standard library, and
+    tests/integration/test_seed_migration.py asserts the two agree.
     """
-    Returns a deterministic JSON serialization of the unresolved spec,
-    along with its SHA256 checksum.
-    The spec can be an AgentSpec instance.
-    """
-    if hasattr(spec, "_unresolved_dict") and spec._unresolved_dict:
-        # Pydantic v2 discriminator might be present in the instance but missing from raw dict if it was inferred?
-        # Actually agent_type is required in the input.
-        raw_dict = spec._unresolved_dict
-    else:
-        # Fallback if someone serialized to dict manually
-        raw_dict = spec.model_dump(mode="json")
-        
+    raw_dict = getattr(spec, "_source_dict", None) or spec.model_dump(mode="json")
+
     json_str = json.dumps(raw_dict, separators=(',', ':'), sort_keys=True)
     sha = hashlib.sha256(json_str.encode('utf-8')).hexdigest()
     return json_str, sha

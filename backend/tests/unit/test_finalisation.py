@@ -88,6 +88,12 @@ def _make_orch(
     orch._llm_factory = MagicMock()
     orch._mitra_rest = mitra_rest or MagicMock()
     orch._mitra_sessions = mitra_sessions or MagicMock()
+    # No client registry: rest_for() then falls back to the injected single
+    # client above, which is what every assertion here is written against.
+    # A registry is exercised in tests/guards/test_tenant_isolation.py, where
+    # the point IS that two scopes get different clients.
+    orch._mitra_clients = None
+    orch._settings = None
     orch._conversations = MagicMock()
     orch._messages = MagicMock()
     orch._sessions = sessions_service or MagicMock()

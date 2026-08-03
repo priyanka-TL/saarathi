@@ -1,27 +1,47 @@
-"""Pins the settings that matter in src/config/agents/record_stories.yaml
-(design doc §11.2). RemoteSpec and its nested models don't set
-extra="forbid" (only BaseAgentSpec does -- verified in src/domain/agent_spec.py),
-so a typo'd field name inside `remote:`/`routing:` would be silently ignored
-rather than caught at config-sync time. These assertions are what catch that
-instead.
+"""Pins the settings that matter in the seeded `record_stories` config.
+
+These used to read app/config/agents/record_stories.yaml. There is no YAML any
+more -- the catalogue is seeded by migration 0007 and edited through the config
+API -- so the source of truth these assert against is the migration's own
+SEED_AGENTS list, validated through the real adapter exactly as the application
+validates a row read out of agent_configs.
+
+RemoteSpec and its nested models don't set extra="forbid" (only BaseAgentSpec
+does), so a typo'd field name inside `remote:`/`routing:` would be silently
+ignored rather than rejected. These assertions are what catch that instead.
 """
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
-import yaml
 from pydantic import TypeAdapter
 
 from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 
-YAML_PATH = Path(__file__).parents[2] / "app" / "config" / "agents" / "record_stories.yaml"
+_MIGRATION = Path(__file__).parents[2] / "migrations" / "versions" / "0007_seed_agents.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
 
+def _seed_specs() -> dict:
+    """SEED_AGENTS, loaded by path.
+
+    Imported as a file rather than a module because `migrations/versions` is not
+    a package and alembic revision filenames are not importable identifiers.
+    """
+    spec = importlib.util.spec_from_file_location("_seed_0007", _MIGRATION)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return {a["key"]: a for a in module.SEED_AGENTS}
+
+
+def _raw() -> dict:
+    return _seed_specs()["record_stories"]
+
+
 def _load_spec() -> RemoteFlowAgentSpec:
-    raw = yaml.safe_load(YAML_PATH.read_text())
-    spec = _adapter.validate_python(raw)
+    spec = _adapter.validate_python(_raw())
     assert isinstance(spec, RemoteFlowAgentSpec)
     return spec
 
@@ -57,10 +77,20 @@ def test_emit_options_feature_is_enabled():
     assert _load_spec().features.emit_options is True
 
 
-def test_remote_env_var_names():
+def test_bot_route_and_company_are_stored_literals():
+    """`remote.bot_route` / `remote.company` are plain stored fields, which is
+    what lets a tenant-scoped agent_configs row override them.
+
+    Also asserts they carry no `${VAR}` reference: that substitution is gone,
+    so one left behind would be sent to Mitra verbatim as a company slug.
+    """
+    raw = _raw()["remote"]
+    assert raw["bot_route"] == "/guided_guest"
+    assert raw["company"] == "shikshalokamstaging"
+    for value in (raw["bot_route"], raw["company"]):
+        assert "${" not in value
+
     remote = _load_spec().remote
-    assert remote.bot_route_env == "MITRA_STORY_BOT_ROUTE"
-    assert remote.company_env == "MITRA_COMPANY"
     assert remote.provider == "mitra"
     assert remote.flow_name == "guest-mi-story"
 
@@ -98,10 +128,7 @@ def test_the_two_agents_finalize_differently_per_agent():
     body, the discussion agent sends `access_token: null` because Mitra picks
     the PDF template's user_type from token presence. Keep them apart.
     """
-    raw = yaml.safe_load(
-        (YAML_PATH.parent / "capture_discussion.yaml").read_text()
-    )
-    sibling = _adapter.validate_python(raw)
+    sibling = _adapter.validate_python(_seed_specs()["capture_discussion"])
 
     assert sibling.remote.flow_name == "guest-discussion"
     assert sibling.remote.finalize_path == "/api/end-story/"

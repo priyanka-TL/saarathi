@@ -60,6 +60,8 @@ def _orchestrator(db: Session, container: Container) -> OrchestrationService:
         llm_factory=container.llm_factory,
         mitra_rest=container.mitra_rest,
         mitra_sessions=container.mitra_sessions,
+        mitra_clients=container.mitra_clients,
+        settings=container.settings,
     )
 
 
@@ -207,7 +209,12 @@ def get_report(
     if miss is not None:
         return miss
 
-    agent = container.agent_registry.get_by_id(str(dto.agent_id))
+    # SCOPE-RESOLVED, like every other read of an agent off a session.
+    # get_by_id alone answers from the default-scope snapshot, so a tenant that
+    # had customised report_media_type -- or that points at its own Mitra --
+    # would have had its report fetched with the default scope's settings.
+    orch = _orchestrator(db, container)
+    agent = orch.agent_for_session(dto, user)
     media_type: Optional[str] = (
         agent.spec.remote.report_media_type if agent is not None else "application/pdf"
     )
@@ -217,9 +224,10 @@ def get_report(
             {"report_url": dto.report_url, "media_type": media_type, "story_id": dto.result_ref}
         )
 
-    if dto.state == "completed" and container.mitra_rest is not None and dto.remote_session_id:
+    rest = orch.rest_for(agent)
+    if dto.state == "completed" and rest is not None and dto.remote_session_id:
         try:
-            url = container.mitra_rest.get_report(dto.remote_session_id, media_type=media_type)
+            url = rest.get_report(dto.remote_session_id, media_type=media_type)
         except MitraError:
             url = None
         if url:

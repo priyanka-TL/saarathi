@@ -7,7 +7,7 @@ Two seeds run at different times against different sources:
   * `capabilities` are seeded by MIGRATION 0006. A migration cannot depend on
     agents existing, because on a fresh database it runs before anything has
     been synced.
-  * `agents` are seeded by ConfigSyncService from YAML at STARTUP, which is
+  * `agents` are seeded by migration 0007, which is
     after every migration has run.
 
 `capability_agents` needs both. On a fresh database the migration therefore

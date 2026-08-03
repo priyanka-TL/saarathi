@@ -28,6 +28,8 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.core.container import Container
+from app.dependencies.container import get_container
 from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
 from app.domain.core import UserContext
@@ -41,6 +43,7 @@ router = APIRouter(tags=["ui"])
 def get_ui_capabilities(
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
+    container: Container = Depends(get_container),
 ) -> JSONResponse:
     """The capability document for this caller's scope.
 
@@ -57,4 +60,6 @@ def get_ui_capabilities(
     does not exist, which is a different claim and would make a genuinely
     misconfigured deployment indistinguishable from a deliberately empty one.
     """
-    return json_response(resolve_for_user(db, user))
+    return json_response(
+        resolve_for_user(db, user, mitra_enabled=bool(container.settings.mitra_enabled))
+    )

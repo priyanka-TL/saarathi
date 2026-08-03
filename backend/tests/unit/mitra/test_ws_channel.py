@@ -18,6 +18,7 @@ from app.integrations.mitra.exceptions import (
     MitraRemoteError,
     MitraTurnTimeout,
 )
+from app.integrations.mitra.connection import MitraConnection
 from app.integrations.mitra.ws_channel import MitraChannel, UNREADABLE_TURN_MESSAGE
 
 
@@ -94,19 +95,23 @@ class _Session:
     remote_bot_route: str = "test-route"
 
 
-@dataclass
-class _Settings:
-    mitra_ws_url: str = "wss://mitra.example.com/ws/common/"
-    mitra_origin_url: str = "https://mitra.example.com"
-    mitra_user_agent: str = "test-agent"
-    mitra_ws_connect_timeout_s: float = 5.0
-    mitra_ip_city: str = ""
-    mitra_ip_state: str = ""
-    mitra_ip_zip: str = ""
+# The REAL value object rather than a stand-in: it is a pure dataclass with no
+# I/O, so using it here also pins that MitraChannel reads the fields it is
+# actually given (ws_url, origin_url, user_agent, ws_connect_timeout_s, ip_*).
+def _conn(**overrides) -> MitraConnection:
+    defaults = dict(
+        base_url="https://mitra.example.com",
+        ws_url="wss://mitra.example.com/ws/common/",
+        user_agent="test-agent",
+        ws_connect_timeout_s=5.0,
+        origin_url="https://mitra.example.com",
+    )
+    defaults.update(overrides)
+    return MitraConnection(**defaults)
 
 
 def _make_channel(fake: _FakeWebSocket, spec: Optional[_Spec] = None, sess: Optional[_Session] = None):
-    return MitraChannel(spec or _Spec(), sess or _Session(), _Settings(), ws_factory=lambda: fake)
+    return MitraChannel(spec or _Spec(), sess or _Session(), _conn(), ws_factory=lambda: fake)
 
 
 # ---------------------------------------------------------------------------

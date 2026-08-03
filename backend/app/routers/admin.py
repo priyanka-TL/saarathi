@@ -20,6 +20,7 @@ Raw `sqlalchemy.text()` is used rather than repositories because `agents` and
 """
 from __future__ import annotations
 
+
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends
@@ -171,6 +172,40 @@ def activate_config_version(
     return json_response({"version": version_int, "registry_version": new_version})
 
 
+def _remote_config_problem(spec, settings) -> Optional[tuple[list, str]]:
+    """Reject a remote_flow config that would fail SILENTLY at interview time.
+
+    THIS ROUTE IS THE ONLY GATE. There is no YAML and no startup sync any more,
+    so a config reaches Mitra exactly as it was written here. `bot_route` and
+    `company` are non-empty by schema; what the schema cannot check is
+    `finalize_path`, because the endpoints are configurable and the domain layer
+    cannot import Settings to express them as a Literal.
+
+    Getting it wrong is not a loud failure: anything unrecognised falls through
+    to the v1 branch and finalises with the wrong body shape, which Mitra
+    ACCEPTS -- returning a story, a story_media row, a 200 from get-story and a
+    downloadable, completely blank PDF, with nothing logged anywhere.
+
+    Returns (path, msg) for the error envelope, or None when the config is fine.
+    """
+    from app.integrations.mitra.connection import resolve_connection
+
+    remote = spec.remote
+    # Against the endpoints THIS spec resolves to -- it may carry its own
+    # remote.connection.paths, and checking against the global pair would both
+    # reject correct configs and accept wrong ones.
+    paths = resolve_connection(settings, remote).paths
+    if not paths.is_known_finalize(remote.finalize_path):
+        return (
+            ["remote", "finalize_path"],
+            f"finalize_path {remote.finalize_path!r} matches neither the resolved "
+            f"v1 endpoint ({paths.finalize_v1!r}) nor the resolved v2 endpoint "
+            f"({paths.finalize_v2!r})",
+        )
+
+    return None
+
+
 @router.post("/api/agents/{key}/config", response_model=None)
 def create_config_version(
     key: str,
@@ -207,6 +242,12 @@ def create_config_version(
             container.tool_registry.assert_all_known(spec.tools)
         except Exception as e:  # noqa: BLE001
             return _admin_error("CONFIG_INVALID", 422, path=["tools"], msg=str(e))
+
+    if spec.agent_type == "remote_flow":
+        problem = _remote_config_problem(spec, container.settings)
+        if problem is not None:
+            path, msg = problem
+            return _admin_error("CONFIG_INVALID", 422, path=path, msg=msg)
 
     canonical, checksum = canonical_json(spec)
 

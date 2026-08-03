@@ -57,10 +57,6 @@ EXPECTED_EDITS = {
         "finalize_path relaxed from a Literal to str -- the endpoints are configurable "
         "now and the domain layer cannot import Settings; ConfigSyncService validates it"
     ),
-    "app/services/config_sync.py": (
-        "asserts finalize_path against the CONFIGURED Mitra endpoints; "
-        "agent_configurations renamed to agent_configs (migration 0006)"
-    ),
     # Multi-tenancy pass (migration 0006). The agent catalogue gained a
     # tenant/organization scope, and the table holding versioned configs was
     # renamed. These three files are the only copied ones that had to follow.
@@ -81,6 +77,48 @@ EXPECTED_EDITS = {
         "models are untouched; only the AgentSession FK comment was rewritten, "
         "because an Agent class is now registered and the historical reason for "
         "deferring that FK no longer applies"
+    ),
+    # Per-tenant Mitra configuration. MITRA_COMPANY and the two bot routes were
+    # read straight off os.environ, which made them process-global -- and since
+    # Mitra identifies a profile by (email, company), one process could serve
+    # exactly one Mitra company. These four files carry the resolved
+    # MitraConnection instead of Settings, so the endpoint, the company and the
+    # bot route come from the agent config at the caller's scope.
+    "app/agents/factory.py": (
+        "HandlerDeps.mitra_rest -> mitra_clients: a client carries the base URL, "
+        "the timeouts and the Origin credential, all of which now resolve per "
+        "agent and per tenant, so a single shared client would serve every scope "
+        "the first scope's endpoint"
+    ),
+    "app/agents/remote_flow_handler.py": (
+        "resolves its MitraConnection once in __init__ (the handler is already "
+        "per (key, checksum), so that is per-tenant by construction) and takes "
+        "its REST client from the registry; _resolve_env is gone entirely -- "
+        "bot_route and company are read straight off the spec, where they are "
+        "per tenant, instead of off os.environ, where they were process-global"
+    ),
+    "app/integrations/mitra/session_manager.py": (
+        "acquire/reacquire take the resolved MitraConnection; a pooled channel "
+        "whose connection checksum no longer matches is treated as dead and "
+        "reconnected, which is what makes a runtime config change take effect on "
+        "the next turn instead of whenever the idle reaper reaches it"
+    ),
+    "app/integrations/mitra/ws_channel.py": (
+        "takes a MitraConnection instead of Settings and stamps its checksum, so "
+        "the socket and the REST calls cannot disagree about which Mitra, which "
+        "company and which Origin this interview is running against"
+    ),
+}
+
+# Files deliberately DELETED rather than copied. Kept apart from the MISSING
+# failure below because "gone on purpose" and "the copy was never made" look
+# identical to a file-existence check, and only one of them is a problem.
+EXPECTED_REMOVALS = {
+    "app/services/config_sync.py": (
+        "the YAML sync is gone. agents/agent_configs are the only source of "
+        "agent configuration -- seeded by migration 0007, edited through "
+        "POST /api/agents/{key}/config. With no file to reconcile against there "
+        "is no drift, no CONFIG_SYNC_MODE and nothing for this service to do"
     ),
 }
 
@@ -133,8 +171,10 @@ def main() -> int:
     problems: list[str] = []
 
     for old, new in pairs(flask_repo):
+        rel_missing = str(new.relative_to(BACKEND))
         if not new.exists():
-            problems.append(f"MISSING  {new.relative_to(BACKEND)}")
+            if rel_missing not in EXPECTED_REMOVALS:
+                problems.append(f"MISSING  {rel_missing}")
             continue
         checked += 1
         a = old.read_text().splitlines()
@@ -160,6 +200,10 @@ def main() -> int:
     if EXPECTED_EDITS:
         print("\nDeliberately edited (exempt):")
         for path, why in EXPECTED_EDITS.items():
+            print(f"  {path}\n      {why}")
+    if EXPECTED_REMOVALS:
+        print("\nDeliberately removed (exempt):")
+        for path, why in EXPECTED_REMOVALS.items():
             print(f"  {path}\n      {why}")
     if problems:
         print("\nDRIFT FOUND:")

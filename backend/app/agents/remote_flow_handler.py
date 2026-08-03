@@ -13,7 +13,6 @@ corrupt it. This handler never reads `ctx.history` at all, which is what
 structurally guarantees that.
 """
 import dataclasses
-import os
 import time
 
 from app.agents.factory import HandlerDeps, register_handler
@@ -25,6 +24,7 @@ from app.agents.protocol import (
     TurnContext,
 )
 from app.domain.agent_spec import RemoteFlowAgentSpec
+from app.integrations.mitra.connection import resolve_connection
 from app.integrations.mitra.exceptions import MitraChannelClosed
 
 
@@ -33,15 +33,25 @@ class RemoteFlowAgentHandler:
     agent_type = "remote_flow"
 
     def __init__(self, spec: RemoteFlowAgentSpec, deps: HandlerDeps):
-        if deps.mitra_rest is None or deps.mitra_sessions is None:
+        if deps.mitra_clients is None or deps.mitra_sessions is None:
             raise RuntimeError(
                 f"agent {spec.key!r} is agent_type='remote_flow' but Mitra is not configured "
-                "(mitra_rest/mitra_sessions are None -- check MITRA_ENABLED and MITRA_BASE_URL)"
+                "(mitra_clients/mitra_sessions are None -- check MITRA_ENABLED and MITRA_BASE_URL)"
             )
         self._spec = spec
         self._remote = spec.remote
-        self._rest = deps.mitra_rest
         self._sessions = deps.mitra_sessions
+
+        # RESOLVED ONCE, HERE, AND THAT IS THE WHOLE POINT.
+        #
+        # HandlerFactory caches handlers by `(spec.key, checksum)`, and a
+        # tenant-scoped config is a whole agent_configs row with its own
+        # checksum. So one handler instance corresponds to exactly one resolved
+        # spec, and therefore to exactly one connection -- resolving it in the
+        # constructor makes it per-tenant by construction rather than by
+        # remembering to pass a scope down every call path.
+        self._conn = resolve_connection(deps.settings, spec.remote)
+        self._rest = deps.mitra_clients.get(self._conn)
 
     def handle(self, ctx: TurnContext) -> AgentTurn:
         t0 = time.monotonic()
@@ -53,15 +63,17 @@ class RemoteFlowAgentHandler:
             )
 
         is_first_turn = ctx.session.remote_session_id is None
-        bot_route = self._resolve_env(self._remote.bot_route_env)
+        # Straight off the spec -- which is this tenant's scoped config, because
+        # the handler was built from it. No environment lookup: that is what
+        # used to make one process serve exactly one Mitra company.
+        bot_route = self._remote.bot_route
 
         # ---- FIRST TURN: create the remote session ----
         if is_first_turn:
-            company = self._resolve_env(self._remote.company_env)
             profile_id = self._rest.upsert_profile(
                 email=ctx.user.email,
                 latest_flow_used=self._remote.flow_name,
-                company=company,
+                company=self._remote.company,
             )
             remote_sid = self._rest.generate_session()
             sess = dataclasses.replace(
@@ -79,7 +91,7 @@ class RemoteFlowAgentHandler:
         ) / 1000
         idle_gap_s = self._remote.turn.idle_gap_ms / 1000
 
-        ch = self._sessions.acquire(self._remote, sess)
+        ch = self._sessions.acquire(self._remote, sess, self._conn)
         try:
             bot = ch.send_and_await_turn(ctx.text, timeout_s, idle_gap_s)
         except MitraChannelClosed:
@@ -87,7 +99,7 @@ class RemoteFlowAgentHandler:
             # Re-sending a turn Mitra already recorded would trigger its
             # consecutive-same-sender merge (common_chat_tasks.py:32-45) and
             # silently destroy an answer, so a second failure here propagates.
-            ch = self._sessions.reacquire(self._remote, sess)
+            ch = self._sessions.reacquire(self._remote, sess, self._conn)
             bot = ch.send_and_await_turn(ctx.text, timeout_s, idle_gap_s)
 
         done = (
@@ -123,9 +135,3 @@ class RemoteFlowAgentHandler:
             terminal=done,
         )
 
-    @staticmethod
-    def _resolve_env(name: str) -> str:
-        value = os.getenv(name)
-        if not value:
-            raise RuntimeError(f"environment variable {name!r} is not set")
-        return value

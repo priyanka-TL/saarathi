@@ -1,79 +1,66 @@
-from pathlib import Path
+"""Startup: load the agent catalogue out of the database.
 
-from app.services.config_sync import ConfigSyncService
+THERE IS NO CONFIG SYNC ANY MORE. `agents` + `agent_configs` are the only
+source of agent configuration -- there is no YAML to reconcile against, no
+`CONFIG_SYNC_MODE`, and no drift, because there is nothing for the database to
+drift FROM. The catalogue is seeded by migration 0007 and edited through
+`POST /api/agents/{key}/config`, which versions and audits every change.
+
+What that removes, deliberately:
+
+  * the "on a fresh database set CONFIG_SYNC_MODE=safe for the first run, then
+    put it back" instruction -- `make migrate` now produces a working app;
+  * the possibility of a deploy reverting a live override, which is why the
+    mode defaulted to `off` in the first place;
+  * a second place a tenant's configuration could come from.
+"""
 from app.core.logger import get_logger
 
 logger = get_logger("bootstrap")
 
-# Anchored to this file's location, not CWD. Two `.parent` hops because this
-# module lives in app/core/ while the YAML lives at app/config/agents/.
-AGENTS_YAML_DIR = Path(__file__).parent.parent / "config" / "agents"
-
 
 def sync_and_reload(container) -> None:
-    """Runs config sync, then an initial registry load.
+    """Link capability membership, then load the registry.
 
-    Deliberately has NO try/except around either step. ConfigSyncService.sync()
-    raises a pydantic ValidationError (misspelled YAML key -- the schema sets
-    extra="forbid") or an UnknownToolError (bad `tools:` entry) uncaught by
-    design. Letting those propagate out of create_app() -> import app is
-    exactly how "a misspelled YAML key aborts startup with a field path" and
-    "an unknown tool reference aborts startup" are satisfied. Do not add a
-    blanket except Exception here.
+    The name is kept because `create_app()` and the tests call it, but there is
+    no sync left -- this is a read of the database into the in-process snapshot.
     """
-    session = container.session_factory()
-    try:
-        from app.integrations.mitra.rest_client import paths_from_settings
-
-        service = ConfigSyncService(
-            tool_registry=container.tool_registry,
-            mitra_enabled=bool(container.settings.mitra_enabled),
-            # Validates every remote spec's finalize_path against the
-            # CONFIGURED endpoints, not a hardcoded pair.
-            mitra_paths=paths_from_settings(container.settings),
-        )
-        report = service.sync(session, AGENTS_YAML_DIR, mode=container.settings.config_sync_mode)
-        logger.info("startup config_sync: %s", report.as_dict())
-    finally:
-        # sync() commits internally on success; on failure the exception is
-        # already propagating and the process is about to die anyway. Close
-        # either way to release the connection back to the pool.
-        session.close()
-
-    # Membership links capabilities (seeded by migration 0006) to agents
-    # (seeded from YAML just above). It has to run HERE, between the two:
-    # a migration cannot create it, because on a fresh database the agents do
-    # not exist yet and capability_agents holds a real FK. Only ever fills a
-    # default-scope capability that has no members at all -- see
-    # app/services/capability_seed.py for why that is safe on every boot.
+    # Membership links capabilities to agents. Migration 0006 seeds the
+    # capabilities and 0007 the agents, and 0007 fills in the membership 0006
+    # had to skip on a fresh database (capability_agents holds a real FK, so
+    # 0006 could not insert rows for agents that did not exist yet). This still
+    # runs, to repair a database where the two got out of step -- it only ever
+    # fills a default-scope capability that has NO members at all, so a curated
+    # membership is never contradicted.
     session_seed = container.session_factory()
     try:
         from app.services.capability_seed import seed_default_membership
 
         seed_default_membership(session_seed)
     except Exception as exc:  # noqa: BLE001
-        # Deliberately NOT fatal, unlike agent config. This is presentation
-        # data: a failure here costs the sidebar its buttons, where a bad agent
-        # config would route real traffic wrongly. Log and continue.
+        # Deliberately NOT fatal, unlike the agent catalogue below. This is
+        # presentation data: a failure here costs the sidebar its buttons,
+        # where a missing agent config would route real traffic wrongly.
         logger.warning("capability membership seed failed: %s", exc)
         session_seed.rollback()
     finally:
         session_seed.close()
 
-    session2 = container.session_factory()
+    session = container.session_factory()
     try:
-        container.agent_registry.reload(session2)
+        container.agent_registry.reload(session)
     finally:
-        session2.close()
+        session.close()
 
     if container.agent_registry.version == 0:
         # AgentRegistry.reload() logs and swallows its own exceptions rather
         # than raising (by design, so a transient reload later in the process
-        # lifetime never crashes a request). That would otherwise make a
-        # broken reload at startup fail SILENTLY. This is the one place that
-        # silence is promoted back into a hard failure, specifically for the
-        # initial load.
+        # lifetime never crashes a request). That would otherwise make a broken
+        # load at startup fail SILENTLY. This is the one place that silence is
+        # promoted back into a hard failure, specifically for the initial load.
         raise RuntimeError(
-            "AgentRegistry loaded 0 agents at startup in config mode; "
-            "check the config_sync report above and the agents/agent_configs tables."
+            "AgentRegistry loaded 0 agents at startup. The catalogue is seeded by "
+            "migration 0007 -- check that migrations are applied (`make migrate`) "
+            "and that agents/agent_configs hold an active default-scope config "
+            "per enabled agent."
         )

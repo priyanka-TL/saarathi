@@ -137,7 +137,7 @@ class MitraPaths:
         """True iff `path` is one of the configured finalize endpoints.
 
         `RemoteSpec.finalize_path` is a plain string (the domain layer cannot
-        import Settings), so this is what ConfigSyncService checks at startup
+        import Settings), so this is what POST /api/agents/{key}/config checks
         to catch a YAML path that matches neither endpoint -- which would
         otherwise fall through to the v1 branch and finalize with the wrong
         body shape.
@@ -213,8 +213,8 @@ class MitraRestClient:
 
         POST /api/profile/ → returns the profile id.
 
-        ``company`` comes from the AGENT's ``remote.company_env``, not a
-        global. ``email`` must be the *derived* email from module 2.4
+        ``company`` comes from the AGENT's own ``remote.company`` -- per agent and
+        per tenant, not a global. ``email`` must be the *derived* email from module 2.4
         (``user_id + JWT_EMAIL_SUFFIX``). A different derivation produces a
         second profile and splits the user's story history. §1.7 trap 1.
 
@@ -506,35 +506,20 @@ class MitraRestClient:
             raise MitraSSRFError()
 
 
-def from_settings(settings) -> "MitraRestClient":
-    """Construct a MitraRestClient from the application Settings object.
-
-    Convenience factory used by the DI container. Resolves the comma-separated
-    ``mitra_allowed_hosts`` string into a list and gathers the MITRA_*_PATH
-    settings into the MitraPaths record.
-    """
-    extra_hosts = [
-        h.strip()
-        for h in settings.mitra_allowed_hosts.split(",")
-        if h.strip()
-    ]
-    return MitraRestClient(
-        base_url=settings.mitra_base_url,
-        origin_url=settings.mitra_origin_url,
-        user_agent=settings.mitra_user_agent,
-        allowed_hosts=extra_hosts,
-        connect_timeout=settings.mitra_connect_timeout_s,
-        read_timeout=settings.mitra_read_timeout_s,
-        paths=paths_from_settings(settings),
-    )
+# NOTE: the old `from_settings(settings) -> MitraRestClient` factory is gone.
+# A client is no longer a function of Settings alone -- its base URL, timeouts
+# and Origin credential resolve per agent and per tenant. Build a
+# MitraConnection (app/integrations/mitra/connection.py) and ask
+# MitraClientRegistry for the client, which also shares one connection pool per
+# distinct configuration instead of one per caller.
 
 
 def paths_from_settings(settings) -> MitraPaths:
     """Gather the MITRA_*_PATH settings into a MitraPaths.
 
-    Separate from `from_settings` because ConfigSyncService needs the paths to
-    validate every remote spec's `finalize_path` at startup, and it must do so
-    whether or not MITRA_ENABLED built a client.
+    Separate from the connection because the paths are also needed to validate
+    a spec's `finalize_path` on the config write path, whether or not
+    MITRA_ENABLED built a client.
     """
     return MitraPaths(
         profile=settings.mitra_profile_path,

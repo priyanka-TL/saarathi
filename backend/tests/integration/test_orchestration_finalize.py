@@ -113,8 +113,8 @@ def _remote_agent(agent_id: uuid.UUID) -> _Agent:
     remote = RemoteSpec(
         provider="mitra",
         flow_name="guest-mi-story",
-        bot_route_env="TEST_BOT_ROUTE",
-        company_env="TEST_COMPANY",
+        bot_route="/test-bot-route",
+        company="test-company",
         report_media_type="application/pdf",
         finalize_path="/api/end-story/",
     )

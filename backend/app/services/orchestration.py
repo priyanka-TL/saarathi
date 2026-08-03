@@ -178,12 +178,21 @@ class OrchestrationService:
         router_service: Optional[RouterService] = None,
         mitra_rest: Optional[Any] = None,
         mitra_sessions: Optional[Any] = None,
+        mitra_clients: Optional[Any] = None,
+        settings: Optional[Any] = None,
     ):
         self._db = session
         self._registry = registry
         self._handlers = handler_factory
         self._llm_factory = llm_factory
+        # mitra_clients is a MitraClientRegistry and is what production passes:
+        # the finalisation paths must reach Mitra through the SAME endpoint the
+        # turn used, and that endpoint is per agent and per tenant. mitra_rest
+        # is the fallback for a caller that has no registry -- it is a single
+        # client, so it only knows one endpoint. See rest_for().
         self._mitra_rest = mitra_rest
+        self._mitra_clients = mitra_clients
+        self._settings = settings
         self._mitra_sessions = mitra_sessions
 
         self._conversations = ConversationRepository(session)
@@ -196,6 +205,49 @@ class OrchestrationService:
         self._router = router_service or RouterService(session, registry, llm_factory)
 
         self._rate_limits = RateLimits(session, self._sessions_repo)
+
+    # ------------------------------------------------------------------
+    # Scope resolution for the paths that do NOT go through handle_turn
+    # ------------------------------------------------------------------
+    #
+    # `AgentRegistry.get_by_id` answers from the DEFAULT-SCOPE snapshot -- it
+    # is the process-wide cache of ('default','default') configs. handle_turn
+    # has always corrected for that with resolve_for_scope(); resume, finalize
+    # and the report route did not, so a tenant's own finalize_path,
+    # report_media_type and (since remote.company / remote.bot_route moved into
+    # the spec) its Mitra company were silently ignored on exactly the paths
+    # that submit the story and fetch the PDF.
+    #
+    # Every path that reads an agent off a SESSION must go through here.
+
+    def agent_for_session(self, session_view, user):
+        """The session's agent, as this caller's tenant/organization sees it."""
+        agent = self._registry.get_by_id(str(session_view.agent_id))
+        if agent is None:
+            return None
+        return self._registry.resolve_for_scope(
+            self._db,
+            agent,
+            getattr(user, "tenant_code", "") or "default",
+            getattr(user, "active_org_id", None) or "default",
+        )
+
+    def rest_for(self, agent):
+        """The Mitra REST client for this (already scope-resolved) agent.
+
+        A client carries a base URL, timeouts and the Origin credential, so the
+        one that finalises a story must be the one built from the same
+        connection the interview ran over. Falls back to the injected single
+        client when no registry is available.
+        """
+        if self._mitra_clients is None or agent is None:
+            return self._mitra_rest
+        remote = getattr(agent.spec, "remote", None)
+        if remote is None:
+            return self._mitra_rest
+        from app.integrations.mitra.connection import resolve_connection
+
+        return self._mitra_clients.get(resolve_connection(self._settings, remote))
 
     def handle_turn(self, ctx_in: TurnInput) -> TurnResult:
         # 1. get_or_create conv
@@ -480,7 +532,9 @@ class OrchestrationService:
         if not session_view.remote_session_id or not session_view.remote_profile_id:
             return None
 
-        rows = self._mitra_rest.recent_chat(
+        # Same rule as _finalize: ask the Mitra this agent's scope actually
+        # interviewed against, not whichever one the default scope points at.
+        rows = self.rest_for(agent).recent_chat(
             session_view.remote_session_id, session_view.remote_profile_id,
         )
         return reconcile(rows, sent_text)
@@ -514,7 +568,7 @@ class OrchestrationService:
         try:
             done = bool(
                 agent.spec.remote.completion_poll_every_turn
-                and self._mitra_rest.is_session_completed(session_view.remote_session_id)
+                and self.rest_for(agent).is_session_completed(session_view.remote_session_id)
             )
         except Exception as poll_error:
             logger.warning("turn recovery: completion poll failed: %s", poll_error)
@@ -549,7 +603,7 @@ class OrchestrationService:
         if session_view is None:
             return None
 
-        agent = self._registry.get_by_id(str(session_view.agent_id))
+        agent = self.agent_for_session(session_view, user)
         last_user_text = self._messages.last_user_content(session_view.conversation_id)
         if agent is None or not last_user_text:
             return ResumeResult(outcome=TurnOutcome.NOT_DELIVERED, session=session_view)
@@ -591,7 +645,7 @@ class OrchestrationService:
         session_view = self._sessions.get(session_id)
         if session_view is None:
             return None
-        agent = self._registry.get_by_id(str(session_view.agent_id))
+        agent = self.agent_for_session(session_view, user)
         return self._finalize(session_view, agent, user)
 
     def _finalize(self, session_view, agent, user):
@@ -628,8 +682,12 @@ class OrchestrationService:
             self._mitra_sessions.close(claimed.conversation_id)
 
         # 4. finalize() with the user's token.
+        #    THROUGH THIS AGENT'S OWN CLIENT: `agent` is scope-resolved by the
+        #    caller, so for a tenant that points at its own Mitra this is that
+        #    tenant's endpoint, not the default one.
+        rest = self.rest_for(agent)
         try:
-            story_id, _content = self._mitra_rest.finalize(
+            story_id, _content = rest.finalize(
                 session_id=claimed.remote_session_id,
                 profile_id=claimed.remote_profile_id,
                 flow=agent.spec.remote.flow_name,
@@ -677,7 +735,7 @@ class OrchestrationService:
         # and GET /api/sessions/{id}/report polls for it later, where the
         # identical failure is already treated as "not ready yet" (202).
         try:
-            report_url = self._mitra_rest.get_report(
+            report_url = rest.get_report(
                 claimed.remote_session_id, media_type=agent.spec.remote.report_media_type,
             )
         except MitraError as e:

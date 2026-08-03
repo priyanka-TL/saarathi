@@ -67,7 +67,7 @@ def test_wrong_variant_fields_rejected():
         "remote": {
             "provider": "mitra",
             "flow_name": "guest-discussion",
-            "bot_route_env": "some_env"
+            "bot_route": "/test-bot-route", "company": "test-company"
         }
     }
     with pytest.raises(ValidationError) as exc:
@@ -103,44 +103,65 @@ def test_both_variants_validate():
         "remote": {
             "provider": "mitra",
             "flow_name": "guest-discussion",
-            "bot_route_env": "some_env"
+            "bot_route": "/test-bot-route", "company": "test-company"
         }
     }
     agent = agent_spec_adapter.validate_python(raw_remote)
     assert isinstance(agent, RemoteFlowAgentSpec)
     assert agent.remote.provider == "mitra"
 
-def test_env_references_resolve(monkeypatch):
-    """Ensure that ${VAR} and ${VAR:-default} resolve before validation, but un-resolved values are preserved."""
-    monkeypatch.setenv("TEST_TIMEOUT", "45")
-    monkeypatch.delenv("TEST_MISSING", raising=False)
-    
+def test_the_checksum_is_taken_from_the_source_dict_not_the_dumped_model():
+    """A config that omits an optional field must not checksum as though it had
+    set that field to the schema default.
+
+    The checksum is HandlerFactory's cache key alongside the agent key, and
+    migration 0007 recomputes it with the standard library. If it were taken
+    from `model_dump()` instead, adding one optional field to the schema would
+    change the checksum of every stored config at once -- invalidating every
+    cached handler and making a schema change look like a configuration change
+    in the audit log.
+    """
     raw_dict = {
         "agent_type": "llm",
-        "key": "test_env",
-        "name": "Test Env",
-        "description": "Test Env Resolution",
+        "key": "test_checksum",
+        "name": "Test Checksum",
+        "description": "checksum source",
         "prompt": "prompt",
-        "model": {
-            "provider": "openrouter",
-            "name": "qwen",
-            "temperature": 0.5,
-            "timeout_s": "${TEST_TIMEOUT:-30}",
-            "max_tokens": "${TEST_MISSING:-1000}"
-        }
+        "model": {"provider": "openrouter", "name": "qwen"},
     }
-    
+
     agent = agent_spec_adapter.validate_python(raw_dict)
-    
-    # Assert they are resolved into the correct types
-    assert agent.model.timeout_s == 45.0
-    assert agent.model.max_tokens == 1000
-    
-    # Check that canonical JSON retains the unresolved values
     json_str, sha = canonical_json(agent)
-    assert "${TEST_TIMEOUT:-30}" in json_str
-    assert "${TEST_MISSING:-1000}" in json_str
-    assert "45.0" not in json_str # It should not have the resolved float output for timeout_s
+
+    import json as _json
+    assert _json.loads(json_str) == raw_dict, "defaults must not leak into the checksum"
+    # Fields the schema fills in but the caller never wrote.
+    assert "routing" not in json_str
+    assert "temperature" not in json_str
+
+    import hashlib
+    expected = hashlib.sha256(
+        _json.dumps(raw_dict, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    assert sha == expected, "migration 0007 computes the digest exactly this way"
+
+
+def test_a_dollar_brace_string_is_no_longer_expanded():
+    """${VAR} substitution is gone with the YAML. A config row holds literal
+    values, so a leftover reference must be treated as the literal string it is
+    rather than silently resolving against the process environment."""
+    raw_dict = {
+        "agent_type": "llm",
+        "key": "test_literal",
+        "name": "Test Literal",
+        "description": "no substitution",
+        "prompt": "${SOME_VAR}",
+        "model": {"provider": "openrouter", "name": "qwen"},
+    }
+
+    agent = agent_spec_adapter.validate_python(raw_dict)
+
+    assert agent.prompt == "${SOME_VAR}"
 
 def test_access_matching_respects_org_scoping():
     """Ensure AccessSpec.matches behaves correctly with required_roles against the active org."""

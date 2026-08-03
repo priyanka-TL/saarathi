@@ -27,8 +27,18 @@ class RegisteredAgent:
     spec: AgentSpec
 
 class AgentRegistry:
-    def __init__(self, ttl_s: float = 60.0):
+    def __init__(self, ttl_s: float = 60.0, mitra_enabled: bool = True):
         self._ttl_s = ttl_s
+        # MITRA_ENABLED=0 must hide every remote_flow agent, or the sidebar
+        # offers interviews nothing can serve and RemoteFlowAgentHandler raises
+        # at construction time.
+        #
+        # This used to be a DB WRITE: ConfigSyncService forced those agents to
+        # status='disabled' at startup, and had to flip them back when the flag
+        # was re-enabled. That is gone with the YAML sync, and a runtime filter
+        # is the better home anyway -- a deployment-level switch has no business
+        # mutating rows that a tenant's configuration also lives in.
+        self._mitra_enabled = mitra_enabled
         self._snapshot: Dict[str, RegisteredAgent] = {}
         self._legacy_names: Dict[str, str] = {}
         self._version: int = 0
@@ -68,8 +78,29 @@ class AgentRegistry:
             new_legacy = {}
             max_ts = None
 
+            skipped = []
             for row in result:
-                spec = _agent_spec_adapter.validate_python(row.config)
+                if row.agent_type == "remote_flow" and not self._mitra_enabled:
+                    continue
+                # PER-ROW, so ONE bad config costs ONE agent rather than all of
+                # them. That matters more than it used to: config is written
+                # through the API now, with no YAML validated at startup, so a
+                # row can predate a schema change. Letting it abort the whole
+                # loop meant the snapshot came back empty and `sync_and_reload`
+                # refused to boot -- one editable row able to take down every
+                # agent, including the ones it has nothing to do with.
+                #
+                # Same posture as resolve_for_scope, which already falls back
+                # rather than failing a turn.
+                try:
+                    spec = _agent_spec_adapter.validate_python(row.config)
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append(row.key)
+                    logger.error(
+                        "AgentRegistry: skipping agent %r -- its active config does "
+                        "not validate: %s", row.key, exc,
+                    )
+                    continue
                 agent = RegisteredAgent(
                     id=str(row.id),
                     key=row.key,
@@ -92,6 +123,13 @@ class AgentRegistry:
             self._loaded_at = time.monotonic()
             self._max_updated_at = max_ts
             logger.info(f"AgentRegistry reloaded version {self._version} with {len(self._snapshot)} agents")
+            if skipped:
+                logger.warning(
+                    "AgentRegistry: %s agent(s) EXCLUDED for an unparseable config: %s. "
+                    "They are invisible to routing and the sidebar until fixed -- "
+                    "POST /api/agents/{key}/config, or activate an earlier version.",
+                    len(skipped), skipped,
+                )
             
         except Exception as e:
             # Failure to reload must LOG and keep the cached snapshot

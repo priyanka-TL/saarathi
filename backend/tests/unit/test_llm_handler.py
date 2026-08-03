@@ -69,7 +69,7 @@ def test_prompt_with_braces_does_not_raise():
     deps = HandlerDeps(
         llm_factory=FakeLlmFactory(llm),
         tool_registry=FakeToolRegistry([]),
-        mitra_rest=None, mitra_sessions=None, settings=None
+        mitra_clients=None, mitra_sessions=None, settings=None
     )
     handler = LlmAgentHandler(spec, deps)
     
@@ -95,7 +95,7 @@ def test_unknown_tool_name_produces_error_toolmessage():
     deps = HandlerDeps(
         llm_factory=FakeLlmFactory(llm),
         tool_registry=FakeToolRegistry([FakeTool()]),
-        mitra_rest=None, mitra_sessions=None, settings=None
+        mitra_clients=None, mitra_sessions=None, settings=None
     )
     handler = LlmAgentHandler(spec, deps)
     
@@ -133,7 +133,7 @@ def test_tool_loop_bound_is_respected_and_raw_fallback_used():
     deps = HandlerDeps(
         llm_factory=FakeLlmFactory(llm),
         tool_registry=FakeToolRegistry([FakeTool()]),
-        mitra_rest=None, mitra_sessions=None, settings=None
+        mitra_clients=None, mitra_sessions=None, settings=None
     )
     handler = LlmAgentHandler(spec, deps)
     
@@ -161,7 +161,7 @@ def test_tool_exceptions_propagate():
     deps = HandlerDeps(
         llm_factory=FakeLlmFactory(llm),
         tool_registry=FakeToolRegistry([CrashingTool()]),
-        mitra_rest=None, mitra_sessions=None, settings=None
+        mitra_clients=None, mitra_sessions=None, settings=None
     )
     handler = LlmAgentHandler(spec, deps)
     

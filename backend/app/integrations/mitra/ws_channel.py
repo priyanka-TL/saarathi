@@ -58,7 +58,7 @@ class MitraChannel:
         self,
         spec,           # app.domain.agent_spec.RemoteSpec
         sess,           # app.agents.protocol.AgentSessionView
-        settings,       # app.core.settings.Settings
+        conn,           # app.integrations.mitra.connection.MitraConnection
         ws_factory: Callable[[], "websocket.WebSocket"] = websocket.WebSocket,
     ):
         self._q: "queue.Queue[Frame]" = queue.Queue(maxsize=512)
@@ -67,15 +67,21 @@ class MitraChannel:
         self._close_reason = ""
         self._turn_lock = threading.Lock()
 
+        # The connection this socket was opened against. MitraSessionManager
+        # compares it on every acquire: a pooled channel whose scope has since
+        # been reconfigured is treated as dead and reconnected, which is what
+        # makes a config change take effect without a restart.
+        self.conn_checksum: str = conn.checksum
+
         self._ws = ws_factory()
         self._ws.connect(
-            settings.mitra_ws_url,
-            origin=settings.mitra_origin_url,  # Mitra gates on Origin -- §13.2
+            conn.ws_url,
+            origin=conn.origin_url,  # Mitra gates on Origin -- §13.2
             header=[
-                f"User-Agent: {settings.mitra_user_agent}",
+                f"User-Agent: {conn.user_agent}",
                 "Accept-Language: en-GB,en-US;q=0.9,en;q=0.8",
             ],
-            timeout=settings.mitra_ws_connect_timeout_s,
+            timeout=conn.ws_connect_timeout_s,
             enable_multithread=True,
         )
 
@@ -84,7 +90,7 @@ class MitraChannel:
         )
         self._reader.start()
 
-        self._authenticate(spec, sess, settings)
+        self._authenticate(spec, sess, conn)
 
     # ------------------------------------------------------------------
     # Reader thread
@@ -137,7 +143,7 @@ class MitraChannel:
     # Establishment
     # ------------------------------------------------------------------
 
-    def _authenticate(self, spec, sess, settings) -> None:
+    def _authenticate(self, spec, sess, conn) -> None:
         self._ws.send(json.dumps({
             "type": "authenticate",
             "sessionid": sess.remote_session_id,
@@ -149,9 +155,9 @@ class MitraChannel:
             "bot_route": sess.remote_bot_route,
             "flow_name": spec.flow_name,
             "address": {
-                "ipCity": settings.mitra_ip_city,
-                "ipState": settings.mitra_ip_state,
-                "ipZipCode": settings.mitra_ip_zip,
+                "ipCity": conn.ip_city,
+                "ipState": conn.ip_state,
+                "ipZipCode": conn.ip_zip,
             },
         }))
 

@@ -11,7 +11,11 @@ import app.agents
 class HandlerDeps:
     llm_factory: Any
     tool_registry: Any
-    mitra_rest: Any
+    # A MitraClientRegistry, not a single client: the REST client carries the
+    # base URL, timeouts and the Origin credential, all of which now resolve
+    # per agent and per tenant. Handlers ask the registry for the client their
+    # own resolved connection needs.
+    mitra_clients: Any
     mitra_sessions: Any
     settings: Any
 

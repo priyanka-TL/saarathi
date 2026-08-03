@@ -29,7 +29,8 @@ class Container:
     handler_factory: HandlerFactory
     agent_registry: AgentRegistry
     authenticator: Any  # app.services.identity.Authenticator
-    mitra_rest: Optional[Any] = None       # MitraRestClient | None (mitra_enabled gated)
+    mitra_clients: Optional[Any] = None    # MitraClientRegistry | None (mitra_enabled gated)
+    mitra_rest: Optional[Any] = None       # MitraRestClient | None -- the DEFAULT-scope client
     mitra_sessions: Optional[Any] = None   # MitraSessionManager | None (mitra_enabled gated)
 
 
@@ -43,40 +44,58 @@ def build_container(settings: Settings) -> Container:
     # Tools self-register onto a MODULE-LEVEL singleton (app.tools.registry.registry)
     # via @registry.register(...) decorators, fired only when their defining
     # module is imported. `import app.tools` walks every submodule and triggers
-    # that registration. This must happen here, explicitly, before
-    # ConfigSyncService.sync() validates any YAML's `tools:` references --
-    # otherwise every tool reference would look "unknown".
+    # that registration. It must happen here, explicitly and before anything
+    # resolves a spec's `tools:` references -- otherwise POST /api/agents/{key}/config
+    # would reject every tool as unknown, and a built handler would find none.
     import app.tools  # noqa: F401  (import for registration side effect only)
     from app.tools.registry import registry as tool_registry
 
     llm_factory = LlmFactory()
 
-    # mitra_rest / mitra_sessions: built when mitra_enabled is set. When
+    # mitra_clients / mitra_sessions: built when mitra_enabled is set. When
     # disabled (the default) both are None and LlmAgentHandler is unaffected
     # -- it never touches these fields. RemoteFlowAgentHandler checks for
     # None and raises a clear error if an operator enables a remote_flow
-    # agent without setting MITRA_BASE_URL etc. The SAME instances are
-    # threaded into both HandlerDeps (so RemoteFlowAgentHandler uses them)
-    # and exposed directly on Container (so OrchestrationService's
-    # finalisation logic shares the identical channel pool/REST client,
-    # not a second, independent set).
+    # agent without setting MITRA_BASE_URL etc.
+    #
+    # WHY A REGISTRY RATHER THAN A CLIENT. A MitraRestClient carries a base
+    # URL, timeouts and the Origin credential -- all of which now resolve per
+    # agent and per tenant (app/integrations/mitra/connection.py). One shared
+    # client would serve every scope the FIRST scope's endpoint. The registry
+    # hands out one client per distinct connection, cached by checksum, and is
+    # shared with OrchestrationService so a turn and its finalisation use the
+    # identical client rather than two independent pools.
+    #
+    # mitra_rest is the DEFAULT-scope client, kept for the finalisation paths
+    # that still resolve the default snapshot. Those move onto the registry in
+    # the next step, and this field goes with them.
+    mitra_clients = None
     mitra_rest = None
     mitra_sessions = None
     if settings.mitra_enabled:
-        from app.integrations.mitra.rest_client import from_settings as build_mitra_rest
+        from app.integrations.mitra.connection import (
+            MitraClientRegistry,
+            from_settings as build_mitra_connection,
+        )
         from app.integrations.mitra.session_manager import MitraSessionManager
-        mitra_rest = build_mitra_rest(settings)
+        mitra_clients = MitraClientRegistry()
+        mitra_rest = mitra_clients.get(build_mitra_connection(settings))
         mitra_sessions = MitraSessionManager(settings)
 
     deps = HandlerDeps(
         llm_factory=llm_factory,
         tool_registry=tool_registry,
-        mitra_rest=mitra_rest,
+        mitra_clients=mitra_clients,
         mitra_sessions=mitra_sessions,
         settings=settings,
     )
     handler_factory = HandlerFactory(deps)
-    agent_registry = AgentRegistry(ttl_s=settings.registry_ttl_s)
+    agent_registry = AgentRegistry(
+        ttl_s=settings.registry_ttl_s,
+        # Hides remote_flow agents when Mitra is off. A runtime filter, not the
+        # status write ConfigSyncService used to perform -- see AgentRegistry.
+        mitra_enabled=bool(settings.mitra_enabled),
+    )
 
     from app.services.identity import Authenticator
     authenticator = Authenticator(settings)
@@ -90,6 +109,7 @@ def build_container(settings: Settings) -> Container:
         handler_factory=handler_factory,
         agent_registry=agent_registry,
         authenticator=authenticator,
+        mitra_clients=mitra_clients,
         mitra_rest=mitra_rest,
         mitra_sessions=mitra_sessions,
     )

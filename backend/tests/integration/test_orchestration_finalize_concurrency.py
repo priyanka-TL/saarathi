@@ -83,7 +83,7 @@ def _remote_agent(agent_id: uuid.UUID):
 
     remote = RemoteSpec(
         provider="mitra", flow_name="guest-mi-story",
-        bot_route_env="TEST_BOT_ROUTE", company_env="TEST_COMPANY",
+        bot_route="/test-bot-route", company="test-company",
     )
     spec = RemoteFlowAgentSpec(
         key="record_stories", name="Record Stories", description="test",

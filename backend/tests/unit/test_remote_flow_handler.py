@@ -7,7 +7,6 @@ AgentSessionView, only the Mitra-facing dependencies faked).
 from __future__ import annotations
 
 import dataclasses
-import os
 import uuid
 from typing import List, Optional
 
@@ -18,6 +17,7 @@ from app.agents.protocol import AgentSessionView, SessionState, TurnContext, His
 from app.agents.remote_flow_handler import RemoteFlowAgentHandler
 from app.domain.core import UserContext
 from app.domain.agent_spec import (
+    MitraConnectionSpec,
     MitraHandshakeSpec,
     MitraTurnSpec,
     RemoteFlowAgentSpec,
@@ -83,13 +83,51 @@ class _FakeSessionManager:
         self.acquire_calls = []
         self.reacquire_calls = []
 
-    def acquire(self, spec, sess):
-        self.acquire_calls.append((spec, sess))
+    def acquire(self, spec, sess, conn):
+        self.acquire_calls.append((spec, sess, conn))
         return self._channels.pop(0)
 
-    def reacquire(self, spec, sess):
-        self.reacquire_calls.append((spec, sess))
+    def reacquire(self, spec, sess, conn):
+        self.reacquire_calls.append((spec, sess, conn))
         return self._channels.pop(0)
+
+
+class _FakeClientRegistry:
+    """Stands in for MitraClientRegistry: hands back one client whatever the
+    connection, and records the connections it was asked for so a test can
+    assert which endpoint the handler resolved."""
+
+    def __init__(self, client):
+        self._client = client
+        self.requested = []
+
+    def get(self, conn):
+        self.requested.append(conn)
+        return self._client
+
+
+@dataclasses.dataclass
+class _Settings:
+    """The env floor `resolve_connection` reads. Only the Mitra fields."""
+
+    mitra_base_url: str = "https://mitra.example.com"
+    mitra_ws_url: str = "wss://mitra.example.com/ws/common/"
+    mitra_origin_url: str = "https://origin.example.com"
+    mitra_user_agent: str = "test-agent"
+    mitra_allowed_hosts: str = ""
+    mitra_host_ceiling: str = ""
+    mitra_connect_timeout_s: float = 10.0
+    mitra_read_timeout_s: float = 30.0
+    mitra_ws_connect_timeout_s: float = 10.0
+    mitra_ip_city: str = ""
+    mitra_ip_state: str = ""
+    mitra_ip_zip: str = ""
+    mitra_profile_path: str = "/api/profile/"
+    mitra_generate_session_path: str = "/api/generate-session/"
+    mitra_chat_path: str = "/api/companychat/"
+    mitra_get_story_path: str = "/api/get-story/"
+    mitra_finalize_v1_path: str = "/api/end-story/"
+    mitra_finalize_v2_path: str = "/api/end-story/v2/"
 
 
 # ---------------------------------------------------------------------------
@@ -98,15 +136,18 @@ class _FakeSessionManager:
 
 
 def _remote_spec(**overrides) -> RemoteFlowAgentSpec:
-    remote = RemoteSpec(
+    fields = dict(
         provider="mitra",
         flow_name="guest-mi-story",
-        bot_route_env="TEST_BOT_ROUTE",
-        company_env="TEST_COMPANY",
+        bot_route="/test-bot-route",
+        company="test-company",
         handshake=MitraHandshakeSpec(settle_ms=10),
         turn=MitraTurnSpec(first_turn_timeout_ms=60000, turn_timeout_ms=45000, idle_gap_ms=8000),
-        **overrides,
     )
+    # Merged rather than splatted alongside, so a test can override any of the
+    # defaults above.
+    fields.update(overrides)
+    remote = RemoteSpec(**fields)
     return RemoteFlowAgentSpec(
         key="record_stories",
         name="Record Stories",
@@ -152,14 +193,22 @@ def _ctx(text: str, session: AgentSessionView, history=None) -> TurnContext:
     )
 
 
-def _deps(rest, sessions) -> HandlerDeps:
-    return HandlerDeps(llm_factory=None, tool_registry=None, mitra_rest=rest, mitra_sessions=sessions, settings=None)
+def _deps(rest, sessions, settings=None) -> HandlerDeps:
+    return HandlerDeps(
+        llm_factory=None,
+        tool_registry=None,
+        # None rest means "Mitra not configured", which is now expressed as an
+        # absent registry rather than an absent client.
+        mitra_clients=_FakeClientRegistry(rest) if rest is not None else None,
+        mitra_sessions=sessions,
+        settings=settings or _Settings(),
+    )
 
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
-    monkeypatch.setenv("TEST_BOT_ROUTE", "resolved-bot-route")
-    monkeypatch.setenv("TEST_COMPANY", "resolved-company")
+    monkeypatch.setenv("TEST_BOT_ROUTE", "/test-bot-route")
+    monkeypatch.setenv("TEST_COMPANY", "test-company")
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +216,7 @@ def _env(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_constructor_raises_if_mitra_rest_is_none():
+def test_constructor_raises_if_mitra_clients_is_none():
     with pytest.raises(RuntimeError):
         RemoteFlowAgentHandler(_remote_spec(), _deps(rest=None, sessions=_FakeSessionManager([])))
 
@@ -200,7 +249,7 @@ def test_first_turn_creates_profile_and_session():
     ctx = _ctx("I want to record a story", session=_session(remote_session_id=None))
     turn = handler.handle(ctx)
 
-    assert rest.upsert_profile_calls == [("user@example.com", "guest-mi-story", "resolved-company")]
+    assert rest.upsert_profile_calls == [("user@example.com", "guest-mi-story", "test-company")]
     assert rest.generate_session_calls == 1
     assert turn.session_delta.remote_session_id == "remote-sess-1"
     assert turn.session_delta.remote_profile_id == "profile-1"
@@ -373,25 +422,85 @@ def test_options_are_normalised_from_bot_turn():
 
 
 # ---------------------------------------------------------------------------
-# Environment resolution
+# bot_route / company come straight off the spec
+#
+# This pair is what makes Mitra config per-tenant. Mitra identifies a profile by
+# (email, company), so a tenant-scoped `company` is the difference between every
+# tenant sharing one Mitra company and each having its own. They used to be read
+# from os.environ via `bot_route_env` / `company_env`, which made them
+# process-global; there is no environment lookup left on this path.
 # ---------------------------------------------------------------------------
 
 
-def test_missing_bot_route_env_raises(monkeypatch):
-    monkeypatch.delenv("TEST_BOT_ROUTE", raising=False)
+def test_bot_route_and_company_come_from_the_spec_not_the_environment(monkeypatch):
+    # Deliberately set variables with the OLD names. Nothing may read them.
+    monkeypatch.setenv("MITRA_COMPANY", "env-company")
+    monkeypatch.setenv("MITRA_STORY_BOT_ROUTE", "/env-bot-route")
     rest = _FakeRestClient()
-    sessions = _FakeSessionManager([])
-    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+    sessions = _FakeSessionManager([_FakeChannel([BotTurn(text="hi", options=[], step=1)])])
+    spec = _remote_spec(bot_route="/tenant_bot", company="tenant-company")
 
-    with pytest.raises(RuntimeError):
-        handler.handle(_ctx("go", session=_session(remote_session_id="already-set")))
+    handler = RemoteFlowAgentHandler(spec, _deps(rest, sessions))
+    turn = handler.handle(_ctx("go", session=_session(remote_session_id=None)))
+
+    assert rest.upsert_profile_calls[0][2] == "tenant-company"
+    assert turn.session_delta.remote_bot_route == "/tenant_bot"
 
 
-def test_missing_company_env_raises_on_first_turn(monkeypatch):
-    monkeypatch.delenv("TEST_COMPANY", raising=False)
+def test_two_scopes_of_the_same_agent_use_their_own_companies():
+    """The point of the whole change, at handler level: two configs of one
+    agent key produce two handlers that talk to two Mitra companies."""
+    profiles = []
+    for company, route in (("tenant-a", "/bot_a"), ("tenant-b", "/bot_b")):
+        rest = _FakeRestClient()
+        sessions = _FakeSessionManager([_FakeChannel([BotTurn(text="hi", options=[], step=1)])])
+        handler = RemoteFlowAgentHandler(
+            _remote_spec(company=company, bot_route=route), _deps(rest, sessions),
+        )
+        turn = handler.handle(_ctx("go", session=_session(remote_session_id=None)))
+        profiles.append((rest.upsert_profile_calls[0][2], turn.session_delta.remote_bot_route))
+
+    assert profiles == [("tenant-a", "/bot_a"), ("tenant-b", "/bot_b")]
+
+
+def test_an_empty_company_or_bot_route_is_rejected_at_validation():
+    """Not deferred to Mitra: an empty company does not error there, it
+    silently resolves the wrong CompanyBot or splits a user's profile."""
+    import pydantic
+
+    for field in ("company", "bot_route"):
+        with pytest.raises(pydantic.ValidationError):
+            _remote_spec(**{field: ""})
+
+
+# ---------------------------------------------------------------------------
+# The connection the handler resolves is the one its scope configured
+# ---------------------------------------------------------------------------
+
+
+def test_a_connection_override_reaches_both_the_client_and_the_channel_pool():
     rest = _FakeRestClient()
-    sessions = _FakeSessionManager([])
-    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+    sessions = _FakeSessionManager([_FakeChannel([BotTurn(text="hi", options=[], step=1)])])
+    spec = _remote_spec(
+        connection=MitraConnectionSpec(base_url="https://tenant-mitra.example.com"),
+    )
 
-    with pytest.raises(RuntimeError):
-        handler.handle(_ctx("go", session=_session(remote_session_id=None)))
+    deps = _deps(rest, sessions)
+    handler = RemoteFlowAgentHandler(spec, deps)
+    handler.handle(_ctx("go", session=_session(remote_session_id="already-set")))
+
+    # The REST client was requested for the tenant's endpoint...
+    assert deps.mitra_clients.requested[0].base_url == "https://tenant-mitra.example.com"
+    # ...and the SAME connection was handed to the channel pool, so the socket
+    # and the REST calls cannot disagree about which Mitra this is.
+    assert sessions.acquire_calls[0][2] is handler._conn
+
+
+def test_no_connection_override_resolves_to_the_env_floor():
+    rest = _FakeRestClient()
+    sessions = _FakeSessionManager([_FakeChannel([BotTurn(text="hi", options=[], step=1)])])
+
+    deps = _deps(rest, sessions)
+    RemoteFlowAgentHandler(_remote_spec(), deps)
+
+    assert deps.mitra_clients.requested[0].base_url == _Settings().mitra_base_url

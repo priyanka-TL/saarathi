@@ -9,14 +9,14 @@ createdb saarthi_new         # local Postgres 17
 make run                     # migrates to head, then binds HOST:PORT from .env
 ```
 
-On a **fresh** database also set `CONFIG_SYNC_MODE=safe` for that first run, so
-the agents are seeded from `app/config/agents/*.yaml`; then put it back to
-`off`. Booting an empty database with `off` fails fast rather than coming up
-silently empty. See [Configuration](#configuration).
+`make migrate` alone produces a working application: the agent catalogue is
+seeded by migration 0007. There is no YAML to sync and no first-run flag.
 
-Everything configurable — host, port, `API_PREFIX`, CORS origins, feature
-flags, Mitra URLs and paths — lives in that one `.env`. See
-[Configuration](#configuration).
+Infrastructure and secrets — host, port, `API_PREFIX`, CORS origins, feature
+flags, credentials, and the Mitra defaults — live in that one `.env`. **Agent
+configuration lives in the database**, per tenant and per organization, and is
+edited through the config API without a restart. See
+[Configuration](#configuration) and [docs/configuration.md](docs/configuration.md).
 
 Interactive API docs at `<host>:<port>{API_PREFIX}/docs` (OpenAPI 3.1) —
 `http://127.0.0.1:8000/docs` with the shipped defaults.
@@ -56,9 +56,7 @@ app/
 ├── utils/             responses (json_response, parse_uuid) · serializers
 ├── core/              settings · logger · context · container · bootstrap
 │                      · runtime (startup guards) · concurrency (threadpool)
-├── config/agents/     the three agent YAMLs -- a SEED for a fresh database
-│                      (CONFIG_SYNC_MODE defaults to `off`); a bad one still
-│                      ABORTS STARTUP when sync is on
+├── integrations/mitra/connection.py  resolves a per-scope MitraConnection
 ├── database/engine.py · models/orm.py
 └── domain/ repositories/ services/ agents/ integrations/mitra/ llm/ tools/
                         <- copied verbatim from the Flask app
@@ -102,9 +100,12 @@ Each is enforced by a test in `tests/guards/`.
    live WebSockets in process memory; a second worker opens a second Mitra
    channel for the same interview. Scale with `THREADPOOL_SIZE`.
 
-6. **`sync_and_reload` runs in `create_app()`, not the lifespan.** A
-   misconfigured agent YAML must abort at import, exactly as under Flask, and
-   `TestClient(app)` must get a fully-booted app without a `with` block.
+6. **`sync_and_reload` runs in `create_app()`, not the lifespan.** An empty
+   catalogue must abort at import rather than serving requests that can route
+   nowhere, and `TestClient(app)` must get a fully-booted app without a `with`
+   block. It no longer syncs anything — the name is kept because
+   `create_app()` and the tests call it. One agent whose config will not parse
+   is skipped and logged, not fatal; zero agents is fatal.
 
 7. **Two error envelopes, kept apart.** Everything except admin uses
    `{status, error, error_code, request_id}`. The admin router answers with a
@@ -113,12 +114,10 @@ Each is enforced by a test in `tests/guards/`.
 ## Tests
 
 ```
-tests/unit/            242   no DB
-tests/integration/     143   real Postgres
-tests/characterisation/ 99   TestClient end-to-end, golden JSON fixtures
-tests/guards/           20   the rules above, made executable
-                       ---
-                       504
+tests/unit/            no DB
+tests/integration/     real Postgres
+tests/characterisation/ TestClient end-to-end, golden JSON fixtures
+tests/guards/          the rules above, made executable
 ```
 
 Two of the guards are worth knowing by name:
@@ -127,6 +126,9 @@ Two of the guards are worth knowing by name:
   a `HandlerFactory` entry, and identical ones must. This is what stands
   between the schema and one tenant's system prompt answering another tenant's
   user.
+* `test_mitra_scope_isolation.py` — the paths that do NOT go through a handler
+  (resume, finalize, report) must resolve the caller's scope too, or a tenant's
+  story is submitted to the default scope's Mitra company.
 * `test_sync_contract.py` — the full route surface, pinned. Adding a route is
   a deliberate edit there, with a reason.
 
@@ -153,7 +155,8 @@ injected environment variables; there is no second file to keep in sync.
 | | Source | Holds |
 |---|---|---|
 | 1 | real environment variables | container / CI injection, one-off overrides |
-| 2 | `backend/.env` (git-ignored) | everything: host, port, `API_PREFIX`, CORS, flags, Mitra URLs + paths, and the secrets |
+| 2 | `backend/.env` (git-ignored) | infrastructure, secrets, feature flags, and the Mitra DEFAULTS |
+| — | `agent_configs` (database) | agent configuration, per tenant/org — overrides the Mitra defaults above |
 | 3 | field defaults in `app/core/settings.py` | the development shape |
 
 `.env` is resolved against the `backend/` directory rather than the CWD, so the
@@ -182,9 +185,10 @@ Mitra's own endpoint paths (`MITRA_PROFILE_PATH`, `MITRA_FINALIZE_V2_PATH`, …)
 are settings too, but they are a third-party API contract rather than a
 preference — change them only when Mitra moves an endpoint. The v1/v2 finalize
 pair is load-bearing: the two endpoints read the user token from different
-places and select different PDF renderers, so `ConfigSyncService` asserts at
-startup that every agent YAML's `finalize_path` matches one of the configured
-pair.
+places and select different PDF renderers, so `POST /api/agents/{key}/config`
+rejects a config whose `finalize_path` matches neither. They are also the
+DEFAULT paths — a scope may override them through `remote.connection.paths`,
+and the check is made against whatever that scope resolves to.
 
 ### Multi-tenant configuration: capabilities and agents
 
@@ -260,25 +264,33 @@ capabilities" is a real answer, where 404 would claim the route does not exist.
 every route, never inferred from the calling admin's own token — an admin
 editing another tenant's configuration is the normal case.
 
-### Where the YAML fits now
+### There is no YAML
 
-`app/config/agents/*.yaml` is a **seed for a fresh database**, not the
-authority — which is why `CONFIG_SYNC_MODE` now defaults to `off`. Run once
-with `safe` to seed a new environment, then leave it off so a deploy can never
-revert a live override or orphan-disable a tenant's agent. Booting an empty
-database with `off` fails fast: `sync_and_reload` raises when the registry
-loads 0 agents.
+`app/config/agents/*.yaml` is **gone**, along with `ConfigSyncService` and
+`CONFIG_SYNC_MODE`. The catalogue is seeded by **migration 0007** and edited
+through `POST /api/agents/{key}/config`, which versions, audits and validates
+every change. `app/config/ui/capabilities.yaml` went the same way in 0006.
 
-`app/config/ui/capabilities.yaml` is **gone**; migration 0006 seeds those rows
-instead. Membership is linked at startup by
-`app/services/capability_seed.py`, because a migration cannot create it — on a
-fresh database the agents do not exist yet and `capability_agents` holds a real
-FK. It only ever fills a default-scope capability that has **no** members at
-all, so a curated membership is never contradicted.
+That removes the "on a fresh database set `CONFIG_SYNC_MODE=safe` for the first
+run, then put it back" step, and with it the possibility of a deploy reverting
+a live override — which is why the mode defaulted to `off` in the first place.
+
+Upgrading a database from the YAML era is handled: migration 0007 supersedes
+any active default-scope config still written in the old shape (a `${VAR}`
+reference, or `bot_route_env` / `company_env`) with a literal one, as a **new
+version**, so the previous config stays one activate call away. An operator's
+own configuration is left untouched.
 
 `MITRA_COMPANY`, `MITRA_STORY_BOT_ROUTE` and `MITRA_DISCUSSION_BOT_ROUTE` are
-**not** `Settings` fields — they are resolved by `${VAR}` substitution inside
-the agent YAML and read from `os.environ`. `app/core/settings.py` calls
-`load_dotenv()` explicitly so that works deterministically; under Flask it
-happened to work because `flask run` loads `.env` and so does litellm on
-import, neither of which is a guarantee under uvicorn.
+no longer read at runtime at all. Their values now live in `remote.company` /
+`remote.bot_route` on the stored config, where **a tenant can override them** —
+and since Mitra identifies a profile by `(email, company)`, that is the
+difference between every tenant sharing one Mitra company and each having its
+own.
+
+`MITRA_ORIGIN_URL` is the one exception, and stays env-only: Mitra gates
+admission on the Origin header, so it is a credential. A scope needing its own
+names a variable through `remote.origin_env` rather than carrying a value.
+
+**Full key-by-key breakdown, resolution order and the runtime-change workflow:
+[docs/configuration.md](docs/configuration.md).**

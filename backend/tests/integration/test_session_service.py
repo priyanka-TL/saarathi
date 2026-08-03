@@ -36,7 +36,7 @@ class _RegisteredAgentStub:
             description="test agent for session service tests",
             agent_type="remote_flow",
             routing=RoutingSpec(pin_session=pin_session, exit_keywords=["/exit"]),
-            remote=RemoteSpec(provider="mitra", flow_name="guest-mi-story", bot_route_env="TEST_BOT_ROUTE_ENV"),
+            remote=RemoteSpec(provider="mitra", flow_name="guest-mi-story", bot_route="/test-bot-route", company="test-company"),
         )
 
 

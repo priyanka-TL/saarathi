@@ -37,7 +37,10 @@ class MitraSessionManager:
         channel_factory: Callable[..., MitraChannel] = MitraChannel,
         reap_interval_s: float = 60.0,
     ):
-        self._settings = settings
+        # `settings` supplies the POOL BOUNDS only, and deliberately stays an
+        # env setting: there is one pool per process, so a per-tenant channel
+        # ceiling or idle timeout would have nothing to apply to. The per-scope
+        # endpoint configuration arrives with each acquire() instead.
         self._channel_factory = channel_factory
         self._max = settings.mitra_max_open_channels
         self._idle_close_s = settings.mitra_idle_close_s
@@ -59,15 +62,22 @@ class MitraSessionManager:
     # Public API
     # ------------------------------------------------------------------
 
-    def acquire(self, spec, sess) -> MitraChannel:
+    def acquire(self, spec, sess, conn) -> MitraChannel:
         """Hit: move to end, return. Miss (restart / eviction / other
         worker / cold start): re-authenticate with whatever remote_session_id
         `sess` carries -- correct because Mitra's interview state lives in
-        Mitra's own database, not in the connection."""
+        Mitra's own database, not in the connection.
+
+        A STALE CONNECTION COUNTS AS A MISS. `conn` is the configuration this
+        scope resolves to RIGHT NOW; a pooled channel opened against a different
+        one is talking to the wrong Mitra instance, or as the wrong company,
+        with the wrong Origin. Comparing checksums here is what makes a runtime
+        config change take effect on the next turn instead of whenever the idle
+        reaper happens to get to it (up to mitra_idle_close_s later)."""
         with self._lock:
             conv_id = sess.conversation_id
             ch = self._chans.get(conv_id)
-            if ch is not None and ch.alive:
+            if ch is not None and ch.alive and ch.conn_checksum == conn.checksum:
                 self._chans.move_to_end(conv_id)
                 self._last_used[conv_id] = time.monotonic()
                 return ch
@@ -79,12 +89,12 @@ class MitraSessionManager:
 
             self._evict_if_needed()
 
-            new_ch = self._channel_factory(spec, sess, self._settings)
+            new_ch = self._channel_factory(spec, sess, conn)
             self._chans[conv_id] = new_ch
             self._last_used[conv_id] = time.monotonic()
             return new_ch
 
-    def reacquire(self, spec, sess) -> MitraChannel:
+    def reacquire(self, spec, sess, conn) -> MitraChannel:
         """Force a fresh channel after a connection loss. Always discards
         and reconnects, even if the cached channel still (incorrectly)
         reports alive -- that's the whole point of a caller explicitly
@@ -94,7 +104,7 @@ class MitraSessionManager:
             self._last_used.pop(sess.conversation_id, None)
         if old is not None:
             old.close(quiet=True)
-        return self.acquire(spec, sess)
+        return self.acquire(spec, sess, conn)
 
     def close(self, conversation_id: UUID) -> None:
         with self._lock:

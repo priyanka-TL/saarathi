@@ -120,6 +120,12 @@ _AGENTS_SQL = text("""
     WHERE ca.capability_id = ANY(:capability_ids)
       AND ca.is_visible
       AND a.status = 'enabled'
+      -- GATE 5: MITRA_ENABLED. A remote_flow agent has nothing to serve it when
+      -- Mitra is off, so advertising it renders a button that raises at click
+      -- time. This used to be enforced by ConfigSyncService writing
+      -- status='disabled' at startup; with the YAML sync gone it is a runtime
+      -- filter, matching AgentRegistry.reload().
+      AND (:mitra_enabled OR a.agent_type <> 'remote_flow')
     ORDER BY ca.display_order, a.key
 """)
 
@@ -166,7 +172,8 @@ def _access_permits(config: Dict[str, Any], user: Optional[UserContext]) -> bool
     return access.matches(user)
 
 
-def resolve_for_user(session, user: Optional[UserContext]) -> Dict[str, Any]:
+def resolve_for_user(session, user: Optional[UserContext],
+                     mitra_enabled: bool = True) -> Dict[str, Any]:
     """The capability document for this caller's tenant and organization."""
     tenant_id, organization_id = _scope(user)
     params = {
@@ -180,7 +187,10 @@ def resolve_for_user(session, user: Optional[UserContext]) -> Dict[str, Any]:
         return {"version": DOCUMENT_VERSION, "capabilities": []}
 
     agent_rows = session.execute(
-        _AGENTS_SQL, {**params, "capability_ids": [r.id for r in capability_rows]}
+        _AGENTS_SQL,
+        {**params,
+         "capability_ids": [r.id for r in capability_rows],
+         "mitra_enabled": mitra_enabled},
     ).fetchall()
 
     by_capability: Dict[Any, List[Dict[str, Any]]] = {}

@@ -287,11 +287,11 @@ def test_an_empty_catalogue_is_200_with_an_empty_list_not_404(client, monkeypatc
 
     monkeypatch.setattr(
         capability_service, "resolve_for_user",
-        lambda session, user: {"version": 1, "capabilities": []},
+        lambda session, user, **kw: {"version": 1, "capabilities": []},
     )
     monkeypatch.setattr(
         "app.routers.ui.resolve_for_user",
-        lambda session, user: {"version": 1, "capabilities": []},
+        lambda session, user, **kw: {"version": 1, "capabilities": []},
     )
 
     response = client.get("/api/ui/capabilities")
