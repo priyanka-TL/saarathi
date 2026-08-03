@@ -188,8 +188,9 @@ class OrchestrationService:
         # mitra_clients is a MitraClientRegistry and is what production passes:
         # the finalisation paths must reach Mitra through the SAME endpoint the
         # turn used, and that endpoint is per agent and per tenant. mitra_rest
-        # is the fallback for a caller that has no registry -- it is a single
-        # client, so it only knows one endpoint. See rest_for().
+        # is the fallback for a caller that has no registry -- a single client
+        # that knows one endpoint, which is why nothing in production builds one
+        # any more (there is no MITRA_BASE_URL to build it from). See rest_for().
         self._mitra_rest = mitra_rest
         self._mitra_clients = mitra_clients
         self._settings = settings
@@ -525,7 +526,10 @@ class OrchestrationService:
 
     def _reconcile(self, agent, session_view, sent_text: str) -> Optional[Reconciliation]:
         """Ask Mitra what became of ``sent_text``. None if not applicable."""
-        if self._mitra_rest is None or session_view is None:
+        # Either wiring will do: production passes only the registry, tests and
+        # registry-less callers pass only the single client. Checking just
+        # mitra_rest would silently disable turn recovery in production.
+        if (self._mitra_clients is None and self._mitra_rest is None) or session_view is None:
             return None
         if getattr(agent.spec, "agent_type", None) != "remote_flow":
             return None

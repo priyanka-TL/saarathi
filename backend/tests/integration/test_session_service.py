@@ -7,7 +7,18 @@ from sqlalchemy import text, select
 from app.database.engine import SessionLocal
 from app.models.orm import Conversation
 from app.domain.core import UserContext
-from app.domain.agent_spec import RemoteFlowAgentSpec, RemoteSpec, RoutingSpec
+from app.domain.agent_spec import (
+    MitraConnectionSpec,
+    RemoteFlowAgentSpec,
+    RemoteSpec,
+    RoutingSpec,
+)
+
+#: Required on every RemoteSpec now -- the MITRA_* environment floor is gone.
+_CONNECTION = MitraConnectionSpec(
+    base_url="https://mitra.example.com",
+    ws_url="wss://mitra.example.com/ws/common/",
+)
 from app.agents.protocol import SessionDelta, SessionState
 from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -36,7 +47,7 @@ class _RegisteredAgentStub:
             description="test agent for session service tests",
             agent_type="remote_flow",
             routing=RoutingSpec(pin_session=pin_session, exit_keywords=["/exit"]),
-            remote=RemoteSpec(provider="mitra", flow_name="guest-mi-story", bot_route="/test-bot-route", company="test-company"),
+            remote=RemoteSpec(provider="mitra", flow_name="guest-mi-story", bot_route="/test-bot-route", company="test-company", connection=_CONNECTION),
         )
 
 

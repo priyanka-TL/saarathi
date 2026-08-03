@@ -15,7 +15,18 @@ from sqlalchemy import text
 
 from app.agents.protocol import SessionDelta, SessionState
 from app.database.engine import SessionLocal
-from app.domain.agent_spec import RemoteFlowAgentSpec, RemoteSpec, RoutingSpec
+from app.domain.agent_spec import (
+    MitraConnectionSpec,
+    RemoteFlowAgentSpec,
+    RemoteSpec,
+    RoutingSpec,
+)
+
+#: Required on every RemoteSpec now -- the MITRA_* environment floor is gone.
+_CONNECTION = MitraConnectionSpec(
+    base_url="https://mitra.example.com",
+    ws_url="wss://mitra.example.com/ws/common/",
+)
 from app.domain.core import UserContext
 from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -79,10 +90,30 @@ def _stub_agent(agent_id: uuid.UUID) -> _RegisteredAgentStub:
         remote=RemoteSpec(
             provider="mitra", flow_name="guest-mi-story",
             bot_route="/test-bot-route", company="test-company",
+            connection=_CONNECTION,
             report_media_type="application/pdf",
         ),
     )
     return _RegisteredAgentStub(id=str(agent_id), key="record_stories", spec=spec)
+
+
+class _FakeMitraClients:
+    """Stands in for MitraClientRegistry, handing back one fake client whatever
+    the connection.
+
+    The registry is the ONLY way a client reaches the routes now -- there is no
+    container.mitra_rest any more, because a default-scope client cannot be
+    built without an agent spec to build it from. Leaving the real registry in
+    place would have it construct a REAL MitraRestClient from the resolved
+    connection, which reaches the network; pytest-socket turns that into a 500
+    rather than a refusal anyone can read.
+    """
+
+    def __init__(self, client):
+        self._client = client
+
+    def get(self, conn):
+        return self._client
 
 
 @pytest.fixture()
@@ -90,19 +121,11 @@ def fake_mitra(flask_app, monkeypatch):
     """Container is a frozen dataclass -- object.__setattr__ bypasses that to
     swap in fakes for the duration of one test, restored afterward."""
     container = flask_app.state.container
-    orig_rest, orig_sessions = container.mitra_rest, container.mitra_sessions
-    orig_clients = container.mitra_clients
+    orig_sessions, orig_clients = container.mitra_sessions, container.mitra_clients
     rest, sessions = _FakeMitraRest(), _FakeMitraSessions()
-    object.__setattr__(container, "mitra_rest", rest)
     object.__setattr__(container, "mitra_sessions", sessions)
-    # The registry must go too, not just the client. OrchestrationService.rest_for
-    # prefers the registry and would otherwise build a REAL MitraRestClient from
-    # the resolved connection -- which reaches the network, and pytest-socket
-    # turns that into a 500 rather than a refusal anyone can read. None makes
-    # rest_for fall back to the fake above, which is what these tests assert on.
-    object.__setattr__(container, "mitra_clients", None)
+    object.__setattr__(container, "mitra_clients", _FakeMitraClients(rest))
     yield rest, sessions
-    object.__setattr__(container, "mitra_rest", orig_rest)
     object.__setattr__(container, "mitra_sessions", orig_sessions)
     object.__setattr__(container, "mitra_clients", orig_clients)
 

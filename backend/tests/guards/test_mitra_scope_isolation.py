@@ -48,9 +48,12 @@ def _remote_spec(key: str, *, company: str, finalize_path: str,
         "company": company,
         "finalize_path": finalize_path,
         "report_media_type": media_type,
+        # Required now -- there is no MITRA_* environment floor behind it.
+        "connection": {
+            "base_url": base_url or "https://mitra.example.com",
+            "ws_url": "wss://mitra.example.com/ws/common/",
+        },
     }
-    if base_url:
-        remote["connection"] = {"base_url": base_url}
     return _adapter.validate_python({
         "schema_version": 1,
         "key": key,
@@ -94,8 +97,8 @@ def agent_with_scoped_mitra():
         session.execute(
             text("""
                 INSERT INTO agent_configs (agent_id, tenant_id, organization_id, version,
-                                           source, checksum, config, is_active, activated_at)
-                VALUES (:agent_id, :tenant_id, 'default', :version, 'db', :checksum,
+                                           checksum, config, is_active, activated_at)
+                VALUES (:agent_id, :tenant_id, 'default', :version, :checksum,
                         CAST(:config AS jsonb), TRUE, now())
             """),
             {"agent_id": agent_id, "tenant_id": tenant_id, "version": version,
@@ -216,8 +219,11 @@ def test_two_scopes_get_two_different_mitra_clients(api_app, agent_with_scoped_m
         default_rest = orch.rest_for(default_agent)
 
         assert tenant_rest is not default_rest
+        # Each endpoint comes from that scope's OWN config row. There is no
+        # settings.mitra_base_url to compare against any more -- that is the
+        # point: the default scope is just another row.
         assert tenant_rest._base_url == "https://tenant-mitra.example.com"
-        assert default_rest._base_url == api_app.state.container.settings.mitra_base_url.rstrip("/")
+        assert default_rest._base_url == "https://mitra.example.com"
     finally:
         session.close()
 
@@ -268,8 +274,8 @@ def test_one_broken_config_costs_one_agent_not_all_of_them(api_app, agent_with_s
         session.execute(
             text("""
                 INSERT INTO agent_configs (agent_id, tenant_id, organization_id, version,
-                                           source, checksum, config, is_active, activated_at)
-                VALUES (:id, 'default', 'default', 1, 'db', 'brokensum',
+                                           checksum, config, is_active, activated_at)
+                VALUES (:id, 'default', 'default', 1, 'brokensum',
                         CAST(:config AS jsonb), TRUE, now())
             """),
             # Passes the DDL's key/name/agent_type CHECK, fails the schema:

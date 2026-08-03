@@ -12,6 +12,7 @@ ignored rather than rejected. These assertions are what catch that instead.
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 from pathlib import Path
 
@@ -19,7 +20,9 @@ from pydantic import TypeAdapter
 
 from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 
-_MIGRATION = Path(__file__).parents[2] / "migrations" / "versions" / "0007_seed_agents.py"
+_VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
+_MIGRATION = _VERSIONS / "0007_seed_agents.py"
+_CONNECTION_MIGRATION = _VERSIONS / "0009_mitra_connection_to_config.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -40,8 +43,22 @@ def _raw() -> dict:
     return _seed_specs()["capture_discussion"]
 
 
+def _connection_block() -> dict:
+    """The `remote.connection` migration 0009 adds to every remote_flow row.
+
+    0007 is applied history and does not carry one, so its dict alone no longer
+    validates -- the two migrations together are what a database ever sees.
+    """
+    spec = importlib.util.spec_from_file_location("_conn_0009", _CONNECTION_MIGRATION)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module._connection_block()
+
+
 def _load_spec() -> RemoteFlowAgentSpec:
-    spec = _adapter.validate_python(_raw())
+    raw = copy.deepcopy(_raw())
+    raw["remote"]["connection"] = _connection_block()
+    spec = _adapter.validate_python(raw)
     assert isinstance(spec, RemoteFlowAgentSpec)
     return spec
 
@@ -168,7 +185,9 @@ def test_limits_are_declared_so_an_interview_has_a_ceiling():
 def test_priority_is_below_record_stories():
     """Both agents match on story/discussion-ish keywords and Gate 3 takes the
     highest priority hit, so the ordering between them is load-bearing."""
-    sibling = _adapter.validate_python(_seed_specs()["record_stories"])
+    sibling_raw = copy.deepcopy(_seed_specs()["record_stories"])
+    sibling_raw["remote"]["connection"] = _connection_block()
+    sibling = _adapter.validate_python(sibling_raw)
     assert _load_spec().routing.priority < sibling.routing.priority
 
 

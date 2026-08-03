@@ -58,7 +58,6 @@ def _orchestrator(db: Session, container: Container) -> OrchestrationService:
         registry=container.agent_registry,
         handler_factory=container.handler_factory,
         llm_factory=container.llm_factory,
-        mitra_rest=container.mitra_rest,
         mitra_sessions=container.mitra_sessions,
         mitra_clients=container.mitra_clients,
         settings=container.settings,

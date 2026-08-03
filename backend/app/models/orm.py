@@ -321,7 +321,7 @@ class ToolExecution(Base):
 # `capability_agents` needs a real ForeignKey to agents, so `agents` must now be
 # a registered table. These classes exist to satisfy that.
 #
-# THEY ARE NOT A REWRITE. config_sync.py and agent_registry.py keep their raw
+# THEY ARE NOT A REWRITE. admin.py and agent_registry.py keep their raw
 # SQL: those two files carry the versioning, drift and activation logic that
 # Gate A and the config-versioning tests pin, and re-expressing them as ORM
 # queries would risk both for no benefit.
@@ -338,10 +338,6 @@ class AgentStatusEnum(enum.Enum):
     enabled = "enabled"
     disabled = "disabled"
 
-class ConfigSourceEnum(enum.Enum):
-    yaml = "yaml"
-    db = "db"
-
 class CapabilityStatusEnum(enum.Enum):
     """A superset of AgentStatusEnum, and deliberately a SEPARATE type.
 
@@ -356,7 +352,7 @@ class CapabilityStatusEnum(enum.Enum):
 
 
 class Agent(Base):
-    """The agent catalogue. Written by config_sync and the admin routes.
+    """The agent catalogue. Written by migration and the admin routes.
 
     `key` is GLOBALLY unique and stays that way. AgentRegistry caches its
     snapshot keyed by bare `key`, and the router, orchestration and every
@@ -394,7 +390,9 @@ class AgentConfig(Base):
     """A versioned agent config, SCOPED to a tenant/organization.
 
     Renamed from `agent_configurations` in migration 0006, which also added the
-    scope columns. `source` distinguishes a YAML seed from a DB override.
+    scope columns. There is no provenance column: this table is the ONLY source
+    of agent configuration, so every row has the same origin and a `source`
+    marker only implied that some second store still existed (migration 0008).
 
     TWO INVARIANTS THE DDL ENFORCES AND WRITERS MUST RESPECT:
 
@@ -403,8 +401,7 @@ class AgentConfig(Base):
       * exactly one row per (agent, scope) may be `is_active`
         (uq_agent_cfg_one_active). That is a PARTIAL UNIQUE INDEX with no
         DEFERRABLE option, so it is checked per statement -- writers must
-        DEACTIVATE BEFORE INSERTING, never the other way round. See the comment
-        in app/services/config_sync.py, which learned this the hard way.
+        DEACTIVATE BEFORE INSERTING, never the other way round.
 
     Each row carries its OWN checksum, computed from its own content. That is
     what keeps HandlerFactory's `(spec.key, checksum)` cache from serving one
@@ -417,14 +414,11 @@ class AgentConfig(Base):
     tenant_id: Mapped[str] = mapped_column(String, nullable=False, server_default=DEFAULT_SCOPE)
     organization_id: Mapped[str] = mapped_column(String, nullable=False, server_default=DEFAULT_SCOPE)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    source: Mapped[ConfigSourceEnum] = mapped_column(
-        sa.Enum(ConfigSourceEnum, name="config_source_enum", create_type=False), nullable=False
-    )
     checksum: Mapped[str] = mapped_column(String, nullable=False)
     config: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False)
     is_active: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("false"))
     activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_by: Mapped[str] = mapped_column(String, nullable=False, server_default="startup-sync")
+    created_by: Mapped[str] = mapped_column(String, nullable=False, server_default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 

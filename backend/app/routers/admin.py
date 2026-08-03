@@ -97,7 +97,7 @@ def list_config_versions(
 
     rows = db.execute(
         text("""
-            SELECT version, source, checksum, is_active, created_at
+            SELECT version, checksum, is_active, created_at
             FROM agent_configs
             WHERE agent_id = :agent_id
             ORDER BY version DESC
@@ -108,7 +108,6 @@ def list_config_versions(
     versions = [
         {
             "version": r.version,
-            "origin": r.source,
             "checksum": r.checksum,
             "is_active": r.is_active,
             "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -266,8 +265,8 @@ def create_config_version(
 
     row = db.execute(
         text("""
-            INSERT INTO agent_configs (agent_id, version, config, checksum, source, is_active, activated_at)
-            VALUES (:agent_id, :version, :config, :checksum, 'db', TRUE, now())
+            INSERT INTO agent_configs (agent_id, version, config, checksum, is_active, activated_at)
+            VALUES (:agent_id, :version, :config, :checksum, TRUE, now())
             RETURNING created_at
         """),
         {
@@ -302,7 +301,7 @@ def get_agent_detail(key: str, db: Session = Depends(get_db)) -> JSONResponse:
     row = db.execute(
         text("""
             SELECT a.id, a.name, a.description, a.agent_type, a.status,
-                   c.config, c.version, c.source, c.created_at
+                   c.config, c.version, c.created_at
             FROM agents a
             LEFT JOIN agent_configs c ON a.id = c.agent_id AND c.is_active = TRUE
             WHERE a.key = :key
@@ -323,7 +322,6 @@ def get_agent_detail(key: str, db: Session = Depends(get_db)) -> JSONResponse:
         "agent_type": row.agent_type,
         "status": row.status,
         "active_version": row.version,
-        "origin": row.source,
         "activated_at": row.created_at.isoformat() if row.created_at else None,
         "config": _redact_secrets(config),
     })

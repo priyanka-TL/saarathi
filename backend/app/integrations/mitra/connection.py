@@ -11,29 +11,40 @@ the app, where capabilities and agent configs are scoped
 
 ``MitraConnection`` is the seam. It is a plain value object -- no I/O, no
 Settings import -- carrying everything the REST client and the WebSocket
-channel need. ``resolve_connection`` builds one by layering an agent spec's
-optional overrides on top of the ``Settings`` values:
+channel need. ``resolve_connection`` builds one from the agent spec's
+``remote.connection`` block:
 
-    Settings (env)  <-  spec.remote.connection  (per agent, per tenant/org)
+    spec.remote.connection  (per agent, per tenant/org)  ->  MitraConnection
 
-**Env is the floor, not the loser.** Every override field is Optional and an
-unset field means "use the env value", so a deployment with no database
-overrides at all resolves to exactly what it resolved to before this module
-existed. That is also the failure mode: if the scoped config cannot be read,
-the caller falls back to the default-scope spec and this function falls back to
-env, field by field.
+**THE SPEC IS THE ONLY SOURCE.** There is no MITRA_* environment floor behind
+it any more: ``MITRA_BASE_URL``, ``MITRA_WS_URL``, ``MITRA_USER_AGENT``,
+``MITRA_ALLOWED_HOSTS``, the three timeouts, the three ``MITRA_IP_*`` fields
+and the six ``MITRA_*_PATH`` keys were all deleted from ``Settings`` and moved
+into ``MitraConnectionSpec``, whose defaults now live in
+``app/domain/agent_spec.py``. A scoped config row therefore fully determines
+which Mitra deployment that agent reaches -- there is no second place a value
+can come from and no merge order to reason about.
+
+TWO THINGS STILL COME FROM SETTINGS, AND BOTH ARE DELIBERATE
+============================================================
+``resolve_connection`` still takes ``settings``, for exactly two values that
+cannot live in a config row:
+
+  * ``mitra_origin_url`` -- a CREDENTIAL (below);
+  * ``mitra_host_ceiling`` -- the operator's SSRF backstop ON a config-supplied
+    ``allowed_hosts``. A control that config can widen is not a control, so it
+    has to sit outside config. See ``_apply_host_ceiling``.
 
 THE ORIGIN URL IS A CREDENTIAL, AND IT IS HANDLED SPECIALLY
 ==========================================================
 Mitra gates admission on the ``Origin`` header (see MitraRestClient's module
-docstring). It must never reach the database, a YAML file, a log line or an
+docstring). It must never reach the database, a config row, a log line or an
 error response. So:
 
   * it is NEVER read from the spec by value. A spec may carry
     ``origin_env: "MITRA_TENANT_X_ORIGIN"`` -- a variable NAME, resolved here
-    with ``os.getenv`` -- which is the same indirection the codebase already
-    used for ``bot_route_env`` / ``company_env`` before those moved into the
-    config as literal values;
+    with ``os.getenv``. This is the one environment indirection left in agent
+    configuration, and it exists solely because of this credential;
   * ``repr=False`` keeps it out of every log line that reprs a connection;
   * it enters the checksum only as its OWN sha256, never as plaintext.
 
@@ -48,20 +59,18 @@ import hashlib
 import json
 import os
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from app.integrations.mitra.rest_client import (
     MitraPaths,
     MitraRestClient,
-    paths_from_settings,
 )
 
-#: Spec field -> MitraConnection field, for the scalar overrides. The two names
-#: differ because the spec drops the `mitra_` prefix Settings carries, and
-#: keeping the mapping explicit means a renamed spec field fails loudly here
-#: rather than silently resolving to the env value.
-_SCALAR_OVERRIDES = (
+#: Copied straight across from `MitraConnectionSpec` to `MitraConnection`. Kept
+#: explicit so a renamed spec field fails loudly here rather than silently
+#: resolving to a default.
+_SCALARS = (
     "base_url",
     "ws_url",
     "user_agent",
@@ -73,7 +82,7 @@ _SCALAR_OVERRIDES = (
     "ip_zip",
 )
 
-_PATH_OVERRIDES = (
+_PATH_FIELDS = (
     "profile",
     "generate_session",
     "chat",
@@ -114,7 +123,7 @@ class MitraConnection:
             "user_agent": self.user_agent,
             "allowed_hosts": sorted(self.allowed_hosts),
             "paths": {
-                name: getattr(self.paths, name) for name in _PATH_OVERRIDES
+                name: getattr(self.paths, name) for name in _PATH_FIELDS
             },
             "connect_timeout_s": self.connect_timeout_s,
             "read_timeout_s": self.read_timeout_s,
@@ -133,16 +142,17 @@ class MitraConnection:
 
 
 def _split_hosts(raw: Optional[str]) -> tuple[str, ...]:
+    """Split MITRA_HOST_CEILING's comma-separated env format."""
     if not raw:
         return ()
     return tuple(h.strip().lower() for h in raw.split(",") if h.strip())
 
 
 def _as_hosts(value: Any) -> tuple[str, ...]:
-    """Accept either a comma-separated string or an already-split sequence.
+    """Accept either an already-split sequence or a comma-separated string.
 
-    The spec stores a list (JSONB round-trips it naturally); Settings stores the
-    comma-separated string the env format requires.
+    The spec stores a list (JSONB round-trips it naturally); the string form is
+    still accepted so a hand-written config or test double is not a surprise.
     """
     if value is None:
         return ()
@@ -151,73 +161,40 @@ def _as_hosts(value: Any) -> tuple[str, ...]:
     return tuple(str(h).strip().lower() for h in value if str(h).strip())
 
 
-def from_settings(settings) -> MitraConnection:
-    """The env floor: a connection built purely from ``Settings``.
+def resolve_connection(settings, remote_spec) -> MitraConnection:
+    """The connection this agent, at this scope, should use.
+
+    Built entirely from ``remote_spec.connection`` -- see the module docstring
+    for why there is no environment floor behind it. ``settings`` supplies only
+    the Origin credential and the host ceiling, neither of which may live in a
+    config row.
 
     ``settings`` is duck-typed rather than imported -- app.integrations must not
     depend on app.core for a type it only reads attributes off, and the tests
     pass a small stand-in.
     """
-    return MitraConnection(
-        base_url=settings.mitra_base_url,
-        ws_url=settings.mitra_ws_url,
-        user_agent=settings.mitra_user_agent,
-        allowed_hosts=_split_hosts(settings.mitra_allowed_hosts),
-        # Reuses the existing mapper rather than restating the six fields; it
-        # stays a separate function because the paths are also needed
-        # independently of any connection, to validate a spec's finalize_path
-        # on the config write path.
-        paths=paths_from_settings(settings),
-        connect_timeout_s=settings.mitra_connect_timeout_s,
-        read_timeout_s=settings.mitra_read_timeout_s,
-        ws_connect_timeout_s=settings.mitra_ws_connect_timeout_s,
-        ip_city=settings.mitra_ip_city,
-        ip_state=settings.mitra_ip_state,
-        ip_zip=settings.mitra_ip_zip,
-        origin_url=settings.mitra_origin_url,
+    conn = getattr(remote_spec, "connection", None)
+    if conn is None:
+        # Unreachable through a validated spec (`RemoteSpec.connection` is
+        # required), so this is a stored row that predates migration 0009 or a
+        # hand-built test double -- either way, guessing an endpoint would send
+        # an interview somewhere nobody configured.
+        raise ValueError(
+            "remote.connection is missing from this agent config; it is required "
+            "since the MITRA_* connection settings moved into agent configuration "
+            "(migration 0009)"
+        )
+
+    values: Dict[str, Any] = {name: getattr(conn, name) for name in _SCALARS}
+    values["paths"] = MitraPaths(
+        **{name: getattr(conn.paths, name) for name in _PATH_FIELDS}
     )
+    values["allowed_hosts"] = _apply_host_ceiling(
+        settings, _as_hosts(getattr(conn, "allowed_hosts", None))
+    )
+    values["origin_url"] = _resolve_origin(settings, remote_spec)
 
-
-def resolve_connection(settings, remote_spec=None) -> MitraConnection:
-    """The connection this agent, at this scope, should use.
-
-    Starts from the env floor and applies only the fields the spec actually
-    sets. Returns the floor unchanged when the spec carries no ``connection``
-    block, which is the overwhelmingly common case.
-    """
-    base = from_settings(settings)
-    if remote_spec is None:
-        return base
-
-    origin = _resolve_origin(settings, remote_spec)
-    override = getattr(remote_spec, "connection", None)
-    if override is None:
-        return base if origin == base.origin_url else replace(base, origin_url=origin)
-
-    changes: Dict[str, Any] = {}
-    for name in _SCALAR_OVERRIDES:
-        value = getattr(override, name, None)
-        if value is not None:
-            changes[name] = value
-
-    hosts = _as_hosts(getattr(override, "allowed_hosts", None))
-    if hosts:
-        changes["allowed_hosts"] = _apply_host_ceiling(settings, hosts)
-
-    path_override = getattr(override, "paths", None)
-    if path_override is not None:
-        path_changes = {
-            name: getattr(path_override, name)
-            for name in _PATH_OVERRIDES
-            if getattr(path_override, name, None) is not None
-        }
-        if path_changes:
-            changes["paths"] = replace(base.paths, **path_changes)
-
-    if origin != base.origin_url:
-        changes["origin_url"] = origin
-
-    return replace(base, **changes) if changes else base
+    return MitraConnection(**values)
 
 
 def _resolve_origin(settings, remote_spec) -> str:

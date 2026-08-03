@@ -92,8 +92,8 @@ def agent_with_scoped_configs():
         session.execute(
             text("""
                 INSERT INTO agent_configs (agent_id, tenant_id, organization_id, version,
-                                           source, checksum, config, is_active, activated_at)
-                VALUES (:agent_id, :tenant_id, 'default', :version, 'db', :checksum,
+                                           checksum, config, is_active, activated_at)
+                VALUES (:agent_id, :tenant_id, 'default', :version, :checksum,
                         CAST(:config AS jsonb), TRUE, now())
             """),
             {"agent_id": agent_id, "tenant_id": tenant_id, "version": version,

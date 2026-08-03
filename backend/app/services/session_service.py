@@ -88,7 +88,7 @@ class SessionService:
         still set to capture_discussion, opening a Record Stories conversation
         from the sidebar sent the next turn to record_stories'
         remote_session_id, while RemoteFlowAgentHandler overwrote
-        remote_bot_route with MITRA_DISCUSSION_BOT_ROUTE and apply() stamped
+        remote_bot_route with capture_discussion's `remote.bot_route` and apply() stamped
         remote_flow='guest-discussion' onto a 'guest-mi-story' session. A later
         finalize would then submit the wrong flow to Mitra for that story.
 

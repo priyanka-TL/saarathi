@@ -6,5 +6,6 @@ __pycache__/
 .env.local
 .pytest_cache/
 .import_linter_cache/
+.DS_Store
 
 

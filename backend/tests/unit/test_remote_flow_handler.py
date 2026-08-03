@@ -106,28 +106,18 @@ class _FakeClientRegistry:
         return self._client
 
 
+#: The endpoint the fixture spec below points at. `resolve_connection` reads it
+#: off the spec, not off Settings -- there is no MITRA_* environment floor.
+_BASE_URL = "https://mitra.example.com"
+
+
 @dataclasses.dataclass
 class _Settings:
-    """The env floor `resolve_connection` reads. Only the Mitra fields."""
+    """What `resolve_connection` still reads from Settings: the Origin
+    credential and the SSRF ceiling. Nothing else about Mitra lives here."""
 
-    mitra_base_url: str = "https://mitra.example.com"
-    mitra_ws_url: str = "wss://mitra.example.com/ws/common/"
     mitra_origin_url: str = "https://origin.example.com"
-    mitra_user_agent: str = "test-agent"
-    mitra_allowed_hosts: str = ""
     mitra_host_ceiling: str = ""
-    mitra_connect_timeout_s: float = 10.0
-    mitra_read_timeout_s: float = 30.0
-    mitra_ws_connect_timeout_s: float = 10.0
-    mitra_ip_city: str = ""
-    mitra_ip_state: str = ""
-    mitra_ip_zip: str = ""
-    mitra_profile_path: str = "/api/profile/"
-    mitra_generate_session_path: str = "/api/generate-session/"
-    mitra_chat_path: str = "/api/companychat/"
-    mitra_get_story_path: str = "/api/get-story/"
-    mitra_finalize_v1_path: str = "/api/end-story/"
-    mitra_finalize_v2_path: str = "/api/end-story/v2/"
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +133,9 @@ def _remote_spec(**overrides) -> RemoteFlowAgentSpec:
         company="test-company",
         handshake=MitraHandshakeSpec(settle_ms=10),
         turn=MitraTurnSpec(first_turn_timeout_ms=60000, turn_timeout_ms=45000, idle_gap_ms=8000),
+        connection=MitraConnectionSpec(
+            base_url=_BASE_URL, ws_url="wss://mitra.example.com/ws/common/"
+        ),
     )
     # Merged rather than splatted alongside, so a test can override any of the
     # defaults above.
@@ -482,7 +475,10 @@ def test_a_connection_override_reaches_both_the_client_and_the_channel_pool():
     rest = _FakeRestClient()
     sessions = _FakeSessionManager([_FakeChannel([BotTurn(text="hi", options=[], step=1)])])
     spec = _remote_spec(
-        connection=MitraConnectionSpec(base_url="https://tenant-mitra.example.com"),
+        connection=MitraConnectionSpec(
+            base_url="https://tenant-mitra.example.com",
+            ws_url="wss://tenant-mitra.example.com/ws/common/",
+        ),
     )
 
     deps = _deps(rest, sessions)
@@ -496,11 +492,13 @@ def test_a_connection_override_reaches_both_the_client_and_the_channel_pool():
     assert sessions.acquire_calls[0][2] is handler._conn
 
 
-def test_no_connection_override_resolves_to_the_env_floor():
+def test_the_endpoint_comes_from_the_spec_not_from_settings():
+    """There is no env floor left to fall through to: whatever the spec says is
+    what the handler reaches, full stop."""
     rest = _FakeRestClient()
     sessions = _FakeSessionManager([_FakeChannel([BotTurn(text="hi", options=[], step=1)])])
 
     deps = _deps(rest, sessions)
     RemoteFlowAgentHandler(_remote_spec(), deps)
 
-    assert deps.mitra_clients.requested[0].base_url == _Settings().mitra_base_url
+    assert deps.mitra_clients.requested[0].base_url == _BASE_URL

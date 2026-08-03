@@ -1,21 +1,25 @@
-"""Migration 0007 is the agent catalogue. These are its guards.
+"""Migrations 0007 and 0009 are the agent catalogue. These are their guards.
 
-It replaced `app/config/agents/*.yaml` -- there is no file to sync from any
-more, so if this migration is wrong the application boots with no agents at all
-(`sync_and_reload` raises) or, worse, with a config Mitra silently mishandles.
+0007 replaced `app/config/agents/*.yaml` -- there is no file to sync from any
+more, so if it is wrong the application boots with no agents at all or, worse,
+with a config Mitra silently mishandles. 0009 completes it: the MITRA_*
+connection settings moved out of the environment into `remote.connection`, so a
+remote_flow spec is only valid once 0009 has added that block. THE TWO ARE
+TESTED TOGETHER because together is how a database ever sees them.
 
 Two properties matter enough to pin:
 
-  1. **The seeded specs are VALID.** A typo in the migration is not caught by
+  1. **The seeded specs are VALID.** A typo in a migration is not caught by
      anything else -- it is a plain dict, and the failure surfaces as a registry
      that loads zero agents at startup.
-  2. **The migration computes the SAME checksum the application does.** It uses
+  2. **The migrations compute the SAME checksum the application does.** They use
      the standard library rather than importing `canonical_json`, deliberately,
-     so that it keeps working when the application moves on. That independence
+     so that they keep working when the application moves on. That independence
      is only safe while the two agree, which is what the test below asserts.
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 from pathlib import Path
 
@@ -26,15 +30,17 @@ from sqlalchemy import text
 from app.database.engine import SessionLocal
 from app.domain.agent_spec import AgentSpec, canonical_json
 
-_MIGRATION = Path(__file__).parents[2] / "migrations" / "versions" / "0007_seed_agents.py"
+_VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
+_MIGRATION = _VERSIONS / "0007_seed_agents.py"
+_CONNECTION_MIGRATION = _VERSIONS / "0009_mitra_connection_to_config.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
 
-def _module():
+def _module(path: Path, name: str):
     """Loaded by path: `migrations/versions` is not a package, and alembic
     revision filenames are not importable identifiers."""
-    spec = importlib.util.spec_from_file_location("_seed_0007", _MIGRATION)
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -42,26 +48,60 @@ def _module():
 
 @pytest.fixture(scope="module")
 def seed():
-    return _module()
+    return _module(_MIGRATION, "_seed_0007")
 
 
-def test_every_seeded_spec_validates(seed):
+@pytest.fixture(scope="module")
+def connection_migration():
+    return _module(_CONNECTION_MIGRATION, "_conn_0009")
+
+
+def _as_stored(raw: dict, connection_migration) -> dict:
+    """The spec as it lands in the database: 0007's dict with 0009 applied."""
+    spec = copy.deepcopy(raw)
+    if spec.get("agent_type") == "remote_flow":
+        spec["remote"]["connection"] = connection_migration._connection_block()
+    return spec
+
+
+def test_every_seeded_spec_validates(seed, connection_migration):
     for raw in seed.SEED_AGENTS:
-        _adapter.validate_python(raw)  # raises on a typo -- that is the assertion
+        # Raises on a typo -- that is the assertion.
+        _adapter.validate_python(_as_stored(raw, connection_migration))
 
 
-def test_the_migration_computes_the_same_checksum_as_the_application(seed):
-    """The migration reimplements canonical_json with hashlib/json so it does
-    not depend on application code it may outlive. This is the tripwire for the
-    two drifting apart -- if it fires, the seeded rows carry checksums that no
-    longer match what `POST /config` would produce for identical content, and
+def test_a_seeded_remote_spec_is_incomplete_until_0009_runs(seed):
+    """0007 is applied history and is deliberately NOT edited to carry a
+    connection block. Pinning that here so a future reader does not "fix" 0007
+    and quietly change the checksum of every row it ever wrote."""
+    from pydantic import ValidationError
+
+    remote = [s for s in seed.SEED_AGENTS if s.get("agent_type") == "remote_flow"]
+    assert remote, "0007 should still seed the remote_flow agents"
+    for raw in remote:
+        assert "connection" not in raw["remote"]
+        with pytest.raises(ValidationError):
+            _adapter.validate_python(raw)
+
+
+def test_the_migration_computes_the_same_checksum_as_the_application(
+    seed, connection_migration
+):
+    """The migrations reimplement canonical_json with hashlib/json so they do
+    not depend on application code they may outlive. This is the tripwire for
+    the two drifting apart -- if it fires, the seeded rows carry checksums that
+    no longer match what `POST /config` would produce for identical content, and
     HandlerFactory's cache key stops meaning what it says."""
     for raw in seed.SEED_AGENTS:
-        migration_json, migration_sha = seed.canonical(raw)
-        app_json, app_sha = canonical_json(_adapter.validate_python(raw))
+        stored = _as_stored(raw, connection_migration)
 
+        migration_json, migration_sha = seed.canonical(stored)
+        app_json, app_sha = canonical_json(_adapter.validate_python(stored))
         assert migration_json == app_json, raw["key"]
         assert migration_sha == app_sha, raw["key"]
+
+        # 0009 recomputes it too, and must agree with both.
+        assert connection_migration.canonical(stored) == (migration_json, migration_sha)
 
 
 def test_no_seeded_value_still_carries_an_env_reference(seed):
@@ -81,7 +121,7 @@ def test_the_shipped_catalogue_is_present_and_active_in_the_database():
     try:
         rows = session.execute(
             text("""
-                SELECT a.key, a.agent_type, a.status, c.is_active, c.source
+                SELECT a.key, a.agent_type, a.status, c.is_active
                 FROM agents a
                 JOIN agent_configs c ON c.agent_id = a.id
                 WHERE a.key IN ('record_stories', 'capture_discussion', 'general_support')

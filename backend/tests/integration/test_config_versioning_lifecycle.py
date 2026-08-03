@@ -112,8 +112,8 @@ def seeded_agent():
     session.execute(
         text("""
             INSERT INTO agent_configs (agent_id, tenant_id, organization_id, version,
-                                       source, checksum, config, is_active, activated_at)
-            VALUES (:agent_id, 'default', 'default', 1, 'db', :checksum,
+                                       checksum, config, is_active, activated_at)
+            VALUES (:agent_id, 'default', 'default', 1, :checksum,
                     CAST(:config AS jsonb), TRUE, now())
         """),
         {"agent_id": agent_id, "checksum": checksum, "config": config},
@@ -138,7 +138,7 @@ def _body(key: str, prompt: str) -> dict:
 def _configs(session, agent_id):
     return session.execute(
         text("""
-            SELECT version, source, is_active, checksum FROM agent_configs
+            SELECT version, is_active, checksum FROM agent_configs
             WHERE agent_id = :id ORDER BY version
         """),
         {"id": agent_id},
@@ -147,7 +147,7 @@ def _configs(session, agent_id):
 
 def _active(session, agent_id):
     return session.execute(
-        text("SELECT version, source FROM agent_configs WHERE agent_id = :id AND is_active"),
+        text("SELECT version FROM agent_configs WHERE agent_id = :id AND is_active"),
         {"id": agent_id},
     ).fetchone()
 

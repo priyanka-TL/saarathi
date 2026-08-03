@@ -18,10 +18,14 @@ USAGE
 =====
     python scripts/verify_discussion_report.py --session <mitra_session_id>
 
-Reads MITRA_BASE_URL / MITRA_ORIGIN_URL / MITRA_USER_AGENT from the
-environment (or .env) exactly as the app does, so it talks to whatever
-environment the app is pointed at. Exits 0 when the report is populated,
-1 when it is not, 2 when the story or PDF is missing entirely.
+The base URL comes from --base-url, or from the ACTIVE capture_discussion agent
+config (`remote.connection.base_url`) when that is omitted -- which is where it
+lives now that the MITRA_* connection settings have moved out of the
+environment. The Origin credential is still read from MITRA_ORIGIN_URL, because
+that is still where it lives.
+
+Exits 0 when the report is populated, 1 when it is not, 2 when the story or PDF
+is missing entirely.
 
 Requires pypdf (test/dev dependency -- deliberately not imported by the app).
 """
@@ -45,7 +49,42 @@ CHAUPAL_KEYS = (
 )
 
 
-def _settings() -> tuple[str, dict[str, str]]:
+def _connection_from_config() -> dict:
+    """The active capture_discussion agent's `remote.connection`.
+
+    MITRA_BASE_URL and MITRA_USER_AGENT are not environment variables any more
+    -- they are per agent and per tenant, so the only honest source is the same
+    config row the app reads. Imported lazily so `--base-url` still works
+    without a database.
+    """
+    from sqlalchemy import text
+
+    from app.database.engine import SessionLocal
+
+    session = SessionLocal()
+    try:
+        row = session.execute(
+            text("""
+                SELECT c.config->'remote'->'connection' AS conn
+                FROM agent_configs c
+                JOIN agents a ON a.id = c.agent_id
+                WHERE a.key = 'capture_discussion'
+                  AND c.tenant_id = 'default' AND c.organization_id = 'default'
+                  AND c.is_active
+            """)
+        ).fetchone()
+    finally:
+        session.close()
+
+    if row is None or not row.conn:
+        sys.exit(
+            "no active capture_discussion config with a remote.connection block "
+            "-- run `make migrate`, or pass --base-url"
+        )
+    return row.conn
+
+
+def _settings(base_url_override: str | None) -> tuple[str, dict[str, str]]:
     try:
         from dotenv import load_dotenv
 
@@ -53,14 +92,23 @@ def _settings() -> tuple[str, dict[str, str]]:
     except ImportError:
         pass
 
-    base_url = os.getenv("MITRA_BASE_URL", "").rstrip("/")
+    if base_url_override:
+        base_url, user_agent = base_url_override, "Mozilla/5.0"
+    else:
+        conn = _connection_from_config()
+        base_url = conn.get("base_url") or ""
+        user_agent = conn.get("user_agent") or "Mozilla/5.0"
+
+    base_url = base_url.rstrip("/")
     if not base_url:
-        sys.exit("MITRA_BASE_URL is not set")
+        sys.exit("no base URL: pass --base-url or fix the agent config")
 
     # Origin is a credential (Mitra gates admission on it) -- never printed.
+    # It stays in the environment precisely BECAUSE it is a credential and must
+    # not be stored in a config row.
     headers = {
         "Origin": os.getenv("MITRA_ORIGIN_URL", ""),
-        "User-Agent": os.getenv("MITRA_USER_AGENT", "Mozilla/5.0"),
+        "User-Agent": user_agent,
         "Accept": "application/json, text/plain, */*",
     }
     return base_url, headers
@@ -104,9 +152,14 @@ def _normalise(text: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", required=True, help="Mitra session id")
+    parser.add_argument(
+        "--base-url",
+        help="Mitra base URL. Defaults to the active capture_discussion "
+             "agent config's remote.connection.base_url.",
+    )
     args = parser.parse_args()
 
-    base_url, headers = _settings()
+    base_url, headers = _settings(args.base_url)
     story = _fetch_story(base_url, headers, args.session)
     other = story.get("other_params") or {}
 

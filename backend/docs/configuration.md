@@ -1,5 +1,9 @@
 # Configuration: what lives in `.env`, what lives in the database
 
+> This document is about the **split** between the two stores. For the agent
+> spec itself — every field, scoping, and how to onboard a new agent — see
+> [agent-configuration.md](agent-configuration.md).
+
 There are two configuration stores, and the split is not arbitrary.
 
 **`.env` holds secrets, infrastructure, and anything read before the app
@@ -11,22 +15,29 @@ provides per-scope resolution, version history, one-active-per-scope,
 checksums, an audit trail and a management API, so Mitra configuration was
 added to it as spec fields rather than given a config table of its own. The
 agent YAML and `ConfigSyncService` are gone entirely — the catalogue is seeded
-by **migration 0007**, so `make migrate` alone gives a working application.
+by **migrations 0007 and 0009**, so `make migrate` alone gives a working
+application.
 
 ## The rule
 
 > Env holds what the app needs **before it can read a database**, plus the
 > secrets. Everything else is a row.
 
-For the Mitra *connection* settings, env is a **floor** the database overrides:
-each `remote.connection.*` field is optional, and unset means "use the `MITRA_*`
-setting". That is also the failure mode — if a scoped config cannot be read,
-resolution falls back to the default scope and from there to `.env`, field by
-field.
+**There is no env floor under Mitra any more.** `remote.connection` is the sole
+source for which Mitra deployment an agent reaches — there is no second place a
+value can come from, and no merge order to reason about. Sixteen `MITRA_*`
+settings were deleted from `Settings` in favour of it (migration 0009), joining
+`remote.company` / `remote.bot_route`, which lost their env fallback in 0007.
 
-For `remote.company` and `remote.bot_route` there is **no env fallback at all**.
-They are required fields on the stored config. `MITRA_COMPANY`,
-`MITRA_STORY_BOT_ROUTE` and `MITRA_DISCUSSION_BOT_ROUTE` no longer exist.
+Only **five** Mitra keys remain in `.env`, each for a structural reason listed
+below. Everything else is a config row.
+
+> **Upgrading:** run `make migrate` **before** deleting the old `MITRA_*` keys
+> from your `.env` — 0009 reads them out of the environment and copies them into
+> the config rows, so your deployment keeps its own endpoint rather than
+> inheriting the migration's fallbacks. Then delete them: `extra="ignore"` on
+> `Settings` means a leftover key is accepted silently and does nothing, so
+> nothing will warn you that it stopped having an effect.
 
 ## Where each key lives
 
@@ -48,43 +59,55 @@ They are required fields on the stored config. `MITRA_COMPANY`,
 
 ### Database only — no `.env` key at all
 
-Required on every `remote_flow` config. Seeded by migration 0007, changed per
+Required on every `remote_flow` config, and resolved per
+`(agent, tenant, organization)`. Seeded by migrations 0007 and 0009, changed per
 deployment or per tenant through the config API.
 
-| Spec field | Was |
-|---|---|
-| `remote.company` | `MITRA_COMPANY` (deleted) |
-| `remote.bot_route` | `MITRA_STORY_BOT_ROUTE` / `MITRA_DISCUSSION_BOT_ROUTE` (deleted) |
+| Spec field | Was | Deleted in |
+|---|---|---|
+| `remote.company` | `MITRA_COMPANY` | 0007 |
+| `remote.bot_route` | `MITRA_STORY_BOT_ROUTE` / `MITRA_DISCUSSION_BOT_ROUTE` | 0007 |
+| `remote.connection.base_url` | `MITRA_BASE_URL` | 0009 |
+| `remote.connection.ws_url` | `MITRA_WS_URL` | 0009 |
+| `remote.connection.user_agent` | `MITRA_USER_AGENT` | 0009 |
+| `remote.connection.allowed_hosts` | `MITRA_ALLOWED_HOSTS` | 0009 |
+| `remote.connection.connect_timeout_s` | `MITRA_CONNECT_TIMEOUT_S` | 0009 |
+| `remote.connection.read_timeout_s` | `MITRA_READ_TIMEOUT_S` | 0009 |
+| `remote.connection.ws_connect_timeout_s` | `MITRA_WS_CONNECT_TIMEOUT_S` | 0009 |
+| `remote.connection.ip_city` / `ip_state` / `ip_zip` | `MITRA_IP_CITY` / `_STATE` / `_ZIP` | 0009 |
+| `remote.connection.paths.*` (six) | `MITRA_*_PATH` (six) | 0009 |
+
+`base_url` and `ws_url` are **required** — there is no env value left to fall
+back to, and an agent pointed at nowhere fails as a blank report rather than an
+error. The rest carry defaults (`app/domain/agent_spec.py`); the six paths
+default to Mitra's own API contract.
 
 Mitra identifies a profile by `(email, company)`, so `remote.company` is the
-single field that decides whether every tenant shares one Mitra company or each
+single field that decides whether every tenant shares one Mitra profile or each
 gets its own.
 
 ### Overridable per `(agent, tenant, organization)`, with `.env` as the default
 
 | `.env` key | Spec field |
 |---|---|
-| `MITRA_BASE_URL` | `remote.connection.base_url` |
-| `MITRA_WS_URL` | `remote.connection.ws_url` |
-| `MITRA_USER_AGENT` | `remote.connection.user_agent` |
-| `MITRA_ALLOWED_HOSTS` | `remote.connection.allowed_hosts` |
-| `MITRA_CONNECT_TIMEOUT_S` | `remote.connection.connect_timeout_s` |
-| `MITRA_READ_TIMEOUT_S` | `remote.connection.read_timeout_s` |
-| `MITRA_WS_CONNECT_TIMEOUT_S` | `remote.connection.ws_connect_timeout_s` |
-| `MITRA_IP_CITY` / `_STATE` / `_ZIP` | `remote.connection.ip_city` / `ip_state` / `ip_zip` |
-| `MITRA_*_PATH` (six) | `remote.connection.paths.*` |
 | `OPENROUTER_MODEL` | `model.name` |
 | `LLM_TIMEOUT` | `model.timeout_s` |
-| `LLM_MAX_RETRIES` | `retry.max_attempts` |
 
 `OPENROUTER_MODEL` and `LLM_TIMEOUT` cannot leave `.env`: `RouterService` also
 reads them directly for the **router's own classifier**, which is not an agent
 and has no `agent_configs` row.
 
+`LLM_MAX_RETRIES` has **no** spec equivalent. It is passed straight to the
+LiteLLM client (`app/llm/factory.py`, `app/llm/__init__.py`) and is not
+configurable per agent. The `retry` block on `BaseAgentSpec` is unrelated to it,
+and is not implemented at all — nothing in `app/` reads it.
+
 ## Where a fresh database gets its catalogue
 
-Migration 0007. It inserts the three agents and their default-scope
-`agent_configs` rows, and it is idempotent in a way that matters:
+Migration 0007, then 0009.
+
+**0007** inserts the three agents and their default-scope `agent_configs` rows,
+and it is idempotent in a way that matters:
 
 * an existing agent (`ON CONFLICT (key) DO NOTHING`) is not touched;
 * an existing config is superseded **only** if it is still written for the
@@ -94,14 +117,24 @@ Migration 0007. It inserts the three agents and their default-scope
   `activate` call away;
 * anything else is somebody's configuration and is left alone.
 
+**0009** adds `remote.connection` to every `remote_flow` config row that lacks
+one, reading each value from the environment and falling back to a QA default.
+Unlike 0007 it edits **in place** rather than inserting a new version: a row
+without a connection block no longer validates at all, so it is not a rollback
+target — activating it would just make the agent vanish from routing with a log
+line. It patches every version, not only the active one, so an older version can
+still be activated afterwards. A row that already carries its own `connection`
+is left alone.
+
 ## How resolution works
 
 ```
-Settings (.env)
+spec.remote.connection  (the agent config row)
     │
     ├─ resolve_connection(settings, spec.remote)     app/integrations/mitra/connection.py
-    │      applies only the non-None fields of spec.remote.connection
-    │      resolves origin_url from spec.remote.origin_env by NAME
+    │      copies every field across from the spec — there is no env floor
+    │      settings supplies ONLY: origin_url (via origin_env, by NAME)
+    │                              the MITRA_HOST_CEILING intersection
     ▼
 MitraConnection  (frozen, checksummed)
     │
@@ -133,7 +166,11 @@ curl -X POST "$BASE/api/agents/record_stories/config" \
   -d '{ "key": "record_stories", ..., "remote": {
           "provider": "mitra", "flow_name": "guest-mi-story",
           "bot_route": "/guided_guest", "company": "tenant-company",
-          "finalize_path": "/api/end-story/" } }'
+          "finalize_path": "/api/end-story/",
+          "connection": {
+            "base_url": "https://tenant-mitra.example.org",
+            "ws_url": "wss://tenant-mitra.example.org/ws/common/",
+            "allowed_hosts": ["tenant-static.example.org"] } } }'
 
 curl "$BASE/api/agents/record_stories/config/versions"          # history
 curl -X POST "$BASE/api/agents/record_stories/config/3/activate" # rollback
@@ -158,9 +195,13 @@ no startup sync left to catch it.
   authenticate frame, so changing it mid-interview repoints the bot.
 * **`WORKERS` must stay 1 while `MITRA_ENABLED=1`.** Unchanged by any of this —
   the channel pool is still in process memory.
-* **`allowed_hosts` is an SSRF control.** Overriding it through the admin API
-  widens what `_validate_url` will accept. Set `MITRA_HOST_CEILING` in any
-  deployment where config writers are not fully trusted.
+* **`allowed_hosts` is an SSRF control.** It now arrives *only* through a config
+  write, so `MITRA_HOST_CEILING` is the only bound on it. It applies to every
+  allowlist — it used to spare the `.env`-supplied one, but there isn't one any
+  more. Set it in any deployment where config writers are not fully trusted.
+* **There is no default-scope REST client.** `container.mitra_rest` is gone:
+  building a client needs an endpoint, and an endpoint needs an agent spec.
+  Every caller goes through `MitraClientRegistry` with a resolved spec.
 
 ## Removed
 
@@ -171,7 +212,11 @@ no startup sync left to catch it.
 | `CONFIG_SYNC_MODE` | nothing |
 | `${VAR}` expansion inside a spec | literal values in the row |
 | `remote.bot_route_env` / `remote.company_env` | `remote.bot_route` / `remote.company` |
-| `MITRA_COMPANY`, `MITRA_STORY_BOT_ROUTE`, `MITRA_DISCUSSION_BOT_ROUTE` | the two spec fields above |
+| `MITRA_COMPANY`, `MITRA_STORY_BOT_ROUTE`, `MITRA_DISCUSSION_BOT_ROUTE` | `remote.company` / `remote.bot_route` |
+| the sixteen `MITRA_*` connection and path settings | `remote.connection.*` (migration 0009) |
+| `Settings.mitra_*` for all of the above | nothing — `Settings` keeps five Mitra keys |
+| `MitraRestClient.paths_from_settings`, `connection.from_settings` | `resolve_connection(settings, spec.remote)` |
+| `Container.mitra_rest` | `Container.mitra_clients` (the registry) |
 
 `BaseAgentSpec` is `extra="forbid"`, so a config still written in the old shape
 is **rejected** by the config API rather than silently ignored.
