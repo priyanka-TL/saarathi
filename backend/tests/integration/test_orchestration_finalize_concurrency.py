@@ -112,7 +112,6 @@ def test_concurrent_terminal_turns_produce_exactly_one_finalisation():
         agent_id = _insert_agent_row(setup_session, f"agent_{uuid.uuid4().hex[:8]}")
         conv_repo = ConversationRepository(setup_session)
         conv = conv_repo.get_or_create(None, _new_user())
-        conv_repo.pin(conv.id, agent_id)
 
         svc = SessionService(setup_session)
         repo = AgentSessionRepository(setup_session)

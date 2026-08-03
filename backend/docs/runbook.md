@@ -142,7 +142,7 @@ investigate rather than something to archive silently. Query 8 finds those.
 
 ### 8. Does any conversation's message_count disagree with its actual messages?
 `message_count` doubles as the message `seq` allocator (`next_seq_for_update`),
-and `uq_msg_seq` is UNIQUE on `(conversation_id, seq)` -- so a counter that has
+and `uq_conversation_messages_seq` is UNIQUE on `(conversation_id, seq)` -- so a counter that has
 drifted BELOW the real row count means the next message will collide on that
 constraint and every further turn in that conversation fails.
 

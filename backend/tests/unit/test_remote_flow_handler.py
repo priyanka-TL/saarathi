@@ -157,7 +157,6 @@ def _session(remote_session_id: Optional[str] = None, step: int = 0) -> AgentSes
         conversation_id=uuid.uuid4(),
         agent_id=uuid.uuid4(),
         state=SessionState.pending if remote_session_id is None else SessionState.awaiting_user,
-        remote_provider=None,
         remote_session_id=remote_session_id,
         remote_profile_id=None,
         remote_flow=None,
@@ -168,7 +167,6 @@ def _session(remote_session_id: Optional[str] = None, step: int = 0) -> AgentSes
         result_ref=None,
         report_url=None,
         error=None,
-        error_code=None,
         state_data={},
     )
 

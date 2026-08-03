@@ -5,7 +5,7 @@ Design invariants (§4.8):
     not in a DB CHECK constraint, so truncation is observable in application
     logs rather than silently enforced. One large tool result must not be able
     to make the table unreadable.
-  * ck_tool_error (DB-level CHECK) rejects any non-success row whose error
+  * ck_tool_executions_error (DB-level CHECK) rejects any non-success row whose error
     column is NULL. This repository enforces the same rule at the Python level
     so the error surfaces before hitting the DB round-trip.
   * bulk_insert is the hot path — called once per assistant turn. It flushes
@@ -20,7 +20,7 @@ from typing import Optional, Sequence
 from sqlalchemy.orm import Session
 
 from app.agents.protocol import ToolTrace
-from app.models.orm import ToolExecution, ToolStatusEnum
+from app.models.orm import SYSTEM_ACTOR, ToolExecution, ToolStatusEnum
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class ToolExecutionRepository:
         agent_id: Optional[uuid.UUID],
         tool_traces: Sequence[ToolTrace],
         request_id: Optional[str] = None,
+        actor: str = SYSTEM_ACTOR,
     ) -> None:
         """Persist one row per ToolTrace.
 
@@ -53,12 +54,12 @@ class ToolExecutionRepository:
         for trace in tool_traces:
             status = ToolStatusEnum(trace.status)
 
-            # Python-level guard mirroring ck_tool_error. Raises before the
+            # Python-level guard mirroring ck_tool_executions_error. Raises before the
             # DB round-trip so the caller gets a clear error, not a vague
             # IntegrityError that loses the original context.
             if status != ToolStatusEnum.success and not trace.error:
                 raise ValueError(
-                    f"tool_executions ck_tool_error: status={trace.status!r} "
+                    f"tool_executions ck_tool_executions_error: status={trace.status!r} "
                     f"but error is None for tool {trace.tool_name!r}"
                 )
 
@@ -87,6 +88,8 @@ class ToolExecutionRepository:
                 error=trace.error,
                 duration_ms=trace.duration_ms,
                 request_id=request_id,
+                created_by=actor,
+                updated_by=actor,
             ))
 
         self._session.add_all(rows)

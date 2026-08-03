@@ -126,23 +126,36 @@ class RouterService:
     # ------------------------------------------------------------------
 
     def _exit_to_default(self, conv) -> RouteDecision:
-        """Abandon the open session, unpin, and hand the turn to the default
-        agent. Shared by Gate 1 and Gate 2 so an exit command behaves
-        identically whether or not the client named an agent."""
+        """Abandon the open session and hand the turn to the default agent.
+        Shared by Gate 1 and Gate 2 so an exit command behaves identically
+        whether or not the client named an agent.
+
+        Abandoning the session IS the unpin: the session moving to a terminal
+        state is what makes _pin_for stop finding it. There used to be a second
+        `conversations.unpin()` call here, which had to be kept in step with
+        this one by hand.
+        """
         self._session_service.abandon(conv.id, reason="user_exit")
-        self._conversations.unpin(conv.id)
         return RouteDecision(self._registry.default(), "exit_to_default", 1.0, 0, unpinned=True)
 
     def _pin_for(self, conv) -> Optional[RegisteredAgent]:
-        """conversations.pinned_agent_id OR an open agent_sessions row --
-        checked in that order (they're set/cleared together by convention,
-        per design doc §6.5, but nothing enforces it at the DB level)."""
-        pinned_agent_id = getattr(conv, "pinned_agent_id", None)
-        if pinned_agent_id:
-            agent = self._registry.get_by_id(str(pinned_agent_id))
-            if agent:
-                return agent
+        """The agent currently driving this conversation, or None.
 
+        ONE SOURCE: the conversation's open `agent_sessions` row.
+        `uq_agent_sessions_one_open_per_conversation` guarantees there is at
+        most one, so this cannot be ambiguous.
+
+        This used to consult `conversations.pinned_agent_id` first and fall back
+        to here. The two were written under identical conditions
+        (`routing.pin_session` gates both `SessionService.open_for` and the pin)
+        and cleared in the same four places, so the column could only ever agree
+        with this row or be a bug -- and nothing at the DB level decided which.
+        Reading the row that carries the invariant removes the second case.
+
+        Returns None when the agent is no longer in the enabled registry
+        snapshot (disabled since, or a remote_flow agent with MITRA_ENABLED=0),
+        which correctly falls the turn through to Gate 3.
+        """
         open_session = self._sessions_repo.get_open_for_conversation(conv.id)
         if open_session:
             return self._registry.get_by_id(str(open_session.agent_id))

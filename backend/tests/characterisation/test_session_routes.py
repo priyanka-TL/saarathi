@@ -166,7 +166,6 @@ def _seed_awaiting_session(conversation_id: uuid.UUID, agent_id: uuid.UUID):
     next request (a fresh db_session) sees it."""
     db = SessionLocal()
     try:
-        ConversationRepository(db).pin(conversation_id, agent_id)
         svc = SessionService(db)
         repo = AgentSessionRepository(db)
         pending = repo.create_pending(conversation_id, agent_id)
@@ -186,7 +185,6 @@ def _seed_awaiting_session(conversation_id: uuid.UUID, agent_id: uuid.UUID):
 def _seed_completed_session(conversation_id: uuid.UUID, agent_id: uuid.UUID, report_url=None):
     db = SessionLocal()
     try:
-        ConversationRepository(db).pin(conversation_id, agent_id)
         svc = SessionService(db)
         repo = AgentSessionRepository(db)
         pending = repo.create_pending(conversation_id, agent_id)
@@ -311,7 +309,7 @@ def test_finalize_404_for_unknown_id(client):
 # ---------------------------------------------------------------------------
 
 
-def test_abandon_unpins_and_closes_channel(client, stub_registry, fake_mitra, script):
+def test_abandon_releases_conversation_and_closes_channel(client, stub_registry, fake_mitra, script):
     _rest, sessions = fake_mitra
     conv_id = _own_conversation_id(client, script)
     db = SessionLocal()
@@ -330,10 +328,15 @@ def test_abandon_unpins_and_closes_channel(client, stub_registry, fake_mitra, sc
 
     verify = SessionLocal()
     try:
-        pinned = verify.execute(
-            text("SELECT pinned_agent_id FROM conversations WHERE id = :id"), {"id": conv_id}
+        # The abandoned session is terminal, so the conversation has no open
+        # session left and RouterService Gate 2 will not claim the next turn.
+        # That is the release -- there is no pinned_agent_id column to clear.
+        open_count = verify.execute(
+            text("SELECT count(*) FROM agent_sessions WHERE conversation_id = :id "
+                 "AND state NOT IN ('completed', 'failed', 'abandoned')"),
+            {"id": conv_id},
         ).scalar()
-        assert pinned is None
+        assert open_count == 0
     finally:
         verify.close()
 

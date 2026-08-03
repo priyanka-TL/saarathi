@@ -146,15 +146,17 @@ def activate_config_version(
         return _admin_error("INVALID_REQUEST", 400, msg="Version not found")
 
     db.execute(
-        text("UPDATE agent_configs SET is_active = FALSE WHERE agent_id = :agent_id"),
-        {"agent_id": agent_row.id},
+        text("UPDATE agent_configs SET is_active = FALSE, "
+             "updated_by = :actor, updated_at = now() WHERE agent_id = :agent_id"),
+        {"agent_id": agent_row.id, "actor": user.user_id},
     )
     db.execute(
         text(
-            "UPDATE agent_configs SET is_active = TRUE, activated_at = now() "
+            "UPDATE agent_configs SET is_active = TRUE, activated_at = now(), "
+            "updated_by = :actor, updated_at = now() "
             "WHERE agent_id = :agent_id AND version = :version"
         ),
-        {"agent_id": agent_row.id, "version": version_int},
+        {"agent_id": agent_row.id, "version": version_int, "actor": user.user_id},
     )
 
     AuditLogRepository(db).insert(
@@ -250,12 +252,13 @@ def create_config_version(
 
     canonical, checksum = canonical_json(spec)
 
-    # Deactivate BEFORE inserting: uq_agent_cfg_one_active is a per-statement
+    # Deactivate BEFORE inserting: uq_agent_configs_one_active is a per-statement
     # partial unique index with no DEFERRABLE, so insert-then-deactivate raises
     # a UniqueViolation.
     db.execute(
-        text("UPDATE agent_configs SET is_active = FALSE WHERE agent_id = :agent_id"),
-        {"agent_id": agent_row.id},
+        text("UPDATE agent_configs SET is_active = FALSE, "
+             "updated_by = :actor, updated_at = now() WHERE agent_id = :agent_id"),
+        {"agent_id": agent_row.id, "actor": user.user_id},
     )
 
     new_version = db.execute(
@@ -265,8 +268,9 @@ def create_config_version(
 
     row = db.execute(
         text("""
-            INSERT INTO agent_configs (agent_id, version, config, checksum, is_active, activated_at)
-            VALUES (:agent_id, :version, :config, :checksum, TRUE, now())
+            INSERT INTO agent_configs (agent_id, version, config, checksum, is_active,
+                                       activated_at, created_by, updated_by)
+            VALUES (:agent_id, :version, :config, :checksum, TRUE, now(), :actor, :actor)
             RETURNING created_at
         """),
         {
@@ -274,6 +278,7 @@ def create_config_version(
             "version": new_version,
             "config": canonical,  # a JSON string -- psycopg can't adapt a raw dict to jsonb here
             "checksum": checksum,
+            "actor": user.user_id,
         },
     ).fetchone()
 
@@ -344,8 +349,9 @@ def update_agent_status(
         return _admin_error("INVALID_REQUEST", 400)
 
     db.execute(
-        text("UPDATE agents SET status = :status, updated_at = now() WHERE id = :id"),
-        {"status": status, "id": agent_row.id},
+        text("UPDATE agents SET status = :status, "
+             "updated_by = :actor, updated_at = now() WHERE id = :id"),
+        {"status": status, "id": agent_row.id, "actor": user.user_id},
     )
 
     AuditLogRepository(db).insert(

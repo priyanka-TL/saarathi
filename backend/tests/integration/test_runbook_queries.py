@@ -195,7 +195,6 @@ def test_query_stuck_sessions(db):
         conversation_id=conv.id,
         agent_id=agent_id,
         state="finalizing",
-        remote_provider="mitra",
         remote_session_id=f"s_{agent_id.hex[:6]}",
         remote_profile_id=f"p_{agent_id.hex[:6]}",
     )
@@ -264,20 +263,20 @@ def test_query_cost_per_agent(db):
 
 def test_query_audit_logs(db):
     repo = AuditLogRepository(db)
-    repo.insert(action="config_sync", entity_type="agent_configuration", actor="ci-cd", note="sync")
+    repo.insert(action="config_create", entity_type="agent_configuration", actor="ci-cd", note="created")
     repo.insert(action="agent_enable", entity_type="agent", actor="admin", note="enabled")
     db.commit()
 
     query = """
     SELECT 
         created_at,
-        actor,
+        created_by AS actor,
         action,
         entity_type,
         entity_id,
         note
     FROM audit_logs
-    WHERE action IN ('config_sync', 'config_create', 'config_activate', 'agent_enable', 'agent_disable')
+    WHERE action IN ('config_create', 'config_activate', 'agent_enable', 'agent_disable')
       AND created_at > now() - INTERVAL '7 days'
     """
     results = db.execute(text(query)).mappings().all()
@@ -285,6 +284,9 @@ def test_query_audit_logs(db):
     actions = [r["action"] for r in results]
     actors = [r["actor"] for r in results]
     
-    assert "config_sync" in actions
+    # `config_sync` used to be asserted here. That action belonged to the
+    # YAML-era startup reconciliation and no longer exists in audit_action_enum,
+    # so selecting it is now a DataError rather than an empty result.
+    assert "config_create" in actions
     assert "agent_enable" in actions
     assert "ci-cd" in actors

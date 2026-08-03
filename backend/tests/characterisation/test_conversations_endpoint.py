@@ -26,11 +26,11 @@ def _seed_conversation(user: UserContext, title, last_message_at, message_count=
         conv_id = uuid.uuid4()
         db.execute(text("""
             INSERT INTO conversations
-                (id, tenant_code, external_user_id, title, status, locale, message_count, metadata, last_message_at)
+                (id, tenant_code, user_id, title, status, locale, message_count, metadata, last_message_at)
             VALUES
-                (:id, :tenant_code, :external_user_id, :title, 'active', 'en', :message_count, '{}', :last_message_at)
+                (:id, :tenant_code, :user_id, :title, 'active', 'en', :message_count, '{}', :last_message_at)
         """), {
-            "id": conv_id, "tenant_code": user.tenant_code, "external_user_id": user.user_id,
+            "id": conv_id, "tenant_code": user.tenant_code, "user_id": user.user_id,
             "title": title, "message_count": message_count, "last_message_at": last_message_at,
         })
         db.commit()
@@ -248,11 +248,11 @@ def _seed_session(conversation_id: uuid.UUID, agent_id, state: str, **fields) ->
         db.execute(text("""
             INSERT INTO agent_sessions
                 (id, conversation_id, agent_id, state, step, result_ref, report_url,
-                 remote_provider, remote_session_id, remote_profile_id,
-                 started_at, finalized_at, ended_at)
+                 remote_session_id, remote_profile_id,
+                 created_at, finalized_at, ended_at)
             VALUES
                 (:id, :conversation_id, :agent_id, :state, :step, :result_ref, :report_url,
-                 'mitra', :remote_session_id, :remote_profile_id,
+                 :remote_session_id, :remote_profile_id,
                  :started_at, :finalized_at, :ended_at)
         """), {
             # ck sess_active_has_remote: any non-pending/failed/abandoned state
@@ -267,8 +267,10 @@ def _seed_session(conversation_id: uuid.UUID, agent_id, state: str, **fields) ->
             "step": fields.get("step", 0),
             "result_ref": fields.get("result_ref"),
             "report_url": fields.get("report_url"),
+            # `started_at` is the fixture's own name for it; the column is
+            # created_at, which is what the session serializer reads back out.
             "started_at": fields.get("started_at", datetime.now(timezone.utc)),
-            # ck_agent_sess constraints: terminal states require ended_at.
+            # ck_agent_sessions_terminal: terminal states require ended_at.
             "finalized_at": datetime.now(timezone.utc) if terminal else None,
             "ended_at": datetime.now(timezone.utc) if terminal else None,
         })

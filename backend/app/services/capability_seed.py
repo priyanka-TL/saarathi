@@ -39,6 +39,7 @@ import json
 from sqlalchemy import text
 
 from app.core.logger import get_logger
+from app.models.orm import SYSTEM_ACTOR
 
 logger = get_logger("capability_seed")
 
@@ -93,15 +94,19 @@ def seed_default_membership(session) -> int:
             result = session.execute(
                 text("""
                     INSERT INTO capability_agents (capability_id, agent_id, display_order,
-                                                   label_override, is_visible, metadata)
+                                                   label_override, is_visible, metadata,
+                                                   created_by, updated_by)
                     SELECT :capability_id, a.id, :display_order, :label, TRUE,
-                           CAST(:metadata AS jsonb)
+                           CAST(:metadata AS jsonb),
+                           CAST(:actor AS varchar), CAST(:actor AS varchar)
                     FROM agents a
                     WHERE a.key = :agent_key
                     ON CONFLICT (capability_id, agent_id) DO NOTHING
                 """),
                 {
                     "capability_id": row.id,
+                    # A boot-time write with no user behind it.
+                    "actor": SYSTEM_ACTOR,
                     "agent_id_key": member["agent_key"],
                     "agent_key": member["agent_key"],
                     "display_order": member["display_order"],

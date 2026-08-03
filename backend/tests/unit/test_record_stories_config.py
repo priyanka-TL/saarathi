@@ -1,7 +1,7 @@
 """Pins the settings that matter in the seeded `record_stories` config.
 
 These used to read app/config/agents/record_stories.yaml. There is no YAML any
-more -- the catalogue is seeded by migration 0007 and edited through the config
+more -- the catalogue is seeded by migration 0010 and edited through the config
 API -- so the source of truth these assert against is the migration's own
 SEED_AGENTS list, validated through the real adapter exactly as the application
 validates a row read out of agent_configs.
@@ -21,43 +21,37 @@ from pydantic import TypeAdapter
 from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
-_MIGRATION = _VERSIONS / "0007_seed_agents.py"
-_CONNECTION_MIGRATION = _VERSIONS / "0009_mitra_connection_to_config.py"
+_MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
 
 def _seed_specs() -> dict:
-    """SEED_AGENTS, loaded by path.
+    """The seeded specs, loaded by path.
 
     Imported as a file rather than a module because `migrations/versions` is not
     a package and alembic revision filenames are not importable identifiers.
+
+    `seed_agents()` is a FUNCTION, not a constant: the two remote_flow specs
+    embed a `remote.connection` block read from the environment, so evaluating
+    it at import time would freeze whatever the environment looked like then.
+    What it returns is the complete spec as stored -- there is no second
+    migration left to merge in.
     """
-    spec = importlib.util.spec_from_file_location("_seed_0007", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("_seed_0010", _MIGRATION)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return {a["key"]: a for a in module.SEED_AGENTS}
+    return {a["key"]: a for a in module.seed_agents()}
 
 
 def _raw() -> dict:
     return _seed_specs()["record_stories"]
 
 
-def _connection_block() -> dict:
-    """The `remote.connection` migration 0009 adds to every remote_flow row.
-
-    0007 is applied history and does not carry one, so its dict alone no longer
-    validates -- the two migrations together are what a database ever sees.
-    """
-    spec = importlib.util.spec_from_file_location("_conn_0009", _CONNECTION_MIGRATION)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module._connection_block()
-
-
 def _load_spec() -> RemoteFlowAgentSpec:
+    """The seeded dict, validated exactly as the application validates a row
+    read out of agent_configs. No merge step: the seed writes a complete spec."""
     raw = copy.deepcopy(_raw())
-    raw["remote"]["connection"] = _connection_block()
     spec = _adapter.validate_python(raw)
     assert isinstance(spec, RemoteFlowAgentSpec)
     return spec
@@ -146,7 +140,6 @@ def test_the_two_agents_finalize_differently_per_agent():
     the PDF template's user_type from token presence. Keep them apart.
     """
     sibling_raw = copy.deepcopy(_seed_specs()["capture_discussion"])
-    sibling_raw["remote"]["connection"] = _connection_block()
     sibling = _adapter.validate_python(sibling_raw)
 
     assert sibling.remote.flow_name == "guest-discussion"

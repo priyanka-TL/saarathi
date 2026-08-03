@@ -77,7 +77,7 @@ export default function Message({ item, onSelectOption }) {
               {kind === 'session-finalizing' && <span className="session-spinner" />}
               {content}
               {reportUrl && (
-                <a className="report-link" href={reportUrl} target="_blank" rel="noopener">
+                <a className="report-link" href={reportUrl} target="_blank" rel="noreferrer">
                   {COPY.downloadReport}
                 </a>
               )}

@@ -334,17 +334,15 @@ def test_claim_finalizing_returns_none_when_not_claimable():
 
 
 # ---------------------------------------------------------------------------
-# abandon(): unpins the conversation in the same transaction
+# abandon(): makes the session terminal, which IS the unpin
 # ---------------------------------------------------------------------------
 
 
-def test_abandon_unpins_conversation_same_transaction():
+def test_abandon_releases_the_conversation_same_transaction():
     session = SessionLocal()
     try:
         agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
         conv_id = _new_conversation(session)
-        conv_repo = ConversationRepository(session)
-        conv_repo.pin(conv_id, agent_id)
 
         repo = AgentSessionRepository(session)
         pending = repo.create_pending(conv_id, agent_id)
@@ -368,8 +366,7 @@ def test_abandon_unpins_conversation_same_transaction():
     # not just visible in-process.
     verify = SessionLocal()
     try:
-        conv = verify.execute(select(Conversation).where(Conversation.id == conv_id)).scalar_one()
-        assert conv.pinned_agent_id is None
+        assert AgentSessionRepository(verify).get_open_for_conversation(conv_id) is None
 
         sess_row = AgentSessionRepository(verify).get(abandoned.id)
         assert sess_row.state == "abandoned"

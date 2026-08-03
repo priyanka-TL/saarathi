@@ -19,12 +19,12 @@ Two rows. No files, no YAML.
 | **`agents`** | Identity and catalogue placement — `key`, `name`, `description`, `agent_type`, `status`, `is_default`, `sort_order`, `icon`, and the owning `(tenant_id, organization_id)`. |
 | **`agent_configs`** | Behaviour — one versioned JSONB column holding an entire `AgentSpec`, scoped `(tenant_id, organization_id)`, with its own checksum. |
 
-Definitions: `app/models/orm.py:358-434`. A fresh database gets its catalogue
-from migration `0007_seed_agents`, so `make migrate` alone yields a working
+Definitions: `app/models/orm.py`. A fresh database gets its catalogue from
+migration `0010_seed_default_data`, so `make migrate` alone yields a working
 application.
 
 `key` is **globally unique** and stays that way — the registry, the router,
-orchestration and every pinned session look agents up by bare `key`. A tenant
+orchestration and every open session look agents up by bare `key`. A tenant
 differentiates behaviour by owning a tenant-scoped `agent_configs` row, never by
 minting a second agent with the same key.
 

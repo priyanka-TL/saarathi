@@ -26,7 +26,7 @@ class ConversationRepository:
             stmt = select(Conversation).where(
                 Conversation.id == conversation_id,
                 Conversation.tenant_code == user.tenant_code,
-                Conversation.external_user_id == user.user_id,
+                Conversation.user_id == user.user_id,
             )
         else:
             # Resolve the most recent active conversation for the user.
@@ -36,7 +36,7 @@ class ConversationRepository:
             # instead of the current one.
             stmt = select(Conversation).where(
                 Conversation.tenant_code == user.tenant_code,
-                Conversation.external_user_id == user.user_id,
+                Conversation.user_id == user.user_id,
                 Conversation.status == ConversationStatusEnum.active
             ).order_by(
                 func.coalesce(Conversation.last_message_at, Conversation.created_at).desc()
@@ -59,11 +59,16 @@ class ConversationRepository:
             id=uuid.uuid4(),
             tenant_code=user.tenant_code,
             organization_id=user.active_org_id,
-            external_user_id=user.user_id,
+            user_id=user.user_id,
             locale=user.locale,
             status=ConversationStatusEnum.active,
             message_count=0,
             metadata_={},
+            # The conversation is the user's, so the user is its author. Every
+            # later write on this row (touch, title, archive) restamps
+            # updated_by with whoever made it.
+            created_by=user.user_id,
+            updated_by=user.user_id,
         )
         self._session.add(new_conv)
         self._session.flush() # flush to get defaults like created_at populated by db
@@ -85,11 +90,16 @@ class ConversationRepository:
             id=uuid.uuid4(),
             tenant_code=user.tenant_code,
             organization_id=user.active_org_id,
-            external_user_id=user.user_id,
+            user_id=user.user_id,
             locale=user.locale,
             status=ConversationStatusEnum.active,
             message_count=0,
             metadata_={},
+            # The conversation is the user's, so the user is its author. Every
+            # later write on this row (touch, title, archive) restamps
+            # updated_by with whoever made it.
+            created_by=user.user_id,
+            updated_by=user.user_id,
         )
         self._session.add(new_conv)
         self._session.flush()
@@ -116,7 +126,7 @@ class ConversationRepository:
         """
         stmt = select(Conversation).where(
             Conversation.tenant_code == user.tenant_code,
-            Conversation.external_user_id == user.user_id,
+            Conversation.user_id == user.user_id,
             Conversation.status == ConversationStatusEnum.active,
             Conversation.message_count == 0,
         ).order_by(Conversation.created_at.desc()).limit(1)
@@ -131,7 +141,7 @@ class ConversationRepository:
         stmt = select(Conversation).where(
             Conversation.id == conversation_id,
             Conversation.tenant_code == user.tenant_code,
-            Conversation.external_user_id == user.user_id,
+            Conversation.user_id == user.user_id,
         )
         conv = self._session.execute(stmt).scalar_one_or_none()
         return ConversationDTO.model_validate(conv) if conv else None
@@ -240,27 +250,12 @@ class ConversationRepository:
         )
         self._session.execute(stmt)
 
-    def pin(self, id: uuid.UUID, agent_id: uuid.UUID) -> None:
-        """
-        Pins the conversation to a specific agent.
-        """
-        stmt = (
-            update(Conversation)
-            .where(Conversation.id == id)
-            .values(pinned_agent_id=agent_id)
-        )
-        self._session.execute(stmt)
-
-    def unpin(self, id: uuid.UUID) -> None:
-        """
-        Unpins the conversation.
-        """
-        stmt = (
-            update(Conversation)
-            .where(Conversation.id == id)
-            .values(pinned_agent_id=None)
-        )
-        self._session.execute(stmt)
+    # There is no pin()/unpin() here any more, and nothing needs one. A
+    # conversation's current agent is its one non-terminal agent_sessions row
+    # (uq_agent_sessions_one_open_per_conversation), so opening a session IS
+    # pinning and abandoning it IS unpinning. The two used to be written
+    # separately under identical conditions with nothing enforcing that they
+    # agreed -- see RouterService._pin_for.
 
     def list_for_user(self, user: UserContext, cursor: Optional[datetime], limit: int) -> ConversationPageDTO:
         """
@@ -268,7 +263,7 @@ class ConversationRepository:
         """
         stmt = select(Conversation).where(
             Conversation.tenant_code == user.tenant_code,
-            Conversation.external_user_id == user.user_id,
+            Conversation.user_id == user.user_id,
             Conversation.status == ConversationStatusEnum.active,
             # Empty shells are not history. get_or_create() makes a row per turn
             # attempt, so a failed turn (or a "New chat" nobody typed into)

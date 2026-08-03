@@ -11,7 +11,15 @@ from typing import Any, Dict, Optional
 
 
 def serialize_session(dto, agent_key: Optional[str]) -> Dict[str, Any]:
-    """The full session payload used by every /api/sessions route."""
+    """The full session payload used by every /api/sessions route.
+
+    TWO KEYS NO LONGER HAVE A COLUMN BEHIND THEM, AND STILL BELONG HERE.
+    `agent_sessions` dropped `started_at` (it was always exactly `created_at`)
+    and `error_code` (nothing ever wrote it, so it was NULL in every row). The
+    keys stay because this shape is the pinned API contract -- the golden
+    fixtures compare it and the client reads it -- so the schema change is
+    absorbed at this one boundary rather than propagated to every consumer.
+    """
     return {
         "id": str(dto.id),
         "conversation_id": str(dto.conversation_id),
@@ -22,8 +30,8 @@ def serialize_session(dto, agent_key: Optional[str]) -> Dict[str, Any]:
         "result_ref": dto.result_ref,
         "report_url": dto.report_url,
         "error": dto.error,
-        "error_code": dto.error_code,
-        "started_at": dto.started_at.isoformat(),
+        "error_code": None,
+        "started_at": dto.created_at.isoformat(),
         "last_activity_at": dto.last_activity_at.isoformat(),
         "finalized_at": dto.finalized_at.isoformat() if dto.finalized_at else None,
         "ended_at": dto.ended_at.isoformat() if dto.ended_at else None,

@@ -4,7 +4,7 @@ from typing import Optional, List, Any, Dict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.orm import ConversationMessage, MessageRoleEnum
+from app.models.orm import SYSTEM_ACTOR, ConversationMessage, MessageRoleEnum
 from app.domain.core import MemorySpec
 from app.domain.conversations import MessageDTO, MessagePageDTO
 
@@ -20,7 +20,6 @@ class MessageRepository:
         role: str,
         content: str,
         agent_id: Optional[uuid.UUID] = None,
-        agent_config_id: Optional[uuid.UUID] = None,
         agent_session_id: Optional[uuid.UUID] = None,
         route_reason: Optional[str] = None,
         route_confidence: Optional[float] = None,
@@ -32,9 +31,15 @@ class MessageRepository:
         latency_ms: Optional[int] = None,
         error: Optional[str] = None,
         request_id: Optional[str] = None,
+        actor: str = SYSTEM_ACTOR,
     ) -> MessageDTO:
         """
         Inserts a new message into the conversation history.
+
+        `actor` is the user whose turn produced this row -- both the message
+        they typed and the reply it drew, since an assistant message exists
+        because that user asked for it. `agent_id` is what records WHICH agent
+        wrote a reply; the two answer different questions.
         """
         # Convert string role to enum
         role_enum = MessageRoleEnum(role)
@@ -46,7 +51,6 @@ class MessageRepository:
             role=role_enum,
             content=content,
             agent_id=agent_id,
-            agent_config_id=agent_config_id,
             agent_session_id=agent_session_id,
             route_reason=route_reason,
             route_confidence=route_confidence,
@@ -58,6 +62,8 @@ class MessageRepository:
             latency_ms=latency_ms,
             error=error,
             request_id=request_id,
+            created_by=actor,
+            updated_by=actor,
         )
         self._session.add(new_msg)
         self._session.flush() # ensure defaults like created_at are generated

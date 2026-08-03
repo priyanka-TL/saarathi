@@ -9,17 +9,21 @@ This document provides a simplified explanation of the core tables in the Saarth
 One row = one chat session.
 
 **For example:**
-| conversation_id | external_user_id | tenant_code | locale | status |
+| conversation_id | user_id | tenant_code | locale | status |
 |---|---|---|---|---|
 | 101 | User A | School X | en | active |
 | 102 | User B | School Y | hi | archived |
 
 **It stores information like:**
-* Who started the conversation (`external_user_id`)
+* Who started the conversation (`user_id`)
 * Which tenant/organization they belong to (`tenant_code`, `organization_id`)
 * Language (`locale`)
 * Total messages (`message_count`)
 * When the conversation started and was last active
+
+**It deliberately stores NOTHING about agents.** Many agents can take part in one
+conversation, so binding the row to a single agent would fight the product model.
+See "Which agent is handling this?" below.
 
 *Think of it as the chat room.*
 
@@ -59,6 +63,11 @@ One row = an active session between the user and a specific agent.
 * The external session ID if delegating to an outside platform like Mitra (`remote_session_id`)
 * Which step of the flow the user is currently on (`step`)
 
+**A conversation can hold many of these rows -- one per agent hand-off -- but at
+most ONE may be non-terminal at a time.** That rule is enforced by the database
+(`uq_agent_sessions_one_open_per_conversation`), and it is the single answer to
+"which agent is driving this conversation right now".
+
 *Think of it as the AI's internal notepad keeping track of where it is in the conversation.*
 
 ---
@@ -93,7 +102,7 @@ One row = a specific version of rules for an agent, assigned to a specific tenan
 | story_agent | default | 1 | false |
 
 **It stores information like:**
-* The actual YAML/JSON configuration dictating how the agent behaves (`config`)
+* The actual JSON configuration dictating how the agent behaves (`config`). There is no YAML anywhere; this table is the only source.
 * Which tenant gets which version of the agent's rules
 * Which configuration is currently active
 
@@ -147,6 +156,58 @@ One row = one system event.
 **It stores information like:**
 * When an agent was enabled/disabled
 * When a configuration was updated or activated
-* Who made the change (the `actor`) and the before/after state
+* Who made the change (`created_by`) and the before/after state
 
 *Think of it as the security camera for system admins.*
+
+
+---
+
+## Two things that are true of EVERY table
+
+### 1. The audit block
+
+All nine tables carry the same four columns:
+
+| column | meaning |
+|---|---|
+| `created_by` | who created the row |
+| `updated_by` | who last changed it |
+| `created_at` | when it was created |
+| `updated_at` | when it was last changed |
+
+`created_by` / `updated_by` hold the acting principal as a **string**, not a
+foreign key -- users are the user service's records, and these values arrive as
+JWT claims (the same reasoning as `tenant_code` and `user_id`). The vocabulary is
+small: a user's id for anything a user did, and `system` for everything with no
+user behind it -- the `0010` seed, idle sweeps, the boot-time capability seed.
+`system` is also the column default, so a writer that forgets to say who it is
+still says something true.
+
+### 2. One migration per table
+
+`migrations/versions/0001`-`0009` create exactly one table each, in foreign key
+dependency order, and `0010` seeds the default catalogue. There are no ALTER
+migrations: every constraint, index and column a table needs is in its own
+`CREATE TABLE`. A future schema change gets a **new** numbered migration -- never
+an edit to one that has already been applied.
+
+---
+
+## Which agent is handling this?
+
+The question has three different answers depending on what is really being asked,
+and each is a different table. There is no `conversations.pinned_agent_id` -- it
+used to duplicate the first answer below, and nothing kept the two in step.
+
+| Question | Where the answer lives |
+|---|---|
+| Which agent is driving the conversation **right now**? | The conversation's one non-terminal `agent_sessions` row |
+| Which agent produced **this specific message**? | `conversation_messages.agent_id` (mandatory on every assistant row) |
+| Which agents have taken part **at all**? | Every `agent_sessions` row for the conversation |
+| In what **order** did they hand off? | The distinct `agent_id` sequence over the conversation's messages -- this is what the flow breadcrumb renders |
+
+So a conversation that starts as a Record Stories interview, is abandoned, and
+continues as a Capture Discussions interview has two `agent_sessions` rows (one
+`abandoned`, one open) and messages attributed to each agent in turn. Nothing
+about the conversation row itself changes.
