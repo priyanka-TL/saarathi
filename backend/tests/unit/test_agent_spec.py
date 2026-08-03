@@ -67,7 +67,11 @@ def test_wrong_variant_fields_rejected():
         "remote": {
             "provider": "mitra",
             "flow_name": "guest-discussion",
-            "bot_route": "/test-bot-route", "company": "test-company"
+            "bot_route": "/test-bot-route", "company": "test-company",
+            "connection": {
+                "base_url": "https://mitra.example.com",
+                "ws_url": "wss://mitra.example.com/ws/common/",
+            },
         }
     }
     with pytest.raises(ValidationError) as exc:
@@ -103,7 +107,11 @@ def test_both_variants_validate():
         "remote": {
             "provider": "mitra",
             "flow_name": "guest-discussion",
-            "bot_route": "/test-bot-route", "company": "test-company"
+            "bot_route": "/test-bot-route", "company": "test-company",
+            "connection": {
+                "base_url": "https://mitra.example.com",
+                "ws_url": "wss://mitra.example.com/ws/common/",
+            },
         }
     }
     agent = agent_spec_adapter.validate_python(raw_remote)

@@ -97,7 +97,7 @@ def list_config_versions(
 
     rows = db.execute(
         text("""
-            SELECT version, source, checksum, is_active, created_at
+            SELECT version, checksum, is_active, created_at
             FROM agent_configs
             WHERE agent_id = :agent_id
             ORDER BY version DESC
@@ -108,7 +108,6 @@ def list_config_versions(
     versions = [
         {
             "version": r.version,
-            "origin": r.source,
             "checksum": r.checksum,
             "is_active": r.is_active,
             "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -147,15 +146,17 @@ def activate_config_version(
         return _admin_error("INVALID_REQUEST", 400, msg="Version not found")
 
     db.execute(
-        text("UPDATE agent_configs SET is_active = FALSE WHERE agent_id = :agent_id"),
-        {"agent_id": agent_row.id},
+        text("UPDATE agent_configs SET is_active = FALSE, "
+             "updated_by = :actor, updated_at = now() WHERE agent_id = :agent_id"),
+        {"agent_id": agent_row.id, "actor": user.user_id},
     )
     db.execute(
         text(
-            "UPDATE agent_configs SET is_active = TRUE, activated_at = now() "
+            "UPDATE agent_configs SET is_active = TRUE, activated_at = now(), "
+            "updated_by = :actor, updated_at = now() "
             "WHERE agent_id = :agent_id AND version = :version"
         ),
-        {"agent_id": agent_row.id, "version": version_int},
+        {"agent_id": agent_row.id, "version": version_int, "actor": user.user_id},
     )
 
     AuditLogRepository(db).insert(
@@ -251,12 +252,13 @@ def create_config_version(
 
     canonical, checksum = canonical_json(spec)
 
-    # Deactivate BEFORE inserting: uq_agent_cfg_one_active is a per-statement
+    # Deactivate BEFORE inserting: uq_agent_configs_one_active is a per-statement
     # partial unique index with no DEFERRABLE, so insert-then-deactivate raises
     # a UniqueViolation.
     db.execute(
-        text("UPDATE agent_configs SET is_active = FALSE WHERE agent_id = :agent_id"),
-        {"agent_id": agent_row.id},
+        text("UPDATE agent_configs SET is_active = FALSE, "
+             "updated_by = :actor, updated_at = now() WHERE agent_id = :agent_id"),
+        {"agent_id": agent_row.id, "actor": user.user_id},
     )
 
     new_version = db.execute(
@@ -266,8 +268,9 @@ def create_config_version(
 
     row = db.execute(
         text("""
-            INSERT INTO agent_configs (agent_id, version, config, checksum, source, is_active, activated_at)
-            VALUES (:agent_id, :version, :config, :checksum, 'db', TRUE, now())
+            INSERT INTO agent_configs (agent_id, version, config, checksum, is_active,
+                                       activated_at, created_by, updated_by)
+            VALUES (:agent_id, :version, :config, :checksum, TRUE, now(), :actor, :actor)
             RETURNING created_at
         """),
         {
@@ -275,6 +278,7 @@ def create_config_version(
             "version": new_version,
             "config": canonical,  # a JSON string -- psycopg can't adapt a raw dict to jsonb here
             "checksum": checksum,
+            "actor": user.user_id,
         },
     ).fetchone()
 
@@ -302,7 +306,7 @@ def get_agent_detail(key: str, db: Session = Depends(get_db)) -> JSONResponse:
     row = db.execute(
         text("""
             SELECT a.id, a.name, a.description, a.agent_type, a.status,
-                   c.config, c.version, c.source, c.created_at
+                   c.config, c.version, c.created_at
             FROM agents a
             LEFT JOIN agent_configs c ON a.id = c.agent_id AND c.is_active = TRUE
             WHERE a.key = :key
@@ -323,7 +327,6 @@ def get_agent_detail(key: str, db: Session = Depends(get_db)) -> JSONResponse:
         "agent_type": row.agent_type,
         "status": row.status,
         "active_version": row.version,
-        "origin": row.source,
         "activated_at": row.created_at.isoformat() if row.created_at else None,
         "config": _redact_secrets(config),
     })
@@ -346,8 +349,9 @@ def update_agent_status(
         return _admin_error("INVALID_REQUEST", 400)
 
     db.execute(
-        text("UPDATE agents SET status = :status, updated_at = now() WHERE id = :id"),
-        {"status": status, "id": agent_row.id},
+        text("UPDATE agents SET status = :status, "
+             "updated_by = :actor, updated_at = now() WHERE id = :id"),
+        {"status": status, "id": agent_row.id, "actor": user.user_id},
     )
 
     AuditLogRepository(db).insert(

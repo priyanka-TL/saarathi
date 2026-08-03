@@ -237,8 +237,8 @@ compare equal in Postgres) and every lookup an `IS NOT DISTINCT FROM`.
 |---|---|
 | `capabilities` | the sidebar's cards. `metadata` carries `action` |
 | `capability_agents` | membership + per-capability label and order. Real FK to `agents`, so a dangling reference is unrepresentable |
-| `agents` | the catalogue. `key` stays **globally** unique — `AgentRegistry` and every pinned session look agents up by bare key |
-| `agent_configs` | versioned config, **scoped**. Renamed from `agent_configurations` in 0006 |
+| `agents` | the catalogue. `key` stays **globally** unique — `AgentRegistry` and every open session look agents up by bare key |
+| `agent_configs` | versioned config, **scoped**. One active row per (agent, scope) |
 
 **A tenant's agent config is a whole `agent_configs` row at that tenant's
 scope**, not a patch merged over a base. That is a safety property, not a
@@ -251,9 +251,9 @@ construction. `tests/guards/test_tenant_isolation.py` pins both directions —
 different configs must not share a handler, identical ones must.
 
 Two indexes make this work and must not be relaxed:
-`uq_agent_cfg_scope_version` (version numbering is per scope, so a tenant's v1
-does not jump when another tenant edits) and `uq_agent_cfg_one_active` (one
-active config per *(agent, scope)*, not per agent).
+`uq_agent_configs_scope_version` (version numbering is per scope, so a tenant's
+v1 does not jump when another tenant edits) and `uq_agent_configs_one_active`
+(one active config per *(agent, scope)*, not per agent).
 
 `GET /api/ui/capabilities` is the **single source** for the panel — the
 frontend keeps no bundled copy, so an empty answer means an empty sidebar. It

@@ -1,7 +1,7 @@
 """Pins the settings that matter in the seeded `record_stories` config.
 
 These used to read app/config/agents/record_stories.yaml. There is no YAML any
-more -- the catalogue is seeded by migration 0007 and edited through the config
+more -- the catalogue is seeded by migration 0010 and edited through the config
 API -- so the source of truth these assert against is the migration's own
 SEED_AGENTS list, validated through the real adapter exactly as the application
 validates a row read out of agent_configs.
@@ -12,6 +12,7 @@ ignored rather than rejected. These assertions are what catch that instead.
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 from pathlib import Path
 
@@ -19,21 +20,28 @@ from pydantic import TypeAdapter
 
 from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 
-_MIGRATION = Path(__file__).parents[2] / "migrations" / "versions" / "0007_seed_agents.py"
+_VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
+_MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
 
 def _seed_specs() -> dict:
-    """SEED_AGENTS, loaded by path.
+    """The seeded specs, loaded by path.
 
     Imported as a file rather than a module because `migrations/versions` is not
     a package and alembic revision filenames are not importable identifiers.
+
+    `seed_agents()` is a FUNCTION, not a constant: the two remote_flow specs
+    embed a `remote.connection` block read from the environment, so evaluating
+    it at import time would freeze whatever the environment looked like then.
+    What it returns is the complete spec as stored -- there is no second
+    migration left to merge in.
     """
-    spec = importlib.util.spec_from_file_location("_seed_0007", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("_seed_0010", _MIGRATION)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return {a["key"]: a for a in module.SEED_AGENTS}
+    return {a["key"]: a for a in module.seed_agents()}
 
 
 def _raw() -> dict:
@@ -41,7 +49,10 @@ def _raw() -> dict:
 
 
 def _load_spec() -> RemoteFlowAgentSpec:
-    spec = _adapter.validate_python(_raw())
+    """The seeded dict, validated exactly as the application validates a row
+    read out of agent_configs. No merge step: the seed writes a complete spec."""
+    raw = copy.deepcopy(_raw())
+    spec = _adapter.validate_python(raw)
     assert isinstance(spec, RemoteFlowAgentSpec)
     return spec
 
@@ -128,7 +139,8 @@ def test_the_two_agents_finalize_differently_per_agent():
     body, the discussion agent sends `access_token: null` because Mitra picks
     the PDF template's user_type from token presence. Keep them apart.
     """
-    sibling = _adapter.validate_python(_seed_specs()["capture_discussion"])
+    sibling_raw = copy.deepcopy(_seed_specs()["capture_discussion"])
+    sibling = _adapter.validate_python(sibling_raw)
 
     assert sibling.remote.flow_name == "guest-discussion"
     assert sibling.remote.finalize_path == "/api/end-story/"

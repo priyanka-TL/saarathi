@@ -162,10 +162,11 @@ def create_capability(
         row = db.execute(
             text("""
                 INSERT INTO capabilities (tenant_id, organization_id, key, name, description,
-                                          icon, badge, status, display_order, metadata)
+                                          icon, badge, status, display_order, metadata,
+                                          created_by, updated_by)
                 VALUES (:tenant, :organization, :key, :name, :description, :icon, :badge,
                         CAST(:status AS capability_status_enum), :display_order,
-                        CAST(:metadata AS jsonb))
+                        CAST(:metadata AS jsonb), :actor, :actor)
                 RETURNING id, tenant_id, organization_id, key, name, description, icon,
                           badge, status, display_order, metadata
             """),
@@ -175,6 +176,7 @@ def create_capability(
                 "badge": body.get("badge"), "status": status,
                 "display_order": body.get("display_order", 100),
                 "metadata": json.dumps(body.get("metadata") or {}),
+                "actor": user.user_id,
             },
         ).fetchone()
     except Exception as exc:  # noqa: BLE001
@@ -235,7 +237,9 @@ def update_capability(
     if not before:
         return _admin_error("CAPABILITY_NOT_FOUND", 404)
 
-    sets, params = [], {"id": before.id}
+    # `actor` is bound unconditionally: the UPDATE below always sets updated_by,
+    # whether or not the caller asked to change any of _CAPABILITY_FIELDS.
+    sets, params = [], {"id": before.id, "actor": user.user_id}
     for field in _CAPABILITY_FIELDS:
         if field not in body:
             continue
@@ -254,7 +258,8 @@ def update_capability(
 
     row = db.execute(
         text(f"""
-            UPDATE capabilities SET {", ".join(sets)}, updated_at = now()
+            UPDATE capabilities SET {", ".join(sets)},
+                                    updated_by = :actor, updated_at = now()
             WHERE id = :id
             RETURNING id, tenant_id, organization_id, key, name, description, icon,
                       badge, status, display_order, metadata
@@ -377,9 +382,10 @@ def set_capability_agents(
         db.execute(
             text("""
                 INSERT INTO capability_agents (capability_id, agent_id, display_order,
-                                               label_override, is_visible, metadata)
+                                               label_override, is_visible, metadata,
+                                               created_by, updated_by)
                 VALUES (:capability_id, :agent_id, :display_order, :label, :is_visible,
-                        CAST(:metadata AS jsonb))
+                        CAST(:metadata AS jsonb), :actor, :actor)
             """),
             {
                 "capability_id": capability.id,
@@ -390,6 +396,7 @@ def set_capability_agents(
                 "label": member.get("label_override"),
                 "is_visible": member.get("is_visible", True),
                 "metadata": json.dumps(member.get("metadata") or {}),
+                "actor": user.user_id,
             },
         )
 

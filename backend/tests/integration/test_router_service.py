@@ -61,7 +61,7 @@ class _FakeLlmFactory:
 
 def _insert_agent_row(session, db_key: str) -> uuid.UUID:
     """Inserts a real row purely to satisfy live FK constraints
-    (agent_sessions.agent_id, conversations.pinned_agent_id). The DB row's
+    (agent_sessions.agent_id, conversation_messages.agent_id). The DB row's
     `key` column is a unique-per-call synthetic value, independent of the
     logical RegisteredAgent.key the test actually exercises RouterService
     logic against -- since RouterService never re-reads agents from the DB
@@ -203,7 +203,13 @@ def test_pinned_turn_issues_zero_llm_calls():
         registry = _build_registry([agent, default_agent])
         svc = RouterService(session, registry, _FakeLlmFactory(fake_llm))
 
-        conv_stub = SimpleNamespace(id=conv.id, pinned_agent_id=uuid.UUID(agent.id))
+        # THE PIN IS THE OPEN SESSION. There is no conversations.pinned_agent_id
+        # any more, so Gate 2 has exactly one source: the conversation's
+        # non-terminal agent_sessions row.
+        AgentSessionRepository(session).create_pending(conv.id, uuid.UUID(agent.id))
+        session.commit()
+
+        conv_stub = SimpleNamespace(id=conv.id)
         decision = svc.select(conv_stub, _ctx("Priya"), explicit_key=None)
 
         assert decision.reason == "pinned"
@@ -221,9 +227,6 @@ def test_exit_keyword_releases_pin_and_abandons_session():
         default_agent = _make_agent(session, "general_support", is_default=True)
         conv = _new_conversation(session)
 
-        conv_repo = ConversationRepository(session)
-        conv_repo.pin(conv.id, uuid.UUID(agent.id))
-
         sessions_repo = AgentSessionRepository(session)
         open_session = sessions_repo.create_pending(conv.id, uuid.UUID(agent.id))
         session.commit()
@@ -232,7 +235,7 @@ def test_exit_keyword_releases_pin_and_abandons_session():
         registry = _build_registry([agent, default_agent])
         svc = RouterService(session, registry, _FakeLlmFactory(fake_llm))
 
-        conv_stub = SimpleNamespace(id=conv.id, pinned_agent_id=uuid.UUID(agent.id))
+        conv_stub = SimpleNamespace(id=conv.id)
         decision = svc.select(conv_stub, _ctx("/exit"), explicit_key=None)
         session.commit()
 
@@ -245,13 +248,13 @@ def test_exit_keyword_releases_pin_and_abandons_session():
 
     verify = SessionLocal()
     try:
-        from app.models.orm import Conversation
-        from sqlalchemy import select
-        fresh_conv = verify.execute(select(Conversation).where(Conversation.id == conv.id)).scalar_one()
-        assert fresh_conv.pinned_agent_id is None
-
+        # Abandoning the session IS the release: it is terminal, so Gate 2 no
+        # longer finds it and the conversation routes freely again. That single
+        # assertion replaces the old pair (pinned_agent_id IS NULL *and* the
+        # session abandoned), which could disagree with each other.
         fresh_session = AgentSessionRepository(verify).get(open_session.id)
         assert fresh_session.state == "abandoned"
+        assert AgentSessionRepository(verify).get_open_for_conversation(conv.id) is None
     finally:
         verify.close()
 

@@ -12,9 +12,13 @@ class AuditLogDTO(BaseModel):
     action: str
     entity_type: str
     entity_id: Optional[uuid.UUID] = None
-    actor: str
     request_id: Optional[str] = None
     before: Optional[Dict[str, Any]] = None
     after: Optional[Dict[str, Any]] = None
     note: Optional[str] = None
+
+    #: The actor. Named created_by like the audit block on every other table.
+    created_by: str
+    updated_by: str
     created_at: datetime
+    updated_at: datetime

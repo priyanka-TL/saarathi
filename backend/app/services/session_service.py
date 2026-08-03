@@ -6,10 +6,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.agents.protocol import SessionDelta
-from app.models.orm import AgentSession
+from app.models.orm import SYSTEM_ACTOR, AgentSession
 from app.domain.sessions import AgentSessionDTO
 from app.repositories.audit import AuditLogRepository
-from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
 
 # Lifecycle table, design doc §4.7. Same-state entries are allowed (a delta
@@ -64,7 +63,6 @@ class SessionService:
     def __init__(self, session: Session):
         self._session = session
         self._sessions = AgentSessionRepository(session)
-        self._conversations = ConversationRepository(session)
         self._audit = AuditLogRepository(session)
 
     def open_for(
@@ -72,12 +70,13 @@ class SessionService:
         conversation_id: uuid.UUID,
         agent,
         on_displace: Optional[Callable[[uuid.UUID], None]] = None,
+        actor: str = SYSTEM_ACTOR,
     ) -> Optional[AgentSessionDTO]:
         """Attach the existing open session for this conversation if it belongs
         to `agent`; otherwise create one in 'pending', but only if the agent
         declares pin_session (stateless agents get no session at all).
 
-        A SESSION IS NEVER SHARED ACROSS AGENTS. uq_sess_one_open_per_conv
+        A SESSION IS NEVER SHARED ACROSS AGENTS. uq_agent_sessions_one_open_per_conversation
         allows at most one open session per conversation but says nothing about
         whose it is, and this method used to hand back whichever one it found --
         its docstring delegated the agent check to the caller, but RouterService
@@ -88,7 +87,7 @@ class SessionService:
         still set to capture_discussion, opening a Record Stories conversation
         from the sidebar sent the next turn to record_stories'
         remote_session_id, while RemoteFlowAgentHandler overwrote
-        remote_bot_route with MITRA_DISCUSSION_BOT_ROUTE and apply() stamped
+        remote_bot_route with capture_discussion's `remote.bot_route` and apply() stamped
         remote_flow='guest-discussion' onto a 'guest-mi-story' session. A later
         finalize would then submit the wrong flow to Mitra for that story.
 
@@ -115,7 +114,7 @@ class SessionService:
         remote = getattr(agent.spec, "remote", None)
         language = getattr(remote, "default_language", "en") if remote else "en"
         return self._sessions.create_pending(
-            conversation_id, self._as_uuid(agent.id), language=language,
+            conversation_id, self._as_uuid(agent.id), language=language, actor=actor,
         )
 
     @staticmethod
@@ -128,8 +127,8 @@ class SessionService:
 
     def apply(self, session: AgentSessionDTO, delta: SessionDelta) -> AgentSessionDTO:
         """State transition + field updates, validated against the lifecycle
-        table. Terminal targets set ended_at (required by ck_sess_terminal);
-        'completed' additionally sets finalized_at -- ck_sess_completed_has_result
+        table. Terminal targets set ended_at (required by ck_agent_sessions_terminal);
+        'completed' additionally sets finalized_at -- ck_agent_sessions_completed_has_result
         is enforced by the database itself and is deliberately not pre-checked
         here, so a caller bug (transitioning to completed with no result_ref
         anywhere) surfaces as a real IntegrityError rather than being swallowed.
@@ -182,14 +181,18 @@ class SessionService:
     def get(self, session_id: uuid.UUID) -> Optional[AgentSessionDTO]:
         return self._sessions.get(session_id)
 
-    def abandon(self, conversation_id: uuid.UUID, reason: str, actor: str = "system") -> Optional[AgentSessionDTO]:
-        """Terminal, unpin, audit -- all against the same Session/transaction,
-        so a single commit makes all three changes atomic. Bypasses apply()'s
-        strict transition map: abandon is an escape hatch reachable from ANY
-        non-terminal state (design doc §6.5's pin lifecycle diagram draws it
-        from the whole composite 'pinned' state, not one leaf sub-state) --
-        required so a crash mid-'in_progress' or an exit keyword arriving
-        during 'authenticating' can still be abandoned.
+    def abandon(self, conversation_id: uuid.UUID, reason: str, actor: str = SYSTEM_ACTOR) -> Optional[AgentSessionDTO]:
+        """Terminal + audit, against the same Session/transaction, so a single
+        commit makes both changes atomic. Bypasses apply()'s strict transition
+        map: abandon is an escape hatch reachable from ANY non-terminal state --
+        required so a crash mid-'in_progress' or an exit keyword arriving during
+        'authenticating' can still be abandoned.
+
+        MOVING THE SESSION TO A TERMINAL STATE IS THE UNPIN. There is no second
+        `conversations.unpin()` call any more: RouterService._pin_for reads the
+        open session, and this statement is what stops it being open. Returning
+        None when there is no open session is therefore now exactly right --
+        there is nothing left that a caller would still have to clean up.
         """
         session = self._sessions.get_open_for_conversation(conversation_id)
         if session is None:
@@ -198,8 +201,6 @@ class SessionService:
         updated = self._sessions.abandon_open_session(conversation_id, reason)
         if updated is None:
             raise ConcurrentModificationError(session.id)
-
-        self._conversations.unpin(conversation_id)
 
         self._audit.insert(
             action="session_abandon",
@@ -214,18 +215,20 @@ class SessionService:
 
     def sweep_abandoned(self, older_than: datetime) -> List[AgentSessionDTO]:
         """For the periodic job. Bulk-abandons every non-terminal session idle
-        since before `older_than`, unpinning each affected conversation and
-        writing one audit row per swept session."""
+        since before `older_than`, writing one audit row per swept session.
+
+        The bulk UPDATE is the whole state change -- each swept session becomes
+        terminal, which is what releases its conversation back to the router.
+        """
         swept = self._sessions.sweep_abandoned_older_than(
             older_than, reason=f"idle sweep: no activity before {older_than.isoformat()}",
         )
         for row in swept:
-            self._conversations.unpin(row.conversation_id)
             self._audit.insert(
                 action="session_abandon",
                 entity_type="agent_session",
                 entity_id=row.id,
-                actor="system",
+                actor=SYSTEM_ACTOR,
                 after=row.model_dump(mode="json"),
                 note="idle sweep",
             )

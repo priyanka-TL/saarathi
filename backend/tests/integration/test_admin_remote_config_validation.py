@@ -67,6 +67,11 @@ def _body(key: str, **remote_overrides) -> dict:
         "bot_route": "/guided_guest",
         "company": "some-company",
         "finalize_path": "/api/end-story/",
+        # Required now -- there is no MITRA_* environment floor behind it.
+        "connection": {
+            "base_url": "https://mitra.example.com",
+            "ws_url": "wss://mitra.example.com/ws/common/",
+        },
     }
     remote.update(remote_overrides)
     return {
@@ -111,7 +116,11 @@ def test_a_finalize_path_is_checked_against_this_specs_own_endpoints(
         json=_body(
             key,
             finalize_path="/api/end-story/v3/",
-            connection={"paths": {"finalize_v2": "/api/end-story/v3/"}},
+            connection={
+                "base_url": "https://mitra.example.com",
+                "ws_url": "wss://mitra.example.com/ws/common/",
+                "paths": {"finalize_v2": "/api/end-story/v3/"},
+            },
         ),
     )
 

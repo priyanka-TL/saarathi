@@ -138,111 +138,107 @@ class MitraTurnSpec(BaseModel):
     turn_timeout_ms:       int = 45000
     idle_gap_ms:           int = 8000
 
-class MitraPathsSpec(BaseModel):
-    """Per-scope overrides for Mitra's own endpoint paths.
+#: Mitra's own endpoint paths and the browser UA it expects. Duplicated from
+#: app.integrations.mitra.rest_client because the domain layer is import-pure
+#: by contract (.importlinter) and cannot import it; a test asserts they agree.
+DEFAULT_PROFILE_PATH          = "/api/profile/"
+DEFAULT_GENERATE_SESSION_PATH = "/api/generate-session/"
+DEFAULT_CHAT_PATH             = "/api/companychat/"
+DEFAULT_GET_STORY_PATH        = "/api/get-story/"
+DEFAULT_FINALIZE_V1_PATH      = "/api/end-story/"
+DEFAULT_FINALIZE_V2_PATH      = "/api/end-story/v2/"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
-    EVERY FIELD IS OPTIONAL AND None MEANS "use the env value". That is what
-    keeps this additive: a deployment with no overrides resolves to exactly the
-    MITRA_*_PATH settings it did before these fields existed.
+class MitraPathsSpec(BaseModel):
+    """Mitra's own endpoint paths -- a third-party API contract, not a
+    preference. Override only when Mitra moves an endpoint.
     """
-    profile:          Optional[str] = None
-    generate_session: Optional[str] = None
-    chat:             Optional[str] = None
-    get_story:        Optional[str] = None
-    finalize_v1:      Optional[str] = None
-    finalize_v2:      Optional[str] = None
+    profile:          str = DEFAULT_PROFILE_PATH
+    generate_session: str = DEFAULT_GENERATE_SESSION_PATH
+    chat:             str = DEFAULT_CHAT_PATH
+    get_story:        str = DEFAULT_GET_STORY_PATH
+    # The v1/v2 pair is load-bearing: they read the user token from different
+    # places and pick different PDF renderers. See docs/agent-configuration.md.
+    finalize_v1:      str = DEFAULT_FINALIZE_V1_PATH
+    finalize_v2:      str = DEFAULT_FINALIZE_V2_PATH
 
 class MitraConnectionSpec(BaseModel):
     """Which Mitra deployment this agent talks to, at this scope.
 
-    Set nothing and the agent uses the deployment's own MITRA_* settings, which
-    is the case for every agent until a tenant is deliberately pointed
-    elsewhere. Merged onto the env floor by
-    app/integrations/mitra/connection.resolve_connection -- this module cannot
-    do the merging itself, because the domain layer is import-pure by contract
-    and cannot reach Settings.
+    This is the SOLE source for these values -- there is no MITRA_* environment
+    floor behind it any more, so a tenant-scoped config row fully determines
+    which Mitra deployment that agent reaches.
 
     THE ORIGIN URL IS ABSENT ON PURPOSE. Mitra gates admission on it, so it is
     a credential and must never be stored in a config row; a scope needing its
     own uses `RemoteSpec.origin_env` to name an environment variable instead.
     """
-    base_url:             Optional[str] = None
-    ws_url:               Optional[str] = None
-    user_agent:           Optional[str] = None
-    # Extra hosts whose presigned report URLs may be fetched. An SSRF control
-    # (MitraRestClient._validate_url), so it is intersected with
-    # MITRA_HOST_CEILING when the operator has set one.
-    allowed_hosts:        Optional[List[str]] = None
-    paths:                Optional[MitraPathsSpec] = None
-    connect_timeout_s:    Optional[float] = Field(None, gt=0, le=300)
-    read_timeout_s:       Optional[float] = Field(None, gt=0, le=300)
-    ws_connect_timeout_s: Optional[float] = Field(None, gt=0, le=300)
-    ip_city:              Optional[str] = None
-    ip_state:             Optional[str] = None
-    ip_zip:               Optional[str] = None
+    # No default: there is no env fallback, and an empty host is not a failure
+    # anyone can read off a stack trace.
+    base_url:             str = Field(min_length=1)
+    ws_url:               str = Field(min_length=1)
+    user_agent:           str = DEFAULT_USER_AGENT
+    # Extra hosts whose presigned report URLs may be fetched. An SSRF control,
+    # intersected with MITRA_HOST_CEILING when the operator has set one.
+    allowed_hosts:        List[str] = Field(default_factory=list)
+    paths:                MitraPathsSpec = Field(default_factory=MitraPathsSpec)
+    connect_timeout_s:    float = Field(10.0, gt=0, le=300)
+    read_timeout_s:       float = Field(30.0, gt=0, le=300)
+    ws_connect_timeout_s: float = Field(10.0, gt=0, le=300)
+    # Address fields sent in the authenticate frame. Mitra does not validate
+    # them against anything real for the guest flows this integration uses.
+    ip_city:              str = ""
+    ip_state:             str = ""
+    ip_zip:               str = ""
 
 class RemoteSpec(BaseModel):
+    """One remote_flow agent's Mitra binding.
+
+    WHY THESE ARE FIELDS AND NOT ENVIRONMENT VARIABLES
+    ==================================================
+    `company` / `bot_route` were once read from os.environ (via `company_env` /
+    `bot_route_env`), and the whole connection block was once a set of MITRA_*
+    settings. Both made the binding process-global: one Saarthi process could
+    serve exactly one Mitra company, on one Mitra deployment, with one set of
+    bot routes. Since Mitra identifies a profile by (email, company), that is
+    the difference between every tenant sharing one Mitra profile and each
+    having its own.
+
+    As plain spec fields they live in `agent_configs`, which is scoped
+    (tenant_id, organization_id) -- so a scoped row carries its own values and
+    two tenants get genuinely separate Mitra profiles and story histories.
+
+    `origin_env` is the ONE remaining environment indirection, and only because
+    the Origin header is a credential. See docs/agent-configuration.md.
+    """
     provider:  Literal["mitra"]
     flow_name: Literal["guest-mi-story", "guest-discussion"]
-    # REQUIRED, and stored literally.
-    #
-    # These were read from os.environ (via `bot_route_env` / `company_env`),
-    # which made them process-global -- and since Mitra identifies a profile by
-    # (email, company), that meant one Saarthi process could serve exactly one
-    # Mitra company with one set of bot routes. As plain spec fields they live
-    # in agent_configs, so a tenant-scoped row carries its own values and two
-    # tenants get genuinely separate Mitra profiles and story histories.
-    #
-    # min_length=1 rather than Optional: an empty company or bot route does not
-    # fail loudly at Mitra, it silently resolves the wrong CompanyBot or splits
-    # a user's profile. Rejecting it at validation is the only cheap place.
+    # min_length=1, not Optional: an empty value does not fail loudly at Mitra,
+    # it silently resolves the wrong CompanyBot or splits a user's profile.
     bot_route: str = Field(min_length=1)
     company:   str = Field(min_length=1)
-    # Names the variable holding this scope's Origin credential -- never the
-    # value. THE ONE REMAINING ENVIRONMENT INDIRECTION, and it exists precisely
-    # because Mitra gates admission on the Origin header, which makes it a
-    # credential that must not be stored in a config row. Unset means the
-    # deployment-wide MITRA_ORIGIN_URL.
+    # Names the env var holding this scope's Origin credential, never the value.
+    # Unset means the deployment-wide MITRA_ORIGIN_URL.
     origin_env: Optional[str] = None
-    connection: Optional[MitraConnectionSpec] = None
+    # Required: this is the only source for the Mitra endpoint, with no
+    # environment floor behind it.
+    connection: MitraConnectionSpec
     default_language:    Literal["en","hi","kn","te"] = "en"
     supported_languages: List[str] = Field(default_factory=lambda: ["en","hi","kn","te"])
     handshake: MitraHandshakeSpec = Field(default_factory=MitraHandshakeSpec)
     turn:      MitraTurnSpec      = Field(default_factory=MitraTurnSpec)
     completion_poll_every_turn: bool = True
-    # v1 vs v2 is a real behavioural choice (they resolve the story bot from
-    # different Mitra tables), not a version preference -- see
-    # MitraRestClient's module docstring.
-    #
-    # This WAS a Literal pinning the two paths. It cannot be any more: the
-    # endpoints are configurable now (MITRA_FINALIZE_V1_PATH /
-    # MITRA_FINALIZE_V2_PATH) and this module is import-pure by contract, so it
-    # cannot reach Settings to build the Literal. The guard is not lost, only
-    # moved: POST /api/agents/{key}/config asserts that this value equals one
-    # of the endpoints THIS spec resolves to, which also catches a mismatch
-    # between a scoped connection override and the path. A typo is rejected at
-    # write time rather than discovered as a blank PDF.
-    finalize_path:     str = "/api/end-story/v2/"
-    # Finalize WITHOUT a user token -- v1 sends `access_token: null` in the
-    # body, v2 sends no Authorization header.
-    #
-    # Not a security knob: Mitra derives `auth = access_token is not None`
-    # (shikshalokam_story_utils.get_html_from_template) and uses it to pick the
-    # PDF template's user_type (AUTH vs GUEST). A guest flow finalised WITH a
-    # token therefore looks up a template that was never registered, and
-    # get_html_from_template returns "" -- which save_project_story hands to
-    # Gotenberg, producing a VALID BUT BLANK PDF with no error anywhere. That
-    # is exactly how Capture Discussion shipped empty reports.
-    #
-    # It must match what MitraChannel._authenticate sends on the WebSocket
-    # (`access_token: None` -- ws_channel.py). Interviewing as a guest and
-    # finalising as an authenticated user is the mismatch, not either half.
+    # v1 vs v2 is a behavioural choice, not a version preference; a value
+    # matching neither resolved endpoint is rejected at config-write time.
+    finalize_path:     str = DEFAULT_FINALIZE_V2_PATH
+    # Finalize without a user token. MUST match what the WebSocket authenticated
+    # as -- a mismatch yields a valid but BLANK PDF, silently.
     finalize_as_guest: bool = False
-    # NOT report_path. MitraRestClient.get_report hardcodes /api/get-story/ and
-    # never consulted this field, so setting it did nothing while looking like
-    # it did. Silently-ignored config is worse than absent config -- if the
-    # report endpoint ever needs to vary per agent, add it back together with
-    # the code that reads it.
+    # NOT report_path: get_report hardcodes its endpoint and never read one.
     report_media_type: str = "application/pdf"
 
 class RemoteFlowAgentSpec(BaseAgentSpec):

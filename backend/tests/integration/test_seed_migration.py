@@ -1,18 +1,24 @@
-"""Migration 0007 is the agent catalogue. These are its guards.
+"""Migration 0010 is the agent catalogue. These are its guards.
 
 It replaced `app/config/agents/*.yaml` -- there is no file to sync from any
-more, so if this migration is wrong the application boots with no agents at all
-(`sync_and_reload` raises) or, worse, with a config Mitra silently mishandles.
+more, so if it is wrong the application boots with no agents at all or, worse,
+with a config Mitra silently mishandles.
 
-Two properties matter enough to pin:
-
-  1. **The seeded specs are VALID.** A typo in the migration is not caught by
-     anything else -- it is a plain dict, and the failure surfaces as a registry
-     that loads zero agents at startup.
+THREE PROPERTIES MATTER ENOUGH TO PIN
+  1. **The seeded specs are VALID, on their own.** A typo in a migration is not
+     caught by anything else -- it is a plain dict, and the failure surfaces as
+     a registry that loads zero agents at startup. "On their own" is the part
+     worth stating: the previous schema seeded remote_flow specs that were
+     deliberately INCOMPLETE until a later migration patched a
+     `remote.connection` block into them, so neither migration could be
+     validated alone. 0010 writes a complete spec.
   2. **The migration computes the SAME checksum the application does.** It uses
      the standard library rather than importing `canonical_json`, deliberately,
      so that it keeps working when the application moves on. That independence
      is only safe while the two agree, which is what the test below asserts.
+  3. **A migrated database actually has a working catalogue** -- three enabled
+     agents, exactly one default, and capability membership present on the
+     FIRST run.
 """
 from __future__ import annotations
 
@@ -26,15 +32,16 @@ from sqlalchemy import text
 from app.database.engine import SessionLocal
 from app.domain.agent_spec import AgentSpec, canonical_json
 
-_MIGRATION = Path(__file__).parents[2] / "migrations" / "versions" / "0007_seed_agents.py"
+_VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
+_MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
 
-def _module():
+def _module(path: Path, name: str):
     """Loaded by path: `migrations/versions` is not a package, and alembic
     revision filenames are not importable identifiers."""
-    spec = importlib.util.spec_from_file_location("_seed_0007", _MIGRATION)
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -42,12 +49,28 @@ def _module():
 
 @pytest.fixture(scope="module")
 def seed():
-    return _module()
+    return _module(_MIGRATION, "_seed_0010")
 
 
 def test_every_seeded_spec_validates(seed):
-    for raw in seed.SEED_AGENTS:
-        _adapter.validate_python(raw)  # raises on a typo -- that is the assertion
+    for raw in seed.seed_agents():
+        # Raises on a typo -- that is the assertion.
+        _adapter.validate_python(raw)
+
+
+def test_a_seeded_remote_spec_is_complete_as_written(seed):
+    """No second migration patches these rows afterwards.
+
+    The old two-step seed (write the spec, then backfill `remote.connection`)
+    meant a freshly-inserted row was invalid for the length of one migration and
+    its checksum was computed twice. Pinning the single-step property here so
+    nobody reintroduces the split.
+    """
+    remote = [s for s in seed.seed_agents() if s.get("agent_type") == "remote_flow"]
+    assert remote, "0010 should seed the remote_flow agents"
+    for raw in remote:
+        assert "connection" in raw["remote"], raw["key"]
+        _adapter.validate_python(raw)
 
 
 def test_the_migration_computes_the_same_checksum_as_the_application(seed):
@@ -56,10 +79,9 @@ def test_the_migration_computes_the_same_checksum_as_the_application(seed):
     two drifting apart -- if it fires, the seeded rows carry checksums that no
     longer match what `POST /config` would produce for identical content, and
     HandlerFactory's cache key stops meaning what it says."""
-    for raw in seed.SEED_AGENTS:
+    for raw in seed.seed_agents():
         migration_json, migration_sha = seed.canonical(raw)
         app_json, app_sha = canonical_json(_adapter.validate_python(raw))
-
         assert migration_json == app_json, raw["key"]
         assert migration_sha == app_sha, raw["key"]
 
@@ -70,8 +92,22 @@ def test_no_seeded_value_still_carries_an_env_reference(seed):
     verbatim as a company slug or a bot route."""
     import json
 
-    for raw in seed.SEED_AGENTS:
+    for raw in seed.seed_agents():
         assert "${" not in json.dumps(raw), raw["key"]
+
+
+def test_exactly_one_agent_is_the_routing_default(seed):
+    """RouterService Gate 5 falls back to `registry.default()`, which returns
+    the first is_default row it finds, and uq_agents_single_default allows only
+    one. Asserted on the source dicts as well as the database (below) because
+    this is the property that makes routing total."""
+    defaults = [s["key"] for s in seed.seed_agents() if s.get("default")]
+    assert defaults == ["general_support"]
+
+
+# ---------------------------------------------------------------------------
+# The database as it actually is, not as the migration source says it should be
+# ---------------------------------------------------------------------------
 
 
 def test_the_shipped_catalogue_is_present_and_active_in_the_database():
@@ -81,7 +117,7 @@ def test_the_shipped_catalogue_is_present_and_active_in_the_database():
     try:
         rows = session.execute(
             text("""
-                SELECT a.key, a.agent_type, a.status, c.is_active, c.source
+                SELECT a.key, a.agent_type, a.status, c.is_active
                 FROM agents a
                 JOIN agent_configs c ON c.agent_id = a.id
                 WHERE a.key IN ('record_stories', 'capture_discussion', 'general_support')
@@ -98,8 +134,7 @@ def test_the_shipped_catalogue_is_present_and_active_in_the_database():
 
 
 def test_exactly_one_default_agent():
-    """RouterService falls back to `registry.default()`, which returns the first
-    is_default row it finds. Two would make that fallback non-deterministic."""
+    """The DB half of test_exactly_one_agent_is_the_routing_default."""
     session = SessionLocal()
     try:
         count = session.execute(
@@ -112,9 +147,7 @@ def test_exactly_one_default_agent():
 
 
 def test_the_seeded_configs_in_the_database_still_validate():
-    """The rows as they actually are, not as the migration source says they
-    should be -- this also covers a database upgraded from the YAML era, where
-    0007 had to supersede configs still holding ${VAR} references."""
+    """The rows as they actually are, read back out of agent_configs."""
     session = SessionLocal()
     try:
         rows = session.execute(
@@ -134,11 +167,15 @@ def test_the_seeded_configs_in_the_database_still_validate():
         _adapter.validate_python(row.config)
 
 
-def test_capability_membership_survived_the_fresh_database_ordering():
-    """Migration 0006 seeds the capabilities but can only link membership for
-    agents that already exist -- and on a fresh database it runs BEFORE 0007,
-    when none do. 0007 fills in what 0006 had to skip; without that the sidebar
-    renders a capability card with no buttons under it."""
+def test_capability_membership_is_seeded_on_the_first_run():
+    """THE ORDERING BUG THIS MIGRATION EXISTS TO PREVENT.
+
+    Membership used to be inserted by an earlier migration than the one creating
+    the agents. capability_agents has a real FK to agents, so on a fresh
+    database that insert matched nothing and the sidebar card rendered with no
+    buttons under it until a later migration re-ran the same statement. Seeding
+    agents and membership in one migration, in order, is what fixes it.
+    """
     session = SessionLocal()
     try:
         members = session.execute(
@@ -153,41 +190,38 @@ def test_capability_membership_survived_the_fresh_database_ordering():
     finally:
         session.close()
 
-    assert {m.key for m in members} >= {"record_stories", "capture_discussion"}
+    assert {m.key for m in members} == {"record_stories", "capture_discussion"}
 
 
-# ---------------------------------------------------------------------------
-# The upgrade path: databases that already held YAML-era configs
-# ---------------------------------------------------------------------------
+def test_every_seeded_row_carries_the_system_actor():
+    """The audit block is on all nine tables, and the seed must fill it.
 
+    'system' -- the same value as the column's server default -- because a
+    seeded row was created by the system and not by any user, which is the whole
+    of what created_by records. Rows an ADMIN creates carry that admin's user id
+    instead, and that is the distinction the column exists to make."""
+    session = SessionLocal()
+    try:
+        rows = session.execute(
+            text("""
+                SELECT 'agents' AS t, a.created_by, a.updated_by
+                  FROM agents a
+                 WHERE a.key IN ('record_stories','capture_discussion','general_support')
+                UNION ALL
+                SELECT 'agent_configs', c.created_by, c.updated_by
+                  FROM agent_configs c JOIN agents a ON a.id = c.agent_id
+                 WHERE a.key IN ('record_stories','capture_discussion','general_support')
+                   AND c.version = 1
+                UNION ALL
+                SELECT 'capabilities', created_by, updated_by FROM capabilities
+                 WHERE key IN ('listening_at_scale','sg_commons')
+                   AND tenant_id = 'default' AND organization_id = 'default'
+            """)
+        ).fetchall()
+    finally:
+        session.close()
 
-@pytest.mark.parametrize("config_text", [
-    # ${VAR} expansion is gone, so this is now a literal string where a number
-    # or a company slug is expected.
-    '{"key":"a","name":"A","agent_type":"llm","model":{"timeout_s":"${LLM_TIMEOUT:-30}"}}',
-    # The environment indirection `bot_route` / `company` replaced.
-    '{"key":"a","name":"A","agent_type":"remote_flow","remote":{"bot_route_env":"X"}}',
-    '{"key":"a","name":"A","agent_type":"remote_flow","remote":{"company_env":"X"}}',
-    # Neither field present at all -- both are required by RemoteSpec now.
-    '{"key":"a","name":"A","agent_type":"remote_flow","remote":{"flow_name":"guest-mi-story"}}',
-])
-def test_legacy_configs_are_detected_for_supersession(seed, config_text):
-    assert seed.is_legacy(config_text) is True
-
-
-@pytest.mark.parametrize("config_text", [
-    '{"key":"a","name":"A","agent_type":"llm","prompt":"p","model":{"name":"m"}}',
-    '{"key":"a","name":"A","agent_type":"remote_flow",'
-    '"remote":{"bot_route":"/r","company":"c"}}',
-])
-def test_a_current_config_is_left_alone(seed, config_text):
-    """An operator's own configuration must survive the upgrade untouched --
-    superseding it would silently revert a deliberate production change."""
-    assert seed.is_legacy(config_text) is False
-
-
-def test_unparseable_json_is_not_treated_as_legacy(seed):
-    """Better to leave a row alone than to overwrite something unreadable: the
-    registry skips it and says so, which is recoverable, where a blind
-    supersede would destroy whatever it actually was."""
-    assert seed.is_legacy("not json at all") is False
+    assert rows
+    for row in rows:
+        assert row.created_by == "system", row.t
+        assert row.updated_by == "system", row.t

@@ -54,7 +54,6 @@ def _to_session_view(dto: AgentSessionDTO) -> AgentSessionView:
         conversation_id=dto.conversation_id,
         agent_id=dto.agent_id,
         state=SessionState(dto.state),
-        remote_provider=dto.remote_provider,
         remote_session_id=dto.remote_session_id,
         remote_profile_id=dto.remote_profile_id,
         remote_flow=dto.remote_flow,
@@ -65,7 +64,6 @@ def _to_session_view(dto: AgentSessionDTO) -> AgentSessionView:
         result_ref=dto.result_ref,
         report_url=dto.report_url,
         error=dto.error,
-        error_code=dto.error_code,
         state_data=dto.state_data,
     )
 
@@ -188,8 +186,9 @@ class OrchestrationService:
         # mitra_clients is a MitraClientRegistry and is what production passes:
         # the finalisation paths must reach Mitra through the SAME endpoint the
         # turn used, and that endpoint is per agent and per tenant. mitra_rest
-        # is the fallback for a caller that has no registry -- it is a single
-        # client, so it only knows one endpoint. See rest_for().
+        # is the fallback for a caller that has no registry -- a single client
+        # that knows one endpoint, which is why nothing in production builds one
+        # any more (there is no MITRA_BASE_URL to build it from). See rest_for().
         self._mitra_rest = mitra_rest
         self._mitra_clients = mitra_clients
         self._settings = settings
@@ -277,16 +276,17 @@ class OrchestrationService:
         # 3. insert user message
         self._messages.insert(
             conv.id, seq, role="user", content=ctx_in.text,
-            selected_option_id=ctx_in.option_id, request_id=ctx_in.request_id
+            selected_option_id=ctx_in.option_id, request_id=ctx_in.request_id,
+            actor=ctx_in.user.user_id,
         )
 
         # 3b. Title and timestamp the conversation NOW, from the user's own
-        # message, not at step 14. Step 14 only runs on a successful turn, so a
+        # message, not at step 13. Step 13 only runs on a successful turn, so a
         # turn that failed after this commit (an upstream 429, say) left the
         # conversation titleless and with a NULL last_message_at -- it showed up
         # in the sidebar as "New conversation / No messages yet" even though the
         # user had clearly said something. touch() COALESCEs the title, so the
-        # first message still wins and step 14 remains harmless.
+        # first message still wins and step 13 remains harmless.
         #
         # An AUTOSTART turn timestamps but does not title: its text is the UI's
         # canned opener, so titling from it gave every discussion in the sidebar
@@ -352,26 +352,32 @@ class OrchestrationService:
         # 5. enforce limits
         self._rate_limits.check(conv.id, ctx_in.user, agent.spec.limits)
 
-        # 6. open the session. on_displace fires when the conversation had an
-        #    open session belonging to a DIFFERENT agent: that session is
-        #    abandoned, and its Mitra socket has to go with it or the pool would
-        #    hand the new agent a channel still authenticated against the old
-        #    agent's remote session.
+        # 6. open the session -- which IS the pin. open_for() creates a row only
+        #    when the agent declares routing.pin_session, and
+        #    uq_agent_sessions_one_open_per_conversation makes that row the
+        #    single answer to "which agent is driving this conversation", so
+        #    RouterService Gate 2 finds it on the next turn with no LLM call.
+        #    There is no separate step writing conversations.pinned_agent_id any
+        #    more: that column duplicated this row under the identical condition
+        #    and had to be cleared in step with it by hand.
+        #
+        #    on_displace fires when the conversation had an open session
+        #    belonging to a DIFFERENT agent: that session is abandoned, and its
+        #    Mitra socket has to go with it or the pool would hand the new agent
+        #    a channel still authenticated against the old agent's remote
+        #    session. That path is how one conversation spans several agents.
         session_view = self._sessions.open_for(
             conv.id, agent, on_displace=self._close_remote_channel,
+            actor=ctx_in.user.user_id,
         )
 
-        # 7. apply the pin
-        if agent.spec.routing.pin_session:
-            self._conversations.pin(conv.id, getattr(agent, "id", agent.key)) # Fallback if agent.id not mapped as UUID
-
-        # 8. assemble history
+        # 7. assemble history
         history = self._messages.recent(conv.id, agent.spec.memory)
         
-        # 9. COMMIT <- releases the lock
+        # 8. COMMIT <- releases the lock
         self._db.commit()
 
-        # 10. handler.handle
+        # 9. handler.handle
         handler = self._handlers.build(agent.spec, agent.checksum)
         
         locale = ctx_in.user.locale if hasattr(ctx_in.user, 'locale') else "en"
@@ -398,13 +404,13 @@ class OrchestrationService:
             if turn is None:
                 raise
 
-        # 11. apply session delta; finalise if terminal
+        # 10. apply session delta; finalise if terminal
         if turn.session_delta and session_view:
             session_view = self._sessions.apply(session_view, turn.session_delta)
         if turn.terminal and session_view:
             session_view = self._finalize(session_view, agent, ctx_in.user)
 
-        # 12. persist the agent message
+        # 11. persist the agent message
         options_dict = [o.__dict__ for o in turn.options] if turn.options else None
         
         msg = self._messages.insert(
@@ -412,8 +418,7 @@ class OrchestrationService:
             self._conversations.next_seq_for_update(conv.id),
             role="assistant", 
             content=turn.text,
-            agent_id=agent.id, 
-            agent_config_id=getattr(agent, "config_id", None), # Handle missing config_id
+            agent_id=agent.id,
             agent_session_id=session_view.id if session_view else None,
             route_reason=decision.reason,
             route_confidence=decision.confidence,
@@ -421,19 +426,21 @@ class OrchestrationService:
             model=turn.model,
             prompt_tokens=turn.prompt_tokens,
             completion_tokens=turn.completion_tokens,
-            latency_ms=turn.latency_ms, 
+            latency_ms=turn.latency_ms,
             error=turn.error,
-            request_id=ctx_in.request_id
+            request_id=ctx_in.request_id,
+            actor=ctx_in.user.user_id,
         )
 
-        # 13. persist tool traces
+        # 12. persist tool traces
         if agent.spec.features.record_tool_executions:
             self._tools_repo.bulk_insert(
                 msg.id, agent.id, turn.tool_traces,
                 request_id=ctx_in.request_id,
+                actor=ctx_in.user.user_id,
             )
         
-        # 14. refresh last_message_at now the turn actually completed. The
+        # 13. refresh last_message_at now the turn actually completed. The
         #     title was already set at step 3b and touch() COALESCEs it, so
         #     passing it again cannot overwrite the original.
         #
@@ -525,7 +532,10 @@ class OrchestrationService:
 
     def _reconcile(self, agent, session_view, sent_text: str) -> Optional[Reconciliation]:
         """Ask Mitra what became of ``sent_text``. None if not applicable."""
-        if self._mitra_rest is None or session_view is None:
+        # Either wiring will do: production passes only the registry, tests and
+        # registry-less callers pass only the single client. Checking just
+        # mitra_rest would silently disable turn recovery in production.
+        if (self._mitra_clients is None and self._mitra_rest is None) or session_view is None:
             return None
         if getattr(agent.spec, "agent_type", None) != "remote_flow":
             return None
@@ -653,7 +663,7 @@ class OrchestrationService:
 
         Mitra's Story.session is UNIQUE (story_models.py:30, verified against
         real source) -- a second finalize() call for one session fails on
-        Mitra's side. claim_finalizing()'s conditional UPDATE + uq_sess_remote
+        Mitra's side. claim_finalizing()'s conditional UPDATE + uq_agent_sessions_remote_session
         together make a duplicate structurally impossible on Saarthi's side
         too, which is why the claim is step 1 and everything else only runs
         if it's won.
@@ -753,8 +763,11 @@ class OrchestrationService:
         delta_fields = {"result_ref": story_id}
         if report_url:
             delta_fields["report_url"] = report_url
+        #    Transitioning to 'completed' is itself the release: the session is
+        #    terminal, so RouterService Gate 2 stops finding it and the next
+        #    turn routes freely. The explicit conversations.unpin() that used to
+        #    follow this line is gone with the column.
         completed = self._sessions.apply(
             claimed, SessionDelta(state=SessionState.completed, **delta_fields),
         )
-        self._conversations.unpin(claimed.conversation_id)
         return completed

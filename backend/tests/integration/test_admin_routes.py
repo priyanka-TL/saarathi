@@ -57,7 +57,7 @@ def _make_agent_and_config(db, name_prefix="TestAdminAgent"):
     }
     
     db.execute(
-        text("INSERT INTO agent_configs (agent_id, version, config, checksum, source, is_active, activated_at) VALUES (:id, 1, :config, 'chk', 'db', TRUE, now())"),
+        text("INSERT INTO agent_configs (agent_id, version, config, checksum, is_active, activated_at) VALUES (:id, 1, :config, 'chk', TRUE, now())"),
         {"id": agent_id, "config": json.dumps(config)}
     )
     db.commit()

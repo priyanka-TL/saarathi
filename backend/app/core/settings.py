@@ -51,25 +51,19 @@ class Settings(BaseSettings):
     )
 
     # ---- environment ----
-    # A LABEL, not a selector -- it chooses no file. It exists so a running
-    # process can say in its logs which deployment it believes it is, which is
-    # the first thing you check when a config looks wrong.
+    # A LABEL, not a selector -- it chooses no file. Echoed in the startup log
+    # so a running process can say which deployment it believes it is.
     app_env: Literal["development", "qa", "production"] = "development"
 
     # ---- server ----
     # Where uvicorn binds. 0.0.0.0 in a container, 127.0.0.1 locally.
     host: str = "127.0.0.1"
     port: int = 8000
-    # MUST stay 1 while MITRA_ENABLED=1: MitraSessionManager pools live
-    # WebSockets in process memory, so a second worker opens a second Mitra
-    # channel for the same interview. app/core/runtime.assert_single_worker
-    # enforces this at startup rather than trusting the config.
+    # MUST stay 1 while MITRA_ENABLED=1 -- MitraSessionManager pools live
+    # WebSockets in process memory. assert_single_worker enforces it at startup.
     workers: int = 1
-    # Mounted in FRONT of every route, e.g. "/saarathi-service" makes the chat
-    # endpoint POST /saarathi-service/api/chat. Empty (the default) keeps the
-    # bare /api/... paths. Normalised by the validator below, so
-    # "saarathi-service/", "/saarathi-service" and "/saarathi-service/" are
-    # all the same thing.
+    # Mounted in FRONT of every route: "/saarathi-service" makes the chat
+    # endpoint POST /saarathi-service/api/chat. Normalised by the validator below.
     api_prefix: str = ""
 
     # ---- core ----
@@ -85,99 +79,57 @@ class Settings(BaseSettings):
     db_max_overflow: int = 8
 
     # ---- registry ----
-    # How long the in-process agent snapshot may be stale before the next
-    # /api/ request re-checks MAX(updated_at). This is also the upper bound on
-    # how long a config change takes to go live, since there is no restart and
-    # no file to redeploy.
-    #
-    # CONFIG_SYNC_MODE is gone. There is no YAML to reconcile against: the
-    # catalogue is seeded by migration 0007 and edited through the config API,
-    # so there is nothing for the database to drift from.
+    # How stale the in-process agent snapshot may be, and so the upper bound on
+    # how long a config change takes to go live. CONFIG_SYNC_MODE is gone.
     registry_ttl_s: int = 30
 
-    # ---- web tier (new in the FastAPI port) ----
-    # Comma-separated browser origins allowed to call this API. The React dev
-    # server is a separate origin now, so CORS is mandatory where it was not
-    # under Flask (which served the SPA itself).
+    # ---- web tier ----
+    # Comma-separated browser origins allowed to call this API. The SPA is a
+    # separate origin, so one that is missing here is blocked by CORS.
     frontend_origins: str = "http://localhost:5173"
-    # Size of Starlette's anyio worker threadpool. Every endpoint is a plain
-    # `def`, so one request == one worker thread == one DB connection held for
-    # the whole turn. anyio's default is 40, which exceeds the 24-connection
-    # pool and turns overload into QueuePool timeouts surfaced as 500s.
-    # None => fall back to db_pool_size. MUST stay <= db_pool_size.
+    # Starlette's anyio threadpool. One request == one thread == one DB
+    # connection, so this MUST stay <= db_pool_size. None => db_pool_size.
     threadpool_size: Optional[int] = None
 
     # ---- feature flags ----
-    # The ONLY auth switch. True: decode SAARTHI_STATIC_TOKEN and derive the
-    # identity from its claims. False: skip tokens entirely and serve the
-    # Authenticator's hardcoded identity. Defaults to True so a missing flag
-    # fails safe (auth on), never silently open.
+    # The ONLY auth switch. True decodes SAARTHI_STATIC_TOKEN for the identity;
+    # False serves the hardcoded one. Defaults True so a missing flag fails safe.
     auth_check: bool = True
+    # 0 disables every remote_flow agent. Read at container build time, before
+    # any agent config is loaded, which is why it cannot live in one.
     mitra_enabled: int = 0
+    # 0 => the whole /api/agents admin surface 404s.
     saarthi_admin_enabled: int = 0
 
     # ---- auth / jwt ----
-    # Saarthi is the sole validator: this app decodes the token, it never
-    # verifies the signature or the expiry. There is deliberately no secret
-    # setting -- see app/services/identity.py.
+    # Saarthi is the sole validator: this app decodes the token and never
+    # verifies signature or expiry, so there is deliberately no secret setting.
     saarthi_static_token: Optional[str] = None
+    # MUST match Mitra's SSO derivation, email = data[field] + suffix. Wrong
+    # values create a SECOND Mitra profile and split a user's stories.
     jwt_identifier_field: str = "id"
     jwt_email_suffix: str = "@shikshalokam.org"
 
-    # ---- mitra REST ----
-    # MITRA_ORIGIN_URL is a credential: Mitra gates admission on the Origin
-    # header. Never log it, never include it in error responses, never put
-    # it in YAML. See design doc §13.2 and the comment in MitraRestClient.
-    mitra_base_url: str = "https://mitra.example.com"
-    mitra_origin_url: str = "https://mitra.example.com"
-    mitra_user_agent: str = (
-        "Mozilla/5.0 (X11; Linux x86_64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
-    # Comma-separated EXTRA hostnames allowed in returned URLs (the
-    # mitra_base_url hostname is always included automatically).
-    mitra_allowed_hosts: str = ""
-    # The operator's BACKSTOP on the above, once an agent config can override
-    # it. `mitra_allowed_hosts` is an SSRF control (MitraRestClient._validate_url),
-    # so a config write that widens it must not be able to widen it without
-    # bound; a spec-supplied allowlist is intersected with this.
+    # ---- mitra ----
     #
-    # EMPTY MEANS NO CEILING, deliberately -- every existing deployment keeps
-    # today's behaviour until it opts in. Set it to the full set of hosts any
-    # tenant may ever be pointed at.
+    # ONLY FOUR MITRA KEYS LIVE HERE (mitra_enabled is up with the feature flags
+    # above). Which Mitra deployment an agent reaches -- base URL, WebSocket URL,
+    # user agent, allowed hosts, timeouts, ip_* and the six endpoint paths -- is
+    # NOT configuration of this process. It is per agent and per tenant, so it
+    # lives in `remote.connection` on the agent config row. See
+    # docs/agent-configuration.md.
+    #
+    # NOTE extra="ignore" above: a stale MITRA_BASE_URL left in a .env is
+    # accepted silently and does nothing. Delete them from your .env.
+
+    # A CREDENTIAL -- Mitra gates admission on the Origin header. Never log it,
+    # never store it in a config row, never echo it in an error response.
+    mitra_origin_url: str = "https://mitra.example.com"
+    # SSRF backstop: a config-supplied allowed_hosts is intersected with this.
+    # Empty means no ceiling. See docs/agent-configuration.md.
     mitra_host_ceiling: str = ""
-    mitra_connect_timeout_s: float = 10.0
-    mitra_read_timeout_s: float = 30.0
-
-    # ---- mitra REST paths ----
-    # Mitra's OWN endpoint paths, appended to mitra_base_url. These are a
-    # third-party API contract, not a preference: change them only when Mitra
-    # moves an endpoint. The v1/v2 finalize pair is load-bearing -- the two
-    # endpoints read the user token from different places (v2 from the
-    # Authorization header, v1 from the request body) and select different PDF
-    # renderers, so MitraRestClient decides token placement by comparing the
-    # per-agent finalize_path against mitra_finalize_v2_path. Renaming one of
-    # the pair without the other silently unauthenticates every finalize.
-    mitra_profile_path: str = "/api/profile/"
-    mitra_generate_session_path: str = "/api/generate-session/"
-    mitra_chat_path: str = "/api/companychat/"
-    mitra_get_story_path: str = "/api/get-story/"
-    mitra_finalize_v1_path: str = "/api/end-story/"
-    mitra_finalize_v2_path: str = "/api/end-story/v2/"
-
-    # ---- mitra WebSocket (MitraChannel) ----
-    mitra_ws_url: str = "wss://mitra.example.com/ws/common/"
-    mitra_ws_connect_timeout_s: float = 10.0
-    # Address fields sent in the authenticate frame. Mitra doesn't validate
-    # these against anything real for the guest flows this integration uses.
-    mitra_ip_city: str = ""
-    mitra_ip_state: str = ""
-    mitra_ip_zip: str = ""
-
-    # ---- mitra channel pool (MitraSessionManager) ----
-    # Each open channel is a socket plus a thread -- bound the LRU. 200 is
-    # fine; 5,000 is not (design doc §7.6/§13.1).
+    # Bounds on ONE process-wide channel pool shared by every agent, so these
+    # cannot be per-agent. Each open channel is a socket plus a thread.
     mitra_max_open_channels: int = 200
     mitra_idle_close_s: float = 1200.0
 

@@ -17,7 +17,18 @@ from sqlalchemy import text, select
 from app.database.engine import SessionLocal
 from app.models.orm import Conversation
 from app.domain.core import UserContext
-from app.domain.agent_spec import RemoteFlowAgentSpec, RemoteSpec, RoutingSpec
+from app.domain.agent_spec import (
+    MitraConnectionSpec,
+    RemoteFlowAgentSpec,
+    RemoteSpec,
+    RoutingSpec,
+)
+
+#: Required on every RemoteSpec now -- the MITRA_* environment floor is gone.
+_CONNECTION = MitraConnectionSpec(
+    base_url="https://mitra.example.com",
+    ws_url="wss://mitra.example.com/ws/common/",
+)
 from app.agents.protocol import SessionDelta, SessionState
 from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -115,6 +126,7 @@ def _remote_agent(agent_id: uuid.UUID) -> _Agent:
         flow_name="guest-mi-story",
         bot_route="/test-bot-route",
         company="test-company",
+        connection=_CONNECTION,
         report_media_type="application/pdf",
         finalize_path="/api/end-story/",
     )
@@ -157,9 +169,6 @@ def test_won_claim_runs_full_sequence_in_order():
     try:
         agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
         conv_id = _new_conversation(session)
-        conv_repo = ConversationRepository(session)
-        conv_repo.pin(conv_id, agent_id)
-
         sess_view = _session_ready_for_finalizing(session, conv_id, agent_id)
         session.commit()
 
@@ -208,9 +217,10 @@ def test_won_claim_runs_full_sequence_in_order():
         assert result.finalized_at is not None
         assert result.ended_at is not None
 
-        # Conversation unpinned.
-        fresh_conv = session.execute(select(Conversation).where(Conversation.id == conv_id)).scalar_one()
-        assert fresh_conv.pinned_agent_id is None
+        # Conversation released for routing: 'completed' is terminal, so the
+        # conversation has no open session and RouterService Gate 2 will not
+        # find one. That state transition replaced the separate unpin write.
+        assert AgentSessionRepository(session).get_open_for_conversation(conv_id) is None
 
         # Audit row written.
         audit_rows = session.execute(text(
@@ -450,9 +460,6 @@ def test_handle_turn_with_terminal_delta_actually_reaches_completed():
         agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
         user = _new_user(token="the-real-token")
         conv_id = _new_conversation(session, user=user)
-        conv_repo = ConversationRepository(session)
-        conv_repo.pin(conv_id, agent_id)
-
         sess_view = _session_ready_for_finalizing(session, conv_id, agent_id)
         session.commit()
 

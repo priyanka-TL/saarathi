@@ -51,7 +51,6 @@ def _insert_agent_row(db_session) -> uuid.UUID:
 def _seed_awaiting_session(conversation_id: uuid.UUID, agent_id: uuid.UUID):
     db = SessionLocal()
     try:
-        ConversationRepository(db).pin(conversation_id, agent_id)
         svc = SessionService(db)
         repo = AgentSessionRepository(db)
         pending = repo.create_pending(conversation_id, agent_id)
@@ -87,14 +86,17 @@ def test_reset_mid_interview_abandons_session_and_closes_channel(client, script,
         state = verify.execute(
             text("SELECT state FROM agent_sessions WHERE id = :id"), {"id": seeded.id}
         ).scalar()
-        pinned = verify.execute(
-            text("SELECT pinned_agent_id FROM conversations WHERE id = :id"), {"id": conv_id}
+        # No pinned_agent_id column: a terminal session IS the release.
+        open_count = verify.execute(
+            text("SELECT count(*) FROM agent_sessions WHERE conversation_id = :id "
+                 "AND state NOT IN ('completed', 'failed', 'abandoned')"),
+            {"id": conv_id},
         ).scalar()
     finally:
         verify.close()
 
     assert state == "abandoned"
-    assert pinned is None
+    assert open_count == 0
     assert fake_mitra_sessions.close_calls == [conv_id]
 
 

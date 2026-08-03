@@ -2,7 +2,7 @@
 
 Acceptance criteria (design doc §4.8, §4.9):
   1. Deleting a conversation cascades to tool_executions.
-  2. An unsuccessful tool record without error is rejected (ck_tool_error).
+  2. An unsuccessful tool record without error is rejected (ck_tool_executions_error).
   3. Audit records survive deletion of their entity (no FKs on audit_logs).
 
 All three tests run against a real PostgreSQL database (not SQLite) because
@@ -169,11 +169,11 @@ class TestCascadeDeletion:
 
 
 # ---------------------------------------------------------------------------
-# Acceptance criterion 2: ck_tool_error rejects non-success rows without error
+# Acceptance criterion 2: ck_tool_executions_error rejects non-success rows without error
 # ---------------------------------------------------------------------------
 
 class TestToolErrorConstraint:
-    """ck_tool_error: status != 'success' implies error IS NOT NULL."""
+    """ck_tool_executions_error: status != 'success' implies error IS NOT NULL."""
 
     @pytest.mark.parametrize("bad_status", ["error", "timeout"])
     def test_non_success_without_error_is_rejected(self, db, bad_status):
@@ -230,7 +230,7 @@ class TestToolErrorConstraint:
             duration_ms=50,
         )
 
-        with pytest.raises(ValueError, match="ck_tool_error"):
+        with pytest.raises(ValueError, match="ck_tool_executions_error"):
             repo.bulk_insert(msg.id, None, [bad_trace])
 
         db.rollback()

@@ -104,11 +104,12 @@ from app.integrations.mitra.exceptions import (
 )
 from app.integrations.mitra.turn_recovery import ChatRow
 
-# Mitra's own endpoint paths, appended to MITRA_BASE_URL. These are the
-# defaults; every one is overridable through Settings (MITRA_*_PATH) and
-# reaches the client via `from_settings` below. They are a third-party API
-# contract rather than a preference -- change them when Mitra moves an
-# endpoint, not to suit a deployment.
+# Mitra's own endpoint paths, appended to the connection's base URL. A
+# third-party API contract rather than a preference -- change them when Mitra
+# moves an endpoint, not to suit a deployment. Overridable per agent through
+# `remote.connection.paths`; app/domain/agent_spec.py mirrors these defaults
+# (it cannot import them -- the domain layer is import-pure) and
+# tests/unit/mitra/test_paths_defaults.py asserts the two stay in step.
 FINALIZE_V1_PATH = "/api/end-story/"
 FINALIZE_V2_PATH = "/api/end-story/v2/"
 
@@ -506,26 +507,10 @@ class MitraRestClient:
             raise MitraSSRFError()
 
 
-# NOTE: the old `from_settings(settings) -> MitraRestClient` factory is gone.
-# A client is no longer a function of Settings alone -- its base URL, timeouts
-# and Origin credential resolve per agent and per tenant. Build a
-# MitraConnection (app/integrations/mitra/connection.py) and ask
+# NOTE: the old `from_settings(settings) -> MitraRestClient` factory and its
+# `paths_from_settings` companion are both gone. A client is not a function of
+# Settings at all any more -- its base URL, timeouts, paths and Origin
+# credential resolve per agent and per tenant. Build a MitraConnection
+# (app/integrations/mitra/connection.py) from the agent spec and ask
 # MitraClientRegistry for the client, which also shares one connection pool per
 # distinct configuration instead of one per caller.
-
-
-def paths_from_settings(settings) -> MitraPaths:
-    """Gather the MITRA_*_PATH settings into a MitraPaths.
-
-    Separate from the connection because the paths are also needed to validate
-    a spec's `finalize_path` on the config write path, whether or not
-    MITRA_ENABLED built a client.
-    """
-    return MitraPaths(
-        profile=settings.mitra_profile_path,
-        generate_session=settings.mitra_generate_session_path,
-        chat=settings.mitra_chat_path,
-        get_story=settings.mitra_get_story_path,
-        finalize_v1=settings.mitra_finalize_v1_path,
-        finalize_v2=settings.mitra_finalize_v2_path,
-    )

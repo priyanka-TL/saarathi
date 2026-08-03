@@ -24,7 +24,6 @@ def _session_dto(
         conversation_id=uuid.uuid4(),
         agent_id=uuid.uuid4(),
         state=state,
-        remote_provider="mitra",
         remote_session_id="mitra-sess-abc",
         remote_profile_id="1355",
         remote_flow="guest-mi-story",
@@ -35,9 +34,11 @@ def _session_dto(
         result_ref=result_ref,
         report_url=report_url,
         error=None,
-        error_code=None,
         state_data={},
-        started_at=datetime.utcnow(),
+        created_by="1",
+        updated_by="1",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
         last_activity_at=datetime.utcnow(),
         finalized_at=None,
         ended_at=None,
@@ -308,13 +309,24 @@ class TestConcurrentFinalisation:
         assert delta.state == SessionState.completed
         assert delta.result_ref == "story-9931"
 
-    def test_conversation_unpinned_after_completion(self):
-        """Conversation pin must be cleared so the next turn is routable again."""
-        orch, agent, session_dto, _, _, _, _, user = self._setup_winner_loser()
+    def test_completion_releases_the_conversation_for_routing(self):
+        """The next turn must be routable again once the interview finishes.
+
+        Reaching the terminal 'completed' state IS the release: RouterService
+        Gate 2 finds the conversation's agent by looking for a NON-TERMINAL
+        agent_sessions row, so a completed session is no longer found. This used
+        to additionally assert a conversations.unpin() call against a
+        pinned_agent_id column that duplicated the same fact; the column is gone
+        and the state transition is the whole mechanism.
+        """
+        orch, agent, session_dto, _, _, _, sessions_svc, user = self._setup_winner_loser()
 
         orch._finalize(session_dto, agent, user)
 
-        orch._conversations.unpin.assert_called_once_with(session_dto.conversation_id)
+        applied = [c for c in sessions_svc.apply.call_args_list
+                   if c.args[1].state is SessionState.completed]
+        assert len(applied) == 1, "exactly one transition to 'completed'"
+        assert applied[0].args[0] is session_dto
 
     def test_finalize_failure_transitions_session_to_failed(self):
         """If mitra_rest.finalize() raises, the session must move to 'failed',

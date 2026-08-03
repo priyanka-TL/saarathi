@@ -5,7 +5,7 @@ from typing import Optional, Iterable, List
 from sqlalchemy import select, update, func
 from sqlalchemy.orm import Session
 
-from app.models.orm import AgentSession, SessionStateEnum
+from app.models.orm import SYSTEM_ACTOR, AgentSession, SessionStateEnum
 from app.domain.sessions import AgentSessionDTO
 
 _TERMINAL = {SessionStateEnum.completed, SessionStateEnum.failed, SessionStateEnum.abandoned}
@@ -23,7 +23,7 @@ class AgentSessionRepository:
         return AgentSessionDTO.model_validate(row) if row else None
 
     def get_open_for_conversation(self, conversation_id: uuid.UUID) -> Optional[AgentSessionDTO]:
-        """Mirrors uq_sess_one_open_per_conv's own predicate exactly -- at most one row."""
+        """Mirrors uq_agent_sessions_one_open_per_conversation's own predicate exactly -- at most one row."""
         row = self._session.execute(
             select(AgentSession).where(
                 AgentSession.conversation_id == conversation_id,
@@ -40,12 +40,12 @@ class AgentSessionRepository:
         conversation needs the opposite: a *completed* session is exactly the
         one whose report link has to come back after a reload.
 
-        Ordered to match ix_sess_conv (conversation_id, started_at DESC).
+        Ordered to match ix_agent_sessions_conversation (conversation_id, created_at DESC).
         """
         row = self._session.execute(
             select(AgentSession)
             .where(AgentSession.conversation_id == conversation_id)
-            .order_by(AgentSession.started_at.desc())
+            .order_by(AgentSession.created_at.desc())
             .limit(1)
         ).scalar_one_or_none()
         return AgentSessionDTO.model_validate(row) if row else None
@@ -55,24 +55,25 @@ class AgentSessionRepository:
 
         A conversation can legitimately hold more than one: the router supports
         switching agents mid-conversation (that is what the flow breadcrumb
-        renders), and uq_sess_one_open_per_conv only forbids two OPEN sessions,
+        renders), and uq_agent_sessions_one_open_per_conversation only forbids two OPEN sessions,
         not a new one after an earlier one reached a terminal state.
 
         get_latest_for_conversation answers "what is in flight" and is still
         right for that. It is the wrong question for restoring history: ordering
-        by started_at alone let a newer session mask an earlier COMPLETED one,
+        by created_at alone let a newer session mask an earlier COMPLETED one,
         so its report_url never reached the client and the Download PDF button
         vanished when the conversation was reopened.
         """
         rows = self._session.execute(
             select(AgentSession)
             .where(AgentSession.conversation_id == conversation_id)
-            .order_by(AgentSession.started_at.asc())
+            .order_by(AgentSession.created_at.asc())
         ).scalars().all()
         return [AgentSessionDTO.model_validate(row) for row in rows]
 
     def create_pending(
         self, conversation_id: uuid.UUID, agent_id: uuid.UUID, language: str = "en",
+        actor: str = SYSTEM_ACTOR,
     ) -> AgentSessionDTO:
         """No remote_* columns are known yet at creation time.
 
@@ -87,6 +88,8 @@ class AgentSessionRepository:
             agent_id=agent_id,
             state=SessionStateEnum.pending,
             language=language,
+            created_by=actor,
+            updated_by=actor,
         )
         self._session.add(row)
         self._session.flush()
@@ -151,7 +154,7 @@ class AgentSessionRepository:
         return AgentSessionDTO.model_validate(row) if row else None
 
     def sweep_abandoned_older_than(self, cutoff: datetime, reason: str) -> List[AgentSessionDTO]:
-        """Bulk operation for the periodic job. Matches ix_sess_sweep's own
+        """Bulk operation for the periodic job. Matches ix_agent_sessions_sweep's own
         predicate exactly: ANY non-terminal state, not just awaiting_user."""
         stmt = (
             update(AgentSession)

@@ -18,7 +18,6 @@ class AgentSessionDTO(BaseModel):
     agent_id: uuid.UUID
     state: str
 
-    remote_provider: Optional[str] = None
     remote_session_id: Optional[str] = None
     remote_profile_id: Optional[str] = None
     remote_flow: Optional[str] = None
@@ -30,10 +29,16 @@ class AgentSessionDTO(BaseModel):
     result_ref: Optional[str] = None
     report_url: Optional[str] = None
     error: Optional[str] = None
-    error_code: Optional[str] = None
 
     state_data: Dict[str, Any]
-    started_at: datetime
+    # `created_at` is the session's start. There is no separate `started_at`
+    # column any more -- it always held exactly this value. serialize_session
+    # still emits a "started_at" key, sourced from here, so the API is unchanged.
     last_activity_at: datetime
     finalized_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
+
+    created_by: str
+    updated_by: str
+    created_at: datetime
+    updated_at: datetime

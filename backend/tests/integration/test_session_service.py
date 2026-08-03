@@ -7,7 +7,18 @@ from sqlalchemy import text, select
 from app.database.engine import SessionLocal
 from app.models.orm import Conversation
 from app.domain.core import UserContext
-from app.domain.agent_spec import RemoteFlowAgentSpec, RemoteSpec, RoutingSpec
+from app.domain.agent_spec import (
+    MitraConnectionSpec,
+    RemoteFlowAgentSpec,
+    RemoteSpec,
+    RoutingSpec,
+)
+
+#: Required on every RemoteSpec now -- the MITRA_* environment floor is gone.
+_CONNECTION = MitraConnectionSpec(
+    base_url="https://mitra.example.com",
+    ws_url="wss://mitra.example.com/ws/common/",
+)
 from app.agents.protocol import SessionDelta, SessionState
 from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -36,7 +47,7 @@ class _RegisteredAgentStub:
             description="test agent for session service tests",
             agent_type="remote_flow",
             routing=RoutingSpec(pin_session=pin_session, exit_keywords=["/exit"]),
-            remote=RemoteSpec(provider="mitra", flow_name="guest-mi-story", bot_route="/test-bot-route", company="test-company"),
+            remote=RemoteSpec(provider="mitra", flow_name="guest-mi-story", bot_route="/test-bot-route", company="test-company", connection=_CONNECTION),
         )
 
 
@@ -323,17 +334,15 @@ def test_claim_finalizing_returns_none_when_not_claimable():
 
 
 # ---------------------------------------------------------------------------
-# abandon(): unpins the conversation in the same transaction
+# abandon(): makes the session terminal, which IS the unpin
 # ---------------------------------------------------------------------------
 
 
-def test_abandon_unpins_conversation_same_transaction():
+def test_abandon_releases_the_conversation_same_transaction():
     session = SessionLocal()
     try:
         agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
         conv_id = _new_conversation(session)
-        conv_repo = ConversationRepository(session)
-        conv_repo.pin(conv_id, agent_id)
 
         repo = AgentSessionRepository(session)
         pending = repo.create_pending(conv_id, agent_id)
@@ -357,8 +366,7 @@ def test_abandon_unpins_conversation_same_transaction():
     # not just visible in-process.
     verify = SessionLocal()
     try:
-        conv = verify.execute(select(Conversation).where(Conversation.id == conv_id)).scalar_one()
-        assert conv.pinned_agent_id is None
+        assert AgentSessionRepository(verify).get_open_for_conversation(conv_id) is None
 
         sess_row = AgentSessionRepository(verify).get(abandoned.id)
         assert sess_row.state == "abandoned"

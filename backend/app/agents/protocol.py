@@ -22,7 +22,6 @@ class AgentSessionView:
     conversation_id: UUID
     agent_id: UUID
     state: SessionState
-    remote_provider: Optional[str]
     remote_session_id: Optional[str]
     remote_profile_id: Optional[str]
     remote_flow: Optional[str]
@@ -33,7 +32,6 @@ class AgentSessionView:
     result_ref: Optional[str]
     report_url: Optional[str]
     error: Optional[str]
-    error_code: Optional[str]
     state_data: dict
 
 @dataclass(frozen=True)

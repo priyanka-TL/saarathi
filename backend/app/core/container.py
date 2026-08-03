@@ -30,7 +30,6 @@ class Container:
     agent_registry: AgentRegistry
     authenticator: Any  # app.services.identity.Authenticator
     mitra_clients: Optional[Any] = None    # MitraClientRegistry | None (mitra_enabled gated)
-    mitra_rest: Optional[Any] = None       # MitraRestClient | None -- the DEFAULT-scope client
     mitra_sessions: Optional[Any] = None   # MitraSessionManager | None (mitra_enabled gated)
 
 
@@ -55,31 +54,28 @@ def build_container(settings: Settings) -> Container:
     # mitra_clients / mitra_sessions: built when mitra_enabled is set. When
     # disabled (the default) both are None and LlmAgentHandler is unaffected
     # -- it never touches these fields. RemoteFlowAgentHandler checks for
-    # None and raises a clear error if an operator enables a remote_flow
-    # agent without setting MITRA_BASE_URL etc.
+    # None and raises a clear error if an operator enables a remote_flow agent
+    # without Mitra wired up.
     #
     # WHY A REGISTRY RATHER THAN A CLIENT. A MitraRestClient carries a base
-    # URL, timeouts and the Origin credential -- all of which now resolve per
-    # agent and per tenant (app/integrations/mitra/connection.py). One shared
-    # client would serve every scope the FIRST scope's endpoint. The registry
-    # hands out one client per distinct connection, cached by checksum, and is
-    # shared with OrchestrationService so a turn and its finalisation use the
-    # identical client rather than two independent pools.
+    # URL, timeouts and the Origin credential -- all of which resolve per agent
+    # and per tenant (app/integrations/mitra/connection.py). One shared client
+    # would serve every scope the FIRST scope's endpoint. The registry hands
+    # out one client per distinct connection, cached by checksum, and is shared
+    # with OrchestrationService so a turn and its finalisation use the identical
+    # client rather than two independent pools.
     #
-    # mitra_rest is the DEFAULT-scope client, kept for the finalisation paths
-    # that still resolve the default snapshot. Those move onto the registry in
-    # the next step, and this field goes with them.
+    # THERE IS NO DEFAULT-SCOPE CLIENT ANY MORE. There used to be one, built
+    # from the MITRA_* settings at boot. Those settings are gone -- the endpoint
+    # now lives in `remote.connection` on the agent config -- so there is no
+    # connection to build before an agent spec is in hand, and nothing to build
+    # it from. Every caller goes through the registry with a resolved spec.
     mitra_clients = None
-    mitra_rest = None
     mitra_sessions = None
     if settings.mitra_enabled:
-        from app.integrations.mitra.connection import (
-            MitraClientRegistry,
-            from_settings as build_mitra_connection,
-        )
+        from app.integrations.mitra.connection import MitraClientRegistry
         from app.integrations.mitra.session_manager import MitraSessionManager
         mitra_clients = MitraClientRegistry()
-        mitra_rest = mitra_clients.get(build_mitra_connection(settings))
         mitra_sessions = MitraSessionManager(settings)
 
     deps = HandlerDeps(
@@ -110,6 +106,5 @@ def build_container(settings: Settings) -> Container:
         agent_registry=agent_registry,
         authenticator=authenticator,
         mitra_clients=mitra_clients,
-        mitra_rest=mitra_rest,
         mitra_sessions=mitra_sessions,
     )
