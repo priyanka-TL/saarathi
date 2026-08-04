@@ -808,13 +808,15 @@ body {
 }
 
 .agent .message-content {
-    background: var(--message-agent);
+    /* background: var(--message-agent); */
+    background: #f6f3ee;
     border: 1px solid #e3dcd1;
     color: var(--text-primary);
 }
 
 .system .message-content {
-    background: var(--message-agent);
+    /* background: var(--message-agent); */
+    background: #f6f3ee;
     border: 1px solid #e3dcd1;
     color: var(--text-primary);
 }
