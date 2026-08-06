@@ -99,12 +99,12 @@ body {
 .status-row,
 /* .meta-row, */
 .advanced-title,
-.advanced-subtitle,
+/* .advanced-subtitle, */
 .capabilities-label,
 .mobile-sidebar-title,
 /* Capability + highlight cards */
 .capability-desc,
-.capability-badge,
+/* .capability-badge, */
 .capability-action-btn,
 .highlight-desc,
 /* Agent list */
@@ -112,7 +112,7 @@ body {
 .agent-desc,
 /* Workflow banner + context chrome */
 .workflow-title-text,
-.workflow-stop-text,
+/* .workflow-stop-text, */
 .context-pill,
 .context-banner-desc,
 /* .breadcrumb-item, */
