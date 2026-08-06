@@ -71,6 +71,13 @@ export const COPY = {
   storyFailed: 'Story capture could not be completed. Please try again.',
   discussionFailed: 'Capturing this discussion could not be completed. Please try again.',
   reportPending: 'PDF report is still being generated. Please check back later.',
+  // Asked once a remote_flow session (story OR discussion) has completed, so
+  // the transcript hands the turn back to the user instead of ending on a
+  // download link. Rendered here live; STORED by the backend as a real
+  // assistant message, so it must stay byte-identical to SESSION_FOLLOW_UP in
+  // backend/app/services/orchestration.py or the wording changes on reload.
+  // Pinned by backend/tests/guards/test_sync_contract.py.
+  sessionFollowUp: 'Is there anything else I can help you with today?',
   // U+2B07 DOWNWARDS BLACK ARROW followed by TWO spaces.
   downloadReport: '⬇  Download PDF report',
 

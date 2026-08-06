@@ -8,6 +8,7 @@ from sqlalchemy import text as sql_text
 
 from app.agents.protocol import TurnContext, AgentSessionView, Option, SessionDelta, SessionState
 from app.domain.sessions import AgentSessionDTO
+from app.models.orm import SYSTEM_ACTOR
 from app.repositories.audit import AuditLogRepository
 from app.repositories.conversations import ConversationRepository
 from app.repositories.messages import MessageRepository
@@ -26,6 +27,18 @@ logger = get_logger("orchestration")
 
 TITLE_MAX_LEN = 60
 TITLE_TRUNCATE_AT = 57
+
+#: What Saarthi says once a delegated interview -- story OR discussion -- has
+#: been submitted, so the transcript ends on a question to the user rather than
+#: on a download link.
+#:
+#: MUST stay byte-identical to COPY.sessionFollowUp in
+#: frontend/src/constants/index.js. The client renders this bubble locally the
+#: moment its session poll reports 'completed' (there is no transcript refetch
+#: after a turn), and this stored row is what a reload replays in its place --
+#: so a drift between the two literals shows up as the message CHANGING when
+#: the user refreshes. tests/guards/test_sync_contract.py pins them together.
+SESSION_FOLLOW_UP = "Is there anything else I can help you with today?"
 
 
 def _conversation_title(text: str) -> str:
@@ -89,6 +102,22 @@ class ResumeResult:
     session: Any
     text: str = ""
     message: Any = None
+
+
+@dataclass
+class _Finalization:
+    """The outcome of a `_finalize` attempt, plus WHO finalised.
+
+    `claimed` is False when another request already owned finalisation and this
+    call merely read back the result. That distinction is invisible in the
+    returned session -- both paths can hand back a 'completed' row -- and it is
+    exactly what decides whether this call may also write the follow-up
+    message. Without it, POST /api/sessions/{id}/finalize (idempotent by
+    design, §10.2) would append a second "anything else?" every time it is
+    called again.
+    """
+    session: Any
+    claimed: bool
 
 
 @dataclass
@@ -407,8 +436,10 @@ class OrchestrationService:
         # 10. apply session delta; finalise if terminal
         if turn.session_delta and session_view:
             session_view = self._sessions.apply(session_view, turn.session_delta)
+        finalization = None
         if turn.terminal and session_view:
-            session_view = self._finalize(session_view, agent, ctx_in.user)
+            finalization = self._finalize_claiming(session_view, agent, ctx_in.user)
+            session_view = finalization.session
 
         # 11. persist the agent message
         options_dict = [o.__dict__ for o in turn.options] if turn.options else None
@@ -431,6 +462,24 @@ class OrchestrationService:
             request_id=ctx_in.request_id,
             actor=ctx_in.user.user_id,
         )
+
+        # 11b. The interview just ended -- hand the conversation back to the
+        #      user, as a stored message so a reload replays it.
+        #
+        #      HERE, not inside _finalize: step 11's insert has to come first or
+        #      the follow-up outranks the agent's closing line by seq. And
+        #      _finalize itself cannot simply move down to join it -- step 11
+        #      holds the conversation row lock (next_seq_for_update) until the
+        #      commit at step 13, and finalisation is a Mitra round trip.
+        if (
+            finalization is not None
+            and finalization.claimed
+            and session_view is not None
+            and session_view.state == SessionState.completed.value
+        ):
+            self._record_session_follow_up(
+                conv.id, session_view.agent_id, ctx_in.user, ctx_in.request_id,
+            )
 
         # 12. persist tool traces
         if agent.spec.features.record_tool_executions:
@@ -656,9 +705,66 @@ class OrchestrationService:
         if session_view is None:
             return None
         agent = self.agent_for_session(session_view, user)
-        return self._finalize(session_view, agent, user)
+        result = self._finalize_claiming(session_view, agent, user)
+        # Only the call that actually finalised speaks. A repeat of this route
+        # is a no-op that reads the same completed session back, and must not
+        # ask the user "anything else?" a second time.
+        if (
+            result.claimed
+            and result.session is not None
+            and result.session.state == SessionState.completed.value
+        ):
+            self._record_session_follow_up(
+                session_view.conversation_id, session_view.agent_id, user,
+            )
+        return result.session
+
+    def _record_session_follow_up(
+        self, conversation_id, agent_id, user, request_id=None,
+    ) -> None:
+        """Persist Saarthi's closing question as a real assistant message.
+
+        WHY STORED, when the completion notice right above it is not: the
+        notice ("Your discussion report is ready" + the download link) is a
+        RENDERING of the agent_sessions row, which is why
+        GET /api/conversations/{id}/messages returns sessions instead of a
+        synthetic message row for it. This is not that -- it is a
+        conversational turn. Stored, it survives a reload in the right place
+        and reaches the next agent as history, so the model that answers
+        "yes, one more thing" can see what was asked.
+
+        `agent_id` is the session's OWN agent, and it is not optional:
+        ck_conversation_messages_assistant_attribution requires every assistant
+        row to name a speaker (migration 0007 -- "no reply is ever anonymous"),
+        and it is what distinct_agent_sequence reads to rebuild the flow
+        breadcrumb. Naming the interview agent leaves that breadcrumb
+        unchanged (consecutive duplicates collapse) and matches how the client
+        already attributes the completion notice directly above. It says
+        nothing about who answers NEXT: the session is terminal, so
+        RouterService Gate 2 no longer finds it and the next turn routes free.
+
+        `agent_session_id` IS left null, deliberately: the client anchors
+        per-session UI after the LAST message carrying that id, so tagging this
+        row with the session would place the completion notice -- and its
+        Download PDF link -- BELOW the follow-up on replay, inverting the two.
+        """
+        self._messages.insert(
+            conversation_id,
+            self._conversations.next_seq_for_update(conversation_id),
+            role="assistant",
+            content=SESSION_FOLLOW_UP,
+            agent_id=agent_id,
+            request_id=request_id,
+            actor=getattr(user, "user_id", None) or SYSTEM_ACTOR,
+        )
+        self._conversations.touch(conversation_id)
 
     def _finalize(self, session_view, agent, user):
+        """Finalisation, as a plain session -- the shape every caller that does
+        not care who won the claim wants. See _finalize_claiming."""
+        return self._finalize_claiming(session_view, agent, user).session
+
+    def _finalize_claiming(self, session_view, agent, user) -> _Finalization:
         """Finalisation, triggered by AgentTurn.terminal (design doc §4.7, §8.5).
 
         Mitra's Story.session is UNIQUE (story_models.py:30, verified against
@@ -676,7 +782,9 @@ class OrchestrationService:
             # or already 'completed' with its real result_ref if the winner
             # finished first) -- the client polls either way.
             current = self._sessions.get(session_view.id)
-            return current if current is not None else session_view
+            return _Finalization(
+                session=current if current is not None else session_view, claimed=False,
+            )
 
         # 2. Audit the claim.
         self._audit.insert(
@@ -770,4 +878,9 @@ class OrchestrationService:
         completed = self._sessions.apply(
             claimed, SessionDelta(state=SessionState.completed, **delta_fields),
         )
-        return completed
+        # The follow-up message is NOT written here. This runs at step 10 of
+        # handle_turn, before the agent's own closing line is inserted at step
+        # 11, and seq is what orders the transcript -- writing it here would
+        # put "anything else?" ABOVE the reply it follows. The callers write it
+        # once they have, which is also why they need `claimed`.
+        return _Finalization(session=completed, claimed=True)

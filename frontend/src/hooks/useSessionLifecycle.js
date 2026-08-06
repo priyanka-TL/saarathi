@@ -13,7 +13,8 @@ import { useConversationContext } from '../context/ConversationContext.jsx';
  * Renders and drives the remote_flow (Mitra) session lifecycle:
  *
  *   finalizing -> spinner notice + poll GET /api/sessions/{id} every 2s
- *   completed  -> completion bubble, with a Download-PDF link or a report poll
+ *   completed  -> completion bubble, with a Download-PDF link or a report poll,
+ *                 then a follow-up prompt (live completions only)
  *   failed     -> plain system error bubble
  *   abandoned  -> same
  *
@@ -90,7 +91,8 @@ export function useSessionLifecycle({ messages, polls }) {
    *
    * `anchorSessionId` places the notice where that session actually ENDED
    * rather than at the bottom of a conversation that has since moved on to
-   * another agent.
+   * another agent. Its ABSENCE is also what marks this as the live end of an
+   * interview rather than a history replay -- see the follow-up below.
    */
   const renderCompleted = useCallback(
     (session, agentName = null, anchorSessionId = null) => {
@@ -102,6 +104,28 @@ export function useSessionLifecycle({ messages, polls }) {
       const { ready, checking } = copyFor(session);
 
       const fields = { agentName: attribution, agentSessionId: session.id };
+
+      /*
+       * Hand the turn back to the user.
+       *
+       * LIVE COMPLETIONS ONLY, and for a different reason than the notice
+       * above: the backend STORES this one as a real assistant message
+       * (OrchestrationService._record_session_follow_up), so on a replay it
+       * arrives with the rest of the transcript. Appending it here as well
+       * would show it twice on every resumed conversation.
+       *
+       * Attributed to the interview agent, matching the completion bubble
+       * above it AND the stored row -- whose agent_id cannot be null anyway
+       * (ck_conversation_messages_assistant_attribution). Anything else and
+       * the bubble would change speaker when the user reloads.
+       */
+      const askFollowUp = () => {
+        if (anchorSessionId) return;
+        messages.append('system', {
+          content: COPY.sessionFollowUp,
+          agentName: attribution,
+        });
+      };
 
       if (session.report_url) {
         const item = anchorSessionId
@@ -115,6 +139,7 @@ export function useSessionLifecycle({ messages, polls }) {
               content: ready,
               reportUrl: session.report_url,
             });
+        askFollowUp();
         return item;
       }
 
@@ -124,6 +149,10 @@ export function useSessionLifecycle({ messages, polls }) {
             content: checking,
           })
         : messages.append('session-complete', { ...fields, content: checking });
+      // Before pollReport, so the prompt sits below the completion bubble. The
+      // report lands via REPLACE on that bubble's id, which patches in place
+      // and cannot reorder the two.
+      askFollowUp();
       pollReport(session.id, placeholder.id, ready);
       return placeholder;
     },
