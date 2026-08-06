@@ -1,7 +1,7 @@
 import { COPY } from '../../constants';
 import { formatTime } from '../../utils/time';
 import { safeReportUrl } from '../../utils/url';
-import { BotIcon } from '../icons';
+import { BotIcon, UserIcon } from '../icons';
 import MessageOptions from './MessageOptions';
 
 /**
@@ -37,15 +37,25 @@ export default function Message({ item, onSelectOption }) {
     );
   }
 
-  // No avatar, meta shows the time only.
+  // Avatar sits AFTER the body, so flex order puts it on the right -- the
+  // mirror of the agent row. Attribution reads 'Chat History' for a replayed
+  // turn (`readOnly`, set only by useConversation's restore path) and the
+  // current context name for one typed this session.
   if (kind === 'user') {
     return (
       <div className="message user">
         <div className="message-body">
           <div className="message-content">
             <div className="message-text">{content}</div>
-            <Meta timestamp={timestamp} showAgent={false} />
+            <Meta
+              timestamp={timestamp}
+              agentName={readOnly ? COPY.chatHistoryContext : agentName}
+              showAgent
+            />
           </div>
+        </div>
+        <div className="message-avatar">
+          <UserIcon />
         </div>
       </div>
     );

@@ -50,6 +50,11 @@ export const AUTO_ROUTE_AGENT_NAME = 'Saarthi';
 export const COPY = {
   greeting: 'Namaste. How can I help you today?',
   homeContext: 'Home',
+  // Attribution shown on a USER bubble that was replayed from a stored
+  // transcript rather than typed this session -- those items are the ones
+  // useConversation marks `readOnly: true`. A live message shows its context
+  // name instead. See Message.jsx.
+  chatHistoryContext: 'Chat History',
   // U+2013 EN DASH, as in the original markup.
   emptySubContext: '–',
   defaultWorkflowTitle: 'Workflow Progress',

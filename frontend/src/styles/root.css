@@ -457,3 +457,126 @@ body {
     height: 100%;
     object-fit: contain;
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * Chat colour scheme -- cream / deep purple / forest green.
+ *
+ * Most of the reference palette was already shipped: --bg-color (#f6f3ee), the
+ * white .chat-window-card, the white .active-context-banner, the purple
+ * #send-btn and .message-avatar, and the mint .breadcrumb-item.active with its
+ * pulsing #1e5c43 dot are all untouched here because they already match.
+ *
+ * Only three elements differed, and only their COLOURS change -- no markup, no
+ * geometry beyond the one radius adjustment change 3 forces. Every value below
+ * is a token style.css already uses (#4e2277, #1e5c43, #f6f3ee, #e3dcd1);
+ * nothing new is invented.
+ *
+ * LIGHT THEME ONLY, by decision. Dark mode is unreachable from the UI -- its
+ * toggle is commented out of the markup and ChatPage.jsx only boot-READS a
+ * stored preference -- so it is deliberately left exactly as shipped rather
+ * than half-migrated. Change 1 is what makes that scoping real; see below.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * 1. User bubble -- solid purple, white text (was a 12% wash with dark text).
+ *
+ * These two custom properties are read in exactly ONE place, style.css:805-806
+ * (`.user .message-content`), so redefining them is surgical: no other rule
+ * changes as a side effect.
+ *
+ * `:not([data-theme="dark"])` IS LOAD-BEARING -- do not simplify it to `:root`.
+ * A bare `:root` is specificity (0,1,0), identical to `[data-theme="dark"]` in
+ * style.css, and root.css is imported second (src/main.jsx) -- so it would win
+ * against the DARK palette too and paint a solid light-purple bubble onto the
+ * dark background. The :not() raises this to (0,2,0) AND confines it to light.
+ */
+:root:not([data-theme="dark"]) {
+    --message-user: #4e2277;
+    --message-user-text: #ffffff;
+}
+
+/*
+ * 2. ...and the timestamp inside it. Forced by change 1, not a separate choice:
+ * .message-meta is var(--text-secondary) (#6e665e), which on #4e2277 is dark
+ * grey on dark purple. (0,1,1) beats style.css's `.message-meta` (0,1,0).
+ * Scoped to the same light-only condition so dark mode keeps its grey meta.
+ */
+:root:not([data-theme="dark"]) .user .message-meta {
+    color: rgba(255, 255, 255, 0.72);
+}
+
+/*
+ * 3. Agent + system bubbles -- forest-green left bar.
+ *
+ * Fill and hairline border are already right (style.css:810-820 hardcodes
+ * #f6f3ee / #e3dcd1); only the left edge is new. #1e5c43 is reused verbatim
+ * from `.breadcrumb-item.active .breadcrumb-dot`, so the accent green is one
+ * value across the whole interface rather than two near-identical greens.
+ *
+ * The bar follows the corner radius rather than squaring off against it -- the
+ * reference shows the green sweeping around the top-left and bottom-left, which
+ * is just what a thick border on a rounded box does. An earlier revision here
+ * squared those two corners to 6px; that was wrong and is not coming back.
+ */
+:root:not([data-theme="dark"]) .agent .message-content,
+:root:not([data-theme="dark"]) .system .message-content {
+    border-left: 4px solid #1e5c43;
+}
+
+/*
+ * 3b. Bubble silhouette -- 14px, uniform.
+ *
+ * style.css sets `border-radius: 20px` on .message-content plus a
+ * `border-bottom-right-radius: 4px` notch on the user bubble (the classic
+ * "speech tail" corner). The reference has neither: its corners are tighter
+ * and all four match, on both speakers. The notch override needs (0,2,0) to
+ * beat `.user .message-content`, which the :root:not() prefix already gives.
+ */
+:root:not([data-theme="dark"]) .message-content {
+    border-radius: 14px;
+}
+
+:root:not([data-theme="dark"]) .user .message-content {
+    border-bottom-right-radius: 14px;
+}
+
+/*
+ * 4. Composer -- warm-grey fill, hairline border (was white with a 2px purple
+ * border). Same #f6f3ee / #e3dcd1 pair as the agent bubble above.
+ *
+ * The 2px -> 1px border does NOT shift the composer's height: style.css:55
+ * sets `* { box-sizing: border-box }`, so `min-height: 52px` measures the outer
+ * box either way and only the content area gains the 2px.
+ *
+ * #user-input:focus is deliberately NOT touched -- the purple ring is the
+ * accessible focus affordance, and no reference frame shows a focused field.
+ * It simply renders at 1px now.
+ */
+:root:not([data-theme="dark"]) #user-input {
+    background: #f6f3ee;
+    border: 1px solid #e3dcd1;
+}
+
+/*
+ * 5. User avatar, on the right.
+ *
+ * `.message` is already `display: flex` with `gap: 12px` (style.css:739-743),
+ * and Message.jsx emits the avatar AFTER .message-body for user rows, so the
+ * row mirrors the agent's without any order/row-reverse trickery. This rule
+ * only stops the 28px box from being squeezed by a long bubble and pins it to
+ * the top, level with the first line -- matching the bot side.
+ */
+.message.user .message-avatar {
+    align-self: flex-start;
+}
+
+/*
+ * The avatar column is new on user rows, so the bubble now shares the row with
+ * a 28px box plus the 12px flex gap. Without this, a long user message keeps
+ * its old 78% and the pair overflows the 78% envelope by 40px.
+ */
+.message.user {
+    max-width: calc(78% + 40px);
+}
