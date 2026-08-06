@@ -95,9 +95,9 @@ body {
  */
 
 /* Sidebar: brand block, status/meta rows, section headers */
-.brand-text p,
+/* .brand-text p, */
 .status-row,
-.meta-row,
+/* .meta-row, */
 .advanced-title,
 .advanced-subtitle,
 .capabilities-label,
