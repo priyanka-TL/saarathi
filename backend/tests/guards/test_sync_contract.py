@@ -6,6 +6,8 @@ violation fails only under load, or only in production, or only silently.
 from __future__ import annotations
 
 import inspect
+import re
+from pathlib import Path
 
 import anyio.to_thread
 import pytest
@@ -214,6 +216,34 @@ def test_request_id_is_generated_and_echoed(client):
 
     supplied = client.get("/api/agents", headers={"X-Request-ID": "caller-supplied-42"})
     assert supplied.headers.get("x-request-id") == "caller-supplied-42"
+
+
+def test_the_post_session_follow_up_reads_the_same_on_both_halves():
+    """The one string both halves have to spell identically.
+
+    The client renders the "anything else?" bubble locally the instant its
+    session poll reports 'completed' -- there is no transcript refetch after a
+    turn -- while the backend stores the row a reload replays in its place. So
+    a drift between the two literals is invisible until a user refreshes, and
+    then the message they are looking at silently changes wording.
+
+    Nothing else in COPY is duplicated here: every other client string
+    (greeting, completion notice, errors) is generated client-side and has no
+    server-side twin.
+    """
+    from app.services.orchestration import SESSION_FOLLOW_UP
+
+    constants = Path(__file__).resolve().parents[3] / "frontend/src/constants/index.js"
+    if not constants.exists():
+        pytest.skip("frontend half not checked out")
+
+    match = re.search(r"sessionFollowUp:\s*'([^']*)'", constants.read_text(encoding="utf-8"))
+    assert match, "COPY.sessionFollowUp is gone from the frontend constants"
+    assert match.group(1) == SESSION_FOLLOW_UP, (
+        "the stored message and the one the client renders live have diverged:\n"
+        f"  backend:  {SESSION_FOLLOW_UP!r}\n"
+        f"  frontend: {match.group(1)!r}"
+    )
 
 
 def test_error_envelope_carries_the_request_id(client):

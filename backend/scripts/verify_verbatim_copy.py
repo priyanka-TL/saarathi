@@ -69,7 +69,11 @@ EXPECTED_EDITS = {
     "app/services/orchestration.py": (
         "resolves the selected agent for the caller's tenant/organization at ONE "
         "point (step 4b), so every later agent.spec read and the "
-        "HandlerFactory (key, checksum) cache key are tenant-correct"
+        "HandlerFactory (key, checksum) cache key are tenant-correct; and stores "
+        "SESSION_FOLLOW_UP as a real assistant message once an interview "
+        "completes (step 11b / finalize_now), which is why _finalize now reports "
+        "whether THIS call won the claim -- the Flask original ended the "
+        "transcript on the client-rendered download link"
     ),
     "app/models/orm.py": (
         "adds the migration-0006 models -- Agent, AgentConfig, Capability, "

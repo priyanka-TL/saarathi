@@ -443,8 +443,15 @@ class _FakeRouter:
 class _FakeRegistry:
     """handle_turn() calls registry.default() unconditionally while building
     router history context, even though this test's router never needs it."""
+    def __init__(self, agent=None):
+        self._agent = agent
+
     def default(self):
         return None
+
+    def get_by_id(self, agent_id):
+        """Only finalize_now() reaches this, via agent_for_session()."""
+        return self._agent
 
     def resolve_for_scope(self, session, agent, tenant_id, organization_id):
         """Mirrors the real method's no-op path: a tenant with no scoped config
@@ -495,5 +502,112 @@ def test_handle_turn_with_terminal_delta_actually_reaches_completed():
 
         fresh = AgentSessionRepository(session).get(sess_view.id)
         assert fresh.state == "completed"
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# The post-interview follow-up, stored as a real message.
+#
+# The completion notice above it (report ready + download link) is rendered by
+# the client from the agent_sessions row and deliberately has no message row.
+# This is the other thing: Saarthi taking a conversational turn, so it has to
+# survive a reload and reach the next agent as history.
+# ---------------------------------------------------------------------------
+
+
+def _transcript(session, conv_id):
+    """(content, agent_id, agent_session_id) per message, in transcript order."""
+    return session.execute(text(
+        "SELECT content, agent_id, agent_session_id FROM conversation_messages "
+        "WHERE conversation_id = :cid ORDER BY seq"
+    ), {"cid": conv_id}).fetchall()
+
+
+def test_a_completed_interview_asks_the_user_what_else_they_need():
+    """...and asks it BELOW the agent's closing line, not above it.
+
+    seq orders the transcript, and _finalize runs at step 10 -- before step 11
+    inserts the reply that triggered it. Writing the follow-up from inside
+    _finalize would put "anything else?" ahead of "Thank you, your story is
+    complete."
+    """
+    session = SessionLocal()
+    try:
+        agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
+        user = _new_user(token="the-real-token")
+        conv_id = _new_conversation(session, user=user)
+        _session_ready_for_finalizing(session, conv_id, agent_id)
+        session.commit()
+
+        agent = _remote_agent(agent_id)
+        orch = OrchestrationService(
+            session=session,
+            registry=_FakeRegistry(agent),
+            handler_factory=_FakeHandlerFactory(_FakeTerminalHandler()),
+            llm_factory=None,
+            router_service=_FakeRouter(agent),
+            mitra_rest=_FakeMitraRest([]),
+            mitra_sessions=_FakeMitraSessions([]),
+        )
+
+        from app.services.orchestration import SESSION_FOLLOW_UP, TurnInput
+        orch.handle_turn(TurnInput(
+            request_id="req-1", conversation_id=conv_id, user=user, text="last answer",
+        ))
+        session.commit()
+
+        rows = _transcript(session, conv_id)
+        assert [r[0] for r in rows] == [
+            "last answer",
+            "Thank you, your story is complete.",
+            SESSION_FOLLOW_UP,
+        ]
+
+        follow_up = rows[-1]
+        assert follow_up[1] == agent_id, (
+            "ck_conversation_messages_assistant_attribution allows no anonymous "
+            "assistant row, and naming the session's own agent keeps the flow "
+            "breadcrumb unchanged -- distinct_agent_sequence collapses the repeat"
+        )
+        assert follow_up[2] is None, (
+            "tagging it with the session would make the client anchor the completion "
+            "notice AFTER it, putting the Download PDF link below the follow-up"
+        )
+    finally:
+        session.close()
+
+
+def test_a_repeated_forced_finalize_does_not_ask_twice():
+    """POST /api/sessions/{id}/finalize is idempotent by design (§10.2): the
+    second call loses the claim and reads the completed session back. Only the
+    call that actually finalised may speak, or every repeat appends another
+    "anything else?" to the transcript."""
+    session = SessionLocal()
+    try:
+        agent_id = _insert_agent_row(session, f"agent_{uuid.uuid4().hex[:8]}")
+        user = _new_user()
+        conv_id = _new_conversation(session, user=user)
+        sess_view = _session_ready_for_finalizing(session, conv_id, agent_id)
+        session.commit()
+
+        agent = _remote_agent(agent_id)
+        rest = _FakeMitraRest([])
+        orch = OrchestrationService(
+            session=session, registry=_FakeRegistry(agent), handler_factory=None,
+            llm_factory=None, mitra_rest=rest, mitra_sessions=_FakeMitraSessions([]),
+        )
+
+        from app.services.orchestration import SESSION_FOLLOW_UP
+        first = orch.finalize_now(sess_view.id, user)
+        second = orch.finalize_now(sess_view.id, user)
+        session.commit()
+
+        assert first.state == "completed"
+        assert second.state == "completed", "the repeat still reports the real state"
+        assert len(rest.finalize_calls) == 1, "the claim guard itself must still hold"
+
+        contents = [r[0] for r in _transcript(session, conv_id)]
+        assert contents.count(SESSION_FOLLOW_UP) == 1
     finally:
         session.close()
