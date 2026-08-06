@@ -128,3 +128,193 @@
         animation: none;
     }
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * Collapsible CHAT HISTORY section.
+ *
+ * The HEADER is not styled here at all. ChatHistorySection reuses
+ * .advanced-toggle / .advanced-toggle-left / .advanced-title /
+ * .advanced-subtitle straight out of style.css, so the two section headers are
+ * identical by construction -- including the chevron rotation, which is driven
+ * by the attribute selector `.advanced-toggle[aria-expanded="false"] .chevron`
+ * and therefore matches the moment the class and the attribute are both
+ * present. That coupling is safe in the direction that matters: those rules
+ * live in style.css, which the byte-for-byte parity gate freezes, so they
+ * cannot drift out from under this section.
+ *
+ * EVERY RULE BELOW THAT NAMES AN .advanced-* CLASS IS SCOPED under
+ * .chat-history-section, and must stay that way. root.css is imported AFTER
+ * style.css (src/main.jsx), so an unscoped `.advanced-toggle-left { ... }`
+ * here would silently restyle the Advanced panel too. The ONE deliberate
+ * exception is the `.advanced-section` rule at the bottom of this block, which
+ * exists precisely to change the Advanced panel -- see the comment there.
+ *
+ * Only the collapse GEOMETRY is new, and it has to be: .advanced-content
+ * collapses via `max-height: 1500px -> 0`, but useRecentConversations caps the
+ * list at MAX_ROWS = 20 and a full list is ~1850px, so reusing that class
+ * would clip the oldest rows with no visible cause. This uses the grid
+ * `1fr -> 0fr` technique instead -- the same one style.css already uses for
+ * the workflow banner, which has no height ceiling. It does NOT reuse that
+ * banner's .collapsible-inner either: that carries `padding: 0 20px 10px 20px`
+ * and would inset every conversation row off the rail.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * No `margin-top: auto` here, unlike .advanced-section. Only ONE element can
+ * usefully claim the rail's free space, and .chat-history-placeholder
+ * (`flex: 1 0 auto`) already does -- it pushes this section and Advanced down
+ * as a pair, in every combination of their collapsed states.
+ */
+.chat-history-section {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    border-top: 1px solid var(--border-color);
+    padding-top: 16px;
+}
+
+/* `flex-shrink: 0` mirrors .advanced-content: this is a flex item of
+ * .chat-history-section, and nothing in the rail may compress -- a long list
+ * overflows into .sidebar's scrollbar instead. */
+.chat-history-content {
+    display: grid;
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transition: grid-template-rows 0.3s ease, opacity 0.3s ease;
+    flex-shrink: 0;
+}
+
+.chat-history-content.collapsed {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    pointer-events: none;
+}
+
+/*
+ * `overflow: hidden` is what actually clips at 0fr -- without it the grid item
+ * keeps its automatic min-content size and nothing collapses. Safe to add a
+ * new block formatting context here: style.css's `* { margin: 0; padding: 0 }`
+ * reset means .agent-list has no margins that were relying on collapsing.
+ *
+ * Deliberately NO padding (that is .collapsible-inner's trap), NO `gap` (it
+ * would stack on .agent-list's own 12px), and NO `overflow-y: auto` or
+ * max-height -- .sidebar is the rail's only scroll container, which is the
+ * same decision style.css already made with `.agent-list { overflow-y: visible }`.
+ */
+.chat-history-inner {
+    overflow: hidden;
+    min-height: 0;
+}
+
+/*
+ * 320px insurance. The rail narrows to 320px under the single
+ * `@media (max-width: 768px)` block, leaving ~240px inside the toggle once its
+ * padding and the 16px chevron are accounted for. The current copy fits with
+ * room to spare, but .advanced-toggle-left is a flex column with no
+ * `min-width: 0`, so longer copy would push the chevron out of the button
+ * rather than wrap. Scoped, so the Advanced header keeps its exact behaviour.
+ */
+.chat-history-section .advanced-toggle-left {
+    min-width: 0;
+}
+
+.chat-history-section .advanced-title,
+.chat-history-section .advanced-subtitle {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/*
+ * Scoped to this section only. Advanced and the workflow banner do not honour
+ * reduced motion today; widening it to them would change shipped chrome, which
+ * is a separate decision from adding a new section. The three-class selector
+ * is what beats `.advanced-toggle .chevron` in style.css.
+ */
+@media (prefers-reduced-motion: reduce) {
+    .chat-history-content {
+        transition: none;
+    }
+
+    .chat-history-section .advanced-toggle .chevron {
+        transition: none;
+    }
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Closing the gap between the two panels, so they read as one stacked group
+ * rather than two unrelated blocks.
+ *
+ * Three separate things contributed it, and all three are cancelled here:
+ *
+ *   16px  .advanced-toggle's own `margin-bottom`, which is pure dead space
+ *         once the content below it has collapsed to zero height. Scoped to
+ *         .chat-history-section.collapsed, so the Advanced panel keeps the
+ *         identical dead margin it has always had when collapsed.
+ *
+ *   16px  .advanced-section's `padding-top`, plus its `border-top` divider.
+ *         Both are dropped: .chat-history-section now carries the border that
+ *         marks the top of the GROUP, and a second rule between the two pills
+ *         is what made them look like separate regions. This is the one
+ *         deliberately unscoped .advanced-* rule in this file -- it changes the
+ *         real Advanced panel, which is the point. `margin-top: auto` is left
+ *         untouched: it is the fallback that pins the group to the bottom of
+ *         the rail if .chat-history-placeholder ever stops growing.
+ *
+ *   14px  .sidebar's flex `gap` is deliberately KEPT. It is the rhythm between
+ *         the two toggle pills, and matching it to the gap elsewhere in the
+ *         rail is what makes the group look intentional rather than crushed.
+ * ---------------------------------------------------------------------------
+ */
+.chat-history-section.collapsed .advanced-toggle {
+    margin-bottom: 0;
+}
+
+/*
+ * style.css gives .advanced-toggle `transition: all 0.2s ease`, so without
+ * this the margin above would tween over 0.2s while the grid rows tween over
+ * 0.3s -- a visible two-stage collapse. Naming the properties that should
+ * animate drops margin from the list. Scoped, so Advanced is unaffected.
+ */
+.chat-history-section .advanced-toggle {
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.advanced-section {
+    border-top: none;
+    padding-top: 0;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Brand mark.
+ *
+ * .brand-icon's tinted rounded square and `color: var(--primary-color)` exist
+ * to carry the single-colour STROKED compass icon this replaced. A
+ * multicolour mark on a purple wash just reads as muddy, so the tint goes and
+ * the 46px slot stays -- nothing else in the card shifts.
+ *
+ * The dark-mode override needs the same [data-theme="dark"] specificity as the
+ * rule it beats in style.css; root.css loads later, so an equal-specificity
+ * selector is enough.
+ * ---------------------------------------------------------------------------
+ */
+.brand-icon {
+    background: none;
+}
+
+[data-theme="dark"] .brand-icon {
+    background: none;
+}
+
+/* The slot is a 46px centred flex box; the mark fills it and keeps its aspect
+ * ratio, so a replacement file that is not perfectly square still sits right. */
+.brand-logo {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
