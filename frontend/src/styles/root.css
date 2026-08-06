@@ -5,6 +5,141 @@
  */
 
 /*
+ * ---------------------------------------------------------------------------
+ * Application font -- Source Sans 3 everywhere.
+ *
+ * style.css names two families of its own: 'Inter' on `body` (line ~63) and
+ * 'Public Sans' on `.brand-text h1` (line ~191). It is frozen byte-for-byte by
+ * the parity gate, so both are overridden from here instead.
+ *
+ * Three selectors, each doing something the others cannot:
+ *
+ *   *          Form controls (<input>, <textarea>, <button>) do not inherit
+ *              font-family from body by UA default. style.css already fixes
+ *              the five it knows about with `font-family: inherit`, but the
+ *              universal selector covers any control added later too.
+ *
+ *   body       `*` has specificity 0,0,0 and loses to style.css's `body`
+ *              (0,0,1), so the element rule is re-stated explicitly.
+ *
+ *   .brand-text h1
+ *              Same story at 0,1,1 -- the wordmark keeps its own family
+ *              otherwise. Its size/weight/letter-spacing/uppercase are left
+ *              alone; only the face changes.
+ *
+ * Source Sans 3 is a variable face covering 200-900, so the weights style.css
+ * asks for (400/500/600/700) all resolve to real instances rather than
+ * synthesised bold -- index.html requests that full range.
+ * ---------------------------------------------------------------------------
+ */
+*,
+*::before,
+*::after {
+    /* font-family: "Comfortaa", sans-serif; */
+    font-family: "Source Sans 3", sans-serif !important;
+}
+
+body {
+    /* font-family: "Comfortaa", sans-serif; */
+    font-family: "Source Sans 3", sans-serif !important;
+}
+
+.brand-text h1 {
+    /* font-family: "Comfortaa", sans-serif; */
+    font-family: "Source Sans 3", sans-serif !important;
+}
+
+/*
+ * Code stays monospace.
+ *
+ * This rule only exists because of the `!important` above. Without it, the
+ * `*` rule beats `.message-content code` (style.css line ~878) no matter the
+ * specificity -- an important declaration outranks a normal one outright -- so
+ * inline code spans would silently lose 'IBM Plex Mono' and render in the body
+ * face. That is shipped behaviour and a legibility choice about aligned
+ * characters, so it is restored here at equal weight.
+ *
+ * Delete this block if code SHOULD render in Source Sans 3.
+ */
+.message-content code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace !important;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Minimum font size -- nothing renders below 15px.
+ *
+ * CSS has no `min-font-size` property, so the floor is applied by re-declaring
+ * every rule that sat under it. The list below is exhaustive as of this commit:
+ * every `font-size` in style.css and root.css was enumerated and converted to
+ * px (the rem base is the 16px browser default -- style.css sets no `html`
+ * font-size -- so 1rem = 16px and 15px = 0.9375rem), and everything that
+ * computed under 15px is here. Nothing sits between these and the floor.
+ *
+ * Sizes AT OR ABOVE 15px are deliberately left alone, since this is a floor and
+ * not a resize: .capability-title / .highlight-desc-title (0.95rem = 15.2px),
+ * #user-input (16px), .message-content h1-h4 (1.05rem = 16.8px) and
+ * .brand-text h1 (1.125rem = 18px) all keep their shipped values.
+ *
+ * Selectors are copied VERBATIM from style.css, including the two-class ones,
+ * so each matches the specificity of the rule it replaces -- root.css is
+ * imported second (src/main.jsx), so equal specificity wins on source order.
+ * No !important here: unlike font-family above, nothing needs to be beaten
+ * across a specificity boundary. Keep it that way -- a font-size !important
+ * would make these impossible to tune per-component later.
+ *
+ * NOTE ON REM: these are px, not rem, on purpose. A floor expressed in rem
+ * would scale with the root font size and stop being a 15px floor the moment
+ * anything sets one.
+ * ---------------------------------------------------------------------------
+ */
+
+/* Sidebar: brand block, status/meta rows, section headers */
+.brand-text p,
+.status-row,
+.meta-row,
+.advanced-title,
+.advanced-subtitle,
+.capabilities-label,
+.mobile-sidebar-title,
+/* Capability + highlight cards */
+.capability-desc,
+.capability-badge,
+.capability-action-btn,
+.highlight-desc,
+/* Agent list */
+.agent-name,
+.agent-desc,
+/* Workflow banner + context chrome */
+.workflow-title-text,
+.workflow-stop-text,
+.context-pill,
+.context-banner-desc,
+.breadcrumb-item,
+/* Messages */
+.message-content,
+.message-meta,
+.context-switch .message-content,
+/* Composer + in-message actions */
+#send-btn,
+.option-btn,
+.retry-btn,
+.message-content a.report-link,
+.message-content a.report-link:visited {
+    font-size: 15px;
+}
+
+/*
+ * `.message-content code` is the one relative size in the app: style.css sets
+ * `0.9em`, which resolved against .message-content's old 14px to 12.6px. With
+ * the parent now at 15px it would still be 13.5px -- under the floor -- so it
+ * is pinned outright rather than left relative.
+ */
+.message-content code {
+    font-size: 15px;
+}
+
+/*
  * THE ONE RULE THAT MAKES THE LAYOUT WORK.
  *
  * style.css builds its height chain as:
@@ -46,7 +181,10 @@
     margin-left: auto;
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
-    font-size: 0.55rem;
+    /* Was 0.55rem (8.8px) -- raised to the 15px floor. This pill is uppercase
+       with letter-spacing and sits in a flex row, so it is the widest thing
+       the floor affected; see the min-font-size block above. */
+    font-size: 15px;
     font-weight: 700;
     letter-spacing: 0.05em;
     padding: 2px 5px;
@@ -103,7 +241,8 @@
     border: 1px solid var(--border-color);
     border-radius: 12px;
     color: var(--text-secondary);
-    font-size: 0.78rem;
+    /* Was 0.78rem (12.48px) -- raised to the 15px floor. */
+    font-size: 15px;
     line-height: 1.4;
     cursor: pointer;
     animation: sidebar-toast-in 0.2s ease;
@@ -317,4 +456,127 @@
     width: 100%;
     height: 100%;
     object-fit: contain;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Chat colour scheme -- cream / deep purple / forest green.
+ *
+ * Most of the reference palette was already shipped: --bg-color (#f6f3ee), the
+ * white .chat-window-card, the white .active-context-banner, the purple
+ * #send-btn and .message-avatar, and the mint .breadcrumb-item.active with its
+ * pulsing #1e5c43 dot are all untouched here because they already match.
+ *
+ * Only three elements differed, and only their COLOURS change -- no markup, no
+ * geometry beyond the one radius adjustment change 3 forces. Every value below
+ * is a token style.css already uses (#4e2277, #1e5c43, #f6f3ee, #e3dcd1);
+ * nothing new is invented.
+ *
+ * LIGHT THEME ONLY, by decision. Dark mode is unreachable from the UI -- its
+ * toggle is commented out of the markup and ChatPage.jsx only boot-READS a
+ * stored preference -- so it is deliberately left exactly as shipped rather
+ * than half-migrated. Change 1 is what makes that scoping real; see below.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * 1. User bubble -- solid purple, white text (was a 12% wash with dark text).
+ *
+ * These two custom properties are read in exactly ONE place, style.css:805-806
+ * (`.user .message-content`), so redefining them is surgical: no other rule
+ * changes as a side effect.
+ *
+ * `:not([data-theme="dark"])` IS LOAD-BEARING -- do not simplify it to `:root`.
+ * A bare `:root` is specificity (0,1,0), identical to `[data-theme="dark"]` in
+ * style.css, and root.css is imported second (src/main.jsx) -- so it would win
+ * against the DARK palette too and paint a solid light-purple bubble onto the
+ * dark background. The :not() raises this to (0,2,0) AND confines it to light.
+ */
+:root:not([data-theme="dark"]) {
+    --message-user: #4e2277;
+    --message-user-text: #ffffff;
+}
+
+/*
+ * 2. ...and the timestamp inside it. Forced by change 1, not a separate choice:
+ * .message-meta is var(--text-secondary) (#6e665e), which on #4e2277 is dark
+ * grey on dark purple. (0,1,1) beats style.css's `.message-meta` (0,1,0).
+ * Scoped to the same light-only condition so dark mode keeps its grey meta.
+ */
+:root:not([data-theme="dark"]) .user .message-meta {
+    color: rgba(255, 255, 255, 0.72);
+}
+
+/*
+ * 3. Agent + system bubbles -- forest-green left bar.
+ *
+ * Fill and hairline border are already right (style.css:810-820 hardcodes
+ * #f6f3ee / #e3dcd1); only the left edge is new. #1e5c43 is reused verbatim
+ * from `.breadcrumb-item.active .breadcrumb-dot`, so the accent green is one
+ * value across the whole interface rather than two near-identical greens.
+ *
+ * The bar follows the corner radius rather than squaring off against it -- the
+ * reference shows the green sweeping around the top-left and bottom-left, which
+ * is just what a thick border on a rounded box does. An earlier revision here
+ * squared those two corners to 6px; that was wrong and is not coming back.
+ */
+:root:not([data-theme="dark"]) .agent .message-content,
+:root:not([data-theme="dark"]) .system .message-content {
+    border-left: 4px solid #1e5c43;
+}
+
+/*
+ * 3b. Bubble silhouette -- 14px, uniform.
+ *
+ * style.css sets `border-radius: 20px` on .message-content plus a
+ * `border-bottom-right-radius: 4px` notch on the user bubble (the classic
+ * "speech tail" corner). The reference has neither: its corners are tighter
+ * and all four match, on both speakers. The notch override needs (0,2,0) to
+ * beat `.user .message-content`, which the :root:not() prefix already gives.
+ */
+:root:not([data-theme="dark"]) .message-content {
+    border-radius: 14px;
+}
+
+:root:not([data-theme="dark"]) .user .message-content {
+    border-bottom-right-radius: 14px;
+}
+
+/*
+ * 4. Composer -- warm-grey fill, hairline border (was white with a 2px purple
+ * border). Same #f6f3ee / #e3dcd1 pair as the agent bubble above.
+ *
+ * The 2px -> 1px border does NOT shift the composer's height: style.css:55
+ * sets `* { box-sizing: border-box }`, so `min-height: 52px` measures the outer
+ * box either way and only the content area gains the 2px.
+ *
+ * #user-input:focus is deliberately NOT touched -- the purple ring is the
+ * accessible focus affordance, and no reference frame shows a focused field.
+ * It simply renders at 1px now.
+ */
+:root:not([data-theme="dark"]) #user-input {
+    background: #f6f3ee;
+    border: 1px solid #e3dcd1;
+}
+
+/*
+ * 5. User avatar, on the right.
+ *
+ * `.message` is already `display: flex` with `gap: 12px` (style.css:739-743),
+ * and Message.jsx emits the avatar AFTER .message-body for user rows, so the
+ * row mirrors the agent's without any order/row-reverse trickery. This rule
+ * only stops the 28px box from being squeezed by a long bubble and pins it to
+ * the top, level with the first line -- matching the bot side.
+ */
+.message.user .message-avatar {
+    align-self: flex-start;
+}
+
+/*
+ * The avatar column is new on user rows, so the bubble now shares the row with
+ * a 28px box plus the 12px flex gap. Without this, a long user message keeps
+ * its old 78% and the pair overflows the 78% envelope by 40px.
+ */
+.message.user {
+    max-width: calc(78% + 40px);
 }

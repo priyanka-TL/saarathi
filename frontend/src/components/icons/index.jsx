@@ -132,6 +132,22 @@ export const BotIcon = () => (
   </svg>
 );
 
+/**
+ * The user's counterpart to BotIcon, on the RIGHT of their own messages.
+ *
+ * The one icon here whose geometry is NOT copied from the Flask templates --
+ * the original never rendered an avatar on user messages, so there was nothing
+ * to copy. Drawn to match BotIcon: same 24x24 grid, same 28px box, same
+ * `stroked` set, so the two columns align and both follow --primary-color.
+ */
+export const UserIcon = () => (
+  <svg {...stroked} width="28" height="28">
+    <circle cx="12" cy="12" r="10" />
+    <circle cx="12" cy="10" r="3" />
+    <path d="M6.17 18.849A4 4 0 0 1 10 16h4a4 4 0 0 1 3.83 2.849" />
+  </svg>
+);
+
 /** Injected next to each entry in the manual agent list (AGENT_ICON_SVG). */
 export const AgentIcon = () => (
   <svg {...stroked} width="16" height="16">
