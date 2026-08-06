@@ -118,7 +118,6 @@ body {
 .breadcrumb-item,
 /* Messages */
 .message-content,
-.message-meta,
 .context-switch .message-content,
 /* Composer + in-message actions */
 #send-btn,
@@ -495,6 +494,27 @@ body {
 :root:not([data-theme="dark"]) {
     --message-user: #4e2277;
     --message-user-text: #ffffff;
+
+    /*
+     * Page background: neutral #f7f7f7, replacing the warm cream #f6f3ee.
+     *
+     * Overriding the VARIABLE rather than `body` carries the change to all
+     * four consumers at once -- body (style.css:64), .sidebar (:98),
+     * .capability-action-btn (:412) and .mobile-menu-btn.standalone (:1033).
+     * Those three read var(--bg-color) precisely so they match the page; a
+     * `body { background: ... }` rule here would have left them warm against
+     * a neutral page.
+     *
+     * The two OTHER #f6f3ee uses are intentionally left alone, because they
+     * are bubble/field fills rather than the page: the agent + system bubble
+     * (style.css:812/819) and the composer (change 4 below). Both sit on the
+     * WHITE .chat-window-card, not on the page, so their contrast is measured
+     * against #ffffff and is unaffected by this.
+     *
+     * The body's 3%-black grid overlay is untouched and still reads on the
+     * slightly lighter ground.
+     */
+    --bg-color: #f7f7f7;
 }
 
 /*
