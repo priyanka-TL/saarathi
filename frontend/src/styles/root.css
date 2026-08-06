@@ -115,7 +115,7 @@ body {
 .workflow-stop-text,
 .context-pill,
 .context-banner-desc,
-.breadcrumb-item,
+/* .breadcrumb-item, */
 /* Messages */
 .message-content,
 .context-switch .message-content,
@@ -511,10 +511,97 @@ body {
      * WHITE .chat-window-card, not on the page, so their contrast is measured
      * against #ffffff and is unaffected by this.
      *
-     * The body's 3%-black grid overlay is untouched and still reads on the
-     * slightly lighter ground.
+     * The body's 3%-black grid overlay used to be left untouched here -- it no
+     * longer is; see 1c below, which removes it and supersedes this note.
      */
     --bg-color: #f7f7f7;
+}
+
+/*
+ * 1b. Grid overlay removed -- flat #f7f7f7, no dot/line pattern.
+ *
+ * `body` carries background-COLOUR (var(--bg-color), just set to #f7f7f7
+ * above) and a separate background-IMAGE: two 1px linear-gradients tiled
+ * 24px, which is what renders as the faint grid (style.css:65-69). This turns
+ * the image off and leaves the colour alone -- `background-image: none`,
+ * not `background: #f7f7f7`, so a shorthand reset can't accidentally drop
+ * back to a browser-default transparent and reveal `html`'s white through
+ * `body`'s own background-color, which stays exactly var(--bg-color).
+ *
+ * One `body` rule is enough for the whole page: the sidebar's now-opaque
+ * #ffffff (1b, above) already masked this same grid under the rail, so this
+ * rule is the only other place it could still show -- the gap around and
+ * below .chat-window-card on the right, which is exactly what was asked.
+ */
+:root:not([data-theme="dark"]) body {
+    background-image: none;
+}
+
+/*
+ * 1c. Sidebar fill -- pinned to #ffffff, diverging from the page.
+ *
+ * .sidebar reads var(--bg-color) (style.css:98) BECAUSE it is meant to match
+ * the page, and did, until now -- this is the one deliberate exception. Fixing
+ * it here as a literal, rather than adding a second variable, keeps the other
+ * three var(--bg-color) consumers (body :64, .capability-action-btn :412,
+ * .mobile-menu-btn.standalone :1033) on #f7f7f7 exactly as change 1 intends;
+ * none of them were asked to change.
+ *
+ * Every card already inside the sidebar (.brand-card, .advanced-toggle,
+ * .capability-card, .highlight-card, .agent-item) is var(--card-bg), which is
+ * ALSO #ffffff (style.css:4) -- so this does not introduce white-on-white; it
+ * REMOVES the grey that used to separate the rail from its cards, which is
+ * consistent with why every card keeps its 1px var(--border-color) outline
+ * regardless.
+ *
+ * `@media (min-width: 769px)` GUARDS THE MOBILE DRAWER. Below 768px style.css
+ * turns .sidebar into a fixed slide-in panel on `var(--panel-bg-strong)`
+ * (95% white -- a deliberate near-opaque scrim, not the rail colour). Without
+ * this guard, `:root .sidebar` at (0,2,0) would outrank that rule regardless
+ * of the media query and flatten the drawer's translucency to full opaque --
+ * a real, if 5%, divergence from a DIFFERENT shipped design than the one this
+ * change targets.
+ */
+@media (min-width: 769px) {
+    :root:not([data-theme="dark"]) .sidebar {
+        background: #ffffff;
+    }
+}
+
+/*
+ * 1d. Sidebar width -- 1/4 of the window on desktop (was a fixed 360px).
+ *
+ * style.css:96 sets `width: 360px` with `flex-shrink: 0` and no `flex`
+ * shorthand -- so flex-basis stays `auto`, which per spec resolves to the
+ * `width` property. Overriding width alone is therefore enough; flex-shrink:0
+ * does not need restating.
+ *
+ * `width: 25%`, NOT `25vw`. `.sidebar` and `.chat-container` (flex: 1,
+ * style.css:581) are the only two children of `.app-container`, itself
+ * `width: 100vw` (style.css:83) -- so today the two units are numerically
+ * identical. `%` is still the correct one: it resolves against the FLEX
+ * CONTAINER'S content box, so the split stays exactly 1/4 - 3/4 if
+ * `.app-container` is ever not full-viewport (embedded, a future max-width
+ * cap, etc), where `vw` would silently stop matching the container and throw
+ * the ratio off.
+ *
+ * No theme scoping and no `:not([data-theme="dark"])` -- layout, unlike every
+ * change above it in this file, does not vary by theme, so there is nothing
+ * to exclude dark mode from.
+ *
+ * Same `@media (min-width: 769px)` guard as 1c, and for the same reason: below
+ * 768px `.sidebar` is style.css's fixed-320px slide-in drawer (:1093), a
+ * different layout mode entirely -- "1/4 of the window" was scoped to
+ * desktop, and an unguarded rule would also resize that drawer.
+ *
+ * NOT capped. On a very wide desktop monitor 25% is a wide rail (e.g. 860px
+ * at 3440px). No max-width was requested here, so none is added -- add one
+ * (e.g. `max-width: 480px`) if that reads too wide once you see it.
+ */
+@media (min-width: 769px) {
+    .sidebar {
+        width: 25%;
+    }
 }
 
 /*
@@ -528,12 +615,23 @@ body {
 }
 
 /*
- * 3. Agent + system bubbles -- forest-green left bar.
+ * 3. Agent + system bubbles -- #f7f7f7 fill, forest-green left bar.
  *
- * Fill and hairline border are already right (style.css:810-820 hardcodes
- * #f6f3ee / #e3dcd1); only the left edge is new. #1e5c43 is reused verbatim
- * from `.breadcrumb-item.active .breadcrumb-dot`, so the accent green is one
- * value across the whole interface rather than two near-identical greens.
+ * THE FILL IS SET HERE, ON BOTH SELECTORS AT ONCE, ON PURPOSE.
+ *
+ * style.css declares the two bubble kinds as separate rules (:810 and :817)
+ * that happen to carry the same colour, and they had already drifted apart --
+ * .agent was on #f7f7f7 while .system was still on the old cream #f6f3ee. That
+ * is not a rare edge case: Message.jsx renders EVERY non-'agent' kind with the
+ * `system` class, so the completion notice, the report-link row, the finalizing
+ * spinner and the error rows all take the .system branch and were all cream
+ * while ordinary replies were grey. Restating the fill on the combined
+ * selector makes the pair impossible to split again, and it is why this rule
+ * -- not style.css -- is the place to change the bubble colour from now on.
+ *
+ * #1e5c43 is reused verbatim from `.breadcrumb-item.active .breadcrumb-dot`,
+ * so the accent green is one value across the whole interface rather than two
+ * near-identical greens.
  *
  * The bar follows the corner radius rather than squaring off against it -- the
  * reference shows the green sweeping around the top-left and bottom-left, which
@@ -542,6 +640,7 @@ body {
  */
 :root:not([data-theme="dark"]) .agent .message-content,
 :root:not([data-theme="dark"]) .system .message-content {
+    background: #f7f7f7;
     border-left: 4px solid #1e5c43;
 }
 
