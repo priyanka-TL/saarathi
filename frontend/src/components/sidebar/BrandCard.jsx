@@ -1,4 +1,5 @@
-import { CompassIcon, InfoIcon } from '../icons';
+import { InfoIcon } from '../icons';
+import BrandLogo from './BrandLogo';
 
 /**
  * The header card. Static.
@@ -12,7 +13,7 @@ export default function BrandCard() {
     <div className="brand-card">
       <div className="brand-left">
         <div className="brand-icon">
-          <CompassIcon />
+          <BrandLogo />
         </div>
         <div className="brand-text">
           <h1>Saarthi</h1>
