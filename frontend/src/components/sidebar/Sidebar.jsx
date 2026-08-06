@@ -3,7 +3,7 @@ import Toast from '../common/Toast.jsx';
 import { CloseIcon, PlusIcon } from '../icons';
 import AdvancedSection from './AdvancedSection';
 import BrandCard from './BrandCard';
-import RecentConversationList from './RecentConversationList';
+import ChatHistorySection from './ChatHistorySection';
 
 /**
  * The left rail.
@@ -12,9 +12,11 @@ import RecentConversationList from './RecentConversationList';
  * RIGHT (`right: -100%` -> `right: 0`), which is unusual enough to be worth
  * stating -- the markup order is unchanged, the CSS does all of it.
  *
- * `.chat-history-placeholder` is the flex spacer that pushes the Advanced
- * section to the bottom; it must keep wrapping the New Chat button and the
- * recent list.
+ * `.chat-history-placeholder` is the flex spacer (`flex: 1 0 auto`) that
+ * absorbs the rail's free space, which is what pushes the two collapsible
+ * panels to the bottom as a pair. It now wraps the New Chat button ALONE --
+ * the recent list moved into ChatHistorySection below it -- but it still has
+ * to be here and still has to grow, or Advanced unpins from the bottom.
  */
 export default function Sidebar({
   open,
@@ -80,13 +82,14 @@ export default function Sidebar({
           <PlusIcon />
           New Chat
         </button>
-        <RecentConversationList
-          conversations={conversations}
-          activeId={activeConversationId}
-          onSelect={onSelectConversation}
-          disabled={isBusy()}
-        />
       </div>
+
+      <ChatHistorySection
+        conversations={conversations}
+        activeId={activeConversationId}
+        onSelect={onSelectConversation}
+        disabled={isBusy()}
+      />
 
       <AdvancedSection
         capabilities={capabilities}
