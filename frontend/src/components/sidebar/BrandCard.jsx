@@ -17,7 +17,7 @@ export default function BrandCard() {
         </div>
         <div className="brand-text">
           <h1>Saarthi</h1>
-          <p>Agentic AI Orchestrator</p>
+          <p>Helping You Every Step of the Way</p>
         </div>
       </div>
       <div className="brand-right">
