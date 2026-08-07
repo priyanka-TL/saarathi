@@ -1,3 +1,8 @@
+"""Web and video search tools.
+
+Responsible for: the two DuckDuckGo-backed tools an LLM agent may call.
+Used by: registered on import; resolved by name from a spec's `tools:` list.
+"""
 from langchain_core.tools import tool
 from ddgs import DDGS
 from app.tools.registry import registry

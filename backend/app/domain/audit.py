@@ -1,3 +1,8 @@
+"""Audit DTOs.
+
+Responsible for: the shape of an audit-log entry.
+Used by: AuditLogRepository.
+"""
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any

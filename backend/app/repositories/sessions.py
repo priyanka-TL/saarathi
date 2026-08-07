@@ -1,3 +1,12 @@
+"""Persistence for `agent_sessions`.
+
+Responsible for: the guarded UPDATEs behind every session state change.
+Used by: SessionService, which owns the state machine over them.
+
+The conditional UPDATEs are the concurrency control: matching zero rows means
+another request already moved the session, and the caller must treat that as a
+lost race rather than retrying.
+"""
 import uuid
 from datetime import datetime
 from typing import Optional, Iterable, List

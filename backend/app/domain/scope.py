@@ -1,15 +1,9 @@
-"""Tenant/organization scoping -- the one declaration of the default sentinel.
+"""Tenant/organization scoping.
 
-`DEFAULT_SCOPE` used to be declared independently in five modules
-(app/models/orm.py, app/services/agent_registry.py, app/services/capability_seed.py,
-app/services/capability_service.py, app/routers/admin_config.py) and the
-"fall back to the default scope" rule was spelled two different ways across five
-call sites. Five copies of a sentinel that every scoped query compares against is
-five chances for one of them to drift.
+Responsible for: the DEFAULT_SCOPE sentinel and the two ways to derive a scope.
+Used by: repositories, services, routers and the ORM column defaults.
 
-This module is pure -- it imports nothing from the rest of `app` -- so every
-layer, including `app.domain` itself and the ORM, can depend on it without
-breaking the `domain_pure` import-linter contract.
+Pure, so every layer including app.domain itself can import it.
 """
 from __future__ import annotations
 

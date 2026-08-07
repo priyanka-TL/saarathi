@@ -1,35 +1,23 @@
 """Speech-to-text and text-to-speech.
 
-THREE ENDPOINTS, AND THE CHAT PIPELINE IS UNTOUCHED. Transcription produces text
-that the user reviews in the composer and then sends through the normal
-`/api/chat`; synthesis consumes text that pipeline already produced. Nothing
-here reaches `OrchestrationService`, so `/api/chat`'s pinned contract and its
-characterisation fixtures are unaffected.
+Responsible for: validating voice requests and mapping integration failures to
+status codes. The workflow lives in app/services/voice_service.py.
+Used by: the SPA's mic and speaker controls, when VOICE_ENABLED=1.
 
-THE UPLOAD FLOW, and why it has three steps:
+THE CHAT PIPELINE IS UNTOUCHED. A transcript lands in the composer for the user
+to review and is only then sent through the normal /api/chat, so that contract
+and its fixtures are unaffected.
+
+THE UPLOAD FLOW HAS THREE STEPS, because audio must not pass through this API:
+a worker thread here also holds a DB connection for the whole request, and
+uploads are the slowest, least predictable part of the cycle.
 
     POST /api/voice/upload-url   -> {uploadUrl, objectKey}
-    PUT  <uploadUrl>             -> the browser sends bytes straight to the bucket
+    PUT  <uploadUrl>             -> browser sends bytes straight to the bucket
     POST /api/voice/transcribe   -> {objectKey} -> transcript
 
-Audio does not pass through this API. Ten seconds of Opus is small, but a worker
-thread here also holds a database connection for the whole request
-(THREADPOOL_SIZE <= DB_POOL_SIZE), and uploads are the slowest and least
-predictable part of the cycle -- a user on hotel wifi would hold one for the
-duration. Mitra's frontend uploads to S3 the same way for the same reason.
-
-OBJECTS ARE ADDRESSED BY KEY, NOT BY URL. Mitra's `/api/asr/` takes `{s3Url}`
-and fetches whatever it is given, which needs an allowlist check to not be an
-SSRF primitive. A key names an object inside a bucket fixed by configuration, so
-there is no attacker-controlled destination at all. `VoiceService.owned_key`
-still checks that the key belongs to one of the caller's own conversations --
-otherwise the key would be a read primitive over other users' recordings.
-
-WHAT THIS MODULE DOES AND DOES NOT DO. The workflow -- fetch, transcribe, delete,
-translate -- lives in `app/services/voice_service.py`. What stays here is the
-mapping from a raised integration exception to a status code and an envelope,
-which is an HTTP decision and belongs in the API layer. Every route below is
-therefore a validate / delegate / map-errors sandwich.
+OBJECTS ARE ADDRESSED BY KEY, NEVER BY URL, so there is no attacker-controlled
+destination and SSRF is structurally impossible.
 """
 from __future__ import annotations
 

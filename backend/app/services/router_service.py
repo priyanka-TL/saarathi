@@ -1,10 +1,16 @@
-"""RouterService -- five gates, in order (design doc §6.2-§6.4).
+"""Agent routing: five gates, in order.
 
-Replaces app.agents.orchestrator.OrchestratorAgent's single-gate LLM
-classifier (which has a substring-collision bug at orchestrator.py:62-65) and
-app.services.config_mode_router's temporary stand-in (that module's own
-docstring says to delete it once this ships -- not done in this task, per
-explicit scope decision; this file is additive only).
+Responsible for: choosing which agent serves a turn.
+Used by: OrchestrationService, once per turn.
+
+    1 explicit selection from the UI
+    2 session pin        -- zero LLM calls
+    3 keyword pre-route  -- zero LLM calls
+    4 LLM classifier     -- the only gate that can fail
+    5 default            -- routing NEVER fails
+
+Gate 4 falling through to Gate 5 is why a router outage degrades rather than
+errors.
 """
 from dataclasses import dataclass
 from operator import itemgetter

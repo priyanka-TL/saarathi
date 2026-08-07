@@ -1,73 +1,18 @@
-"""The whole schema, in one file.
+"""The SQLAlchemy schema -- all nine tables.
 
-NINE TABLES, ONE MIGRATION EACH
--------------------------------
-`migrations/versions/0001`-`0009` create exactly one table apiece, in foreign
-key dependency order, and `0010` seeds the default catalogue. There are no
-ALTER migrations: this schema was built on a fresh database, so anything the
-old nine-migration history used to patch in later is simply part of the
-CREATE TABLE now. Keep it that way -- a new table gets a new numbered
-migration, and a column change gets one too, but neither should be folded into
-an existing file once it has been applied anywhere.
+Responsible for: the ORM mapping. The MIGRATIONS are the source of truth for
+what is actually in the database; this mirrors them.
+Used by: repositories, and Alembic's autogenerate comparison.
 
-THE AUDIT BLOCK
----------------
-Every table carries the same four columns:
+CHECK CONSTRAINTS ARE DECLARED WITH A BARE SUFFIX (`name="locale"`), here and in
+the migrations. The naming convention interpolates `%(constraint_name)s`, so a
+qualified name gets double-prefixed -- that is what produced
+`ck_conversations_ck_conversations_conv_locale`. uq/fk/pk/ix names are written
+out in full and used verbatim.
 
-    created_by / updated_by   the acting principal, as a STRING
-    created_at / updated_at   timestamptz, server-defaulted to now()
-
-`created_by`/`updated_by` are NOT foreign keys and never will be, for the same
-reason `tenant_code` and `tenant_id` are not: users are the user service's
-records, and these columns hold values that arrive as JWT claims. The vocabulary
-is small and deliberate:
-
-    UserContext.user_id   a user-initiated write (a turn, a conversation)
-    the admin's user_id   an admin route write
-    'system'              a machine write with no user behind it: the 0010 seed,
-                          idle sweeps, the boot-time capability seed. Also the
-                          server default, so a writer that forgets says
-                          something true rather than something wrong.
-
-On the two append-only tables (`conversation_messages`, `audit_logs`)
-`updated_at` always equals `created_at` and `updated_by` always equals
-`created_by`. They are present anyway: a uniform audit block that a reader can
-rely on without checking is worth more than four saved columns.
-
-THE DEFAULT SCOPE
------------------
-Every scoped row (`agents`, `agent_configs`, `capabilities`) carries `tenant_id`
-+ `organization_id`, NOT NULL, defaulting to the literal 'default'. A 'default'
-row is what every tenant sees until a more specific row exists, so onboarding a
-tenant needs no writes and shipping a capability to everyone is one insert.
-Resolution is most-specific-wins:
-
-    (tenant, org)  >  (tenant, 'default')  >  ('default', 'default')
-
-A sentinel string rather than NULL, deliberately: NULL would make every scope
-unique constraint a partial index (NULLs do not compare equal in Postgres) and
-every lookup an IS NOT DISTINCT FROM.
-
-CONSTRAINT NAMING
------------------
-`NAMING` below is applied by Alembic at `op.create_table()` time as well as by
-the ORM. For the "ck" key it interpolates `%(constraint_name)s`, which means a
-CHECK constraint's explicit name is treated as the SUFFIX and gets prefixed --
-so CHECKs are declared here and in the migrations with a BARE suffix
-(`"locale"`, not `"ck_conversations_locale"`) and render as
-`ck_conversations_locale` exactly once. The uq/fk/pk/ix conventions do not
-interpolate a constraint name, so those are written out in full and are used
-verbatim. Getting this backwards is what produced the previous schema's
-`ck_conversations_ck_conversations_conv_locale`.
-
-WHY SOME `agent_id` COLUMNS HAVE NO `ForeignKey()`
---------------------------------------------------
-`AgentSession.agent_id` and `ToolExecution.agent_id` are bare UUID columns here
-while the real FK is declared in their migrations. The two disagree on purpose:
-the migrations set `ondelete` policies (RESTRICT for a live session, SET NULL
-for a historical tool trace) that differ per table, and letting the ORM emit its
-own `ForeignKey()` would mean two places to keep in step. The migration is the
-one in force.
+SOME `agent_id` COLUMNS HAVE NO ForeignKey() here on purpose: their migrations
+set per-table `ondelete` policies, and letting the ORM emit its own would mean
+two places to keep in step. The migration is the one in force.
 """
 from datetime import datetime
 import enum

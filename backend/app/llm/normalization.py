@@ -1,3 +1,12 @@
+"""The chat model wrapper.
+
+Responsible for: normalising message content to a string, and translating
+provider exceptions.
+Used by: LlmFactory, which returns this rather than a bare ChatLiteLLM.
+
+`_generate` is the single choke point every LLM call passes through, which is
+what makes it the one place error translation has to happen.
+"""
 from typing import Any, List, Optional
 
 from langchain_core.callbacks import CallbackManagerForLLMRun

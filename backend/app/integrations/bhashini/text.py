@@ -1,19 +1,16 @@
 """Text preparation for speech synthesis.
 
-Ported from Mitra's `chatbot/utils/audio_provider_utils.py` (lines 27-187). These
-functions are pure -- no Django, no database, no HTTP -- so they came across
-unchanged apart from logging.
+Responsible for: stripping markdown, and splitting text to the TTS byte limit.
+Used by: BhashiniClient.synthesize, on every reply read aloud.
 
-THE REGEX ORDER IS LOAD-BEARING. Four of the steps only work where they are:
+THE REGEX ORDER IS LOAD-BEARING -- four steps only work where they are, and the
+failure mode is a stray character or a lost word, never an exception:
 
-  * images before links -- otherwise `![alt](url)` is consumed by the link rule
-    and leaves a stray `!`
-  * `<br>` -> ". " before the general tag strip -- otherwise the pause is lost,
-    and the LLM emits `<br>` inside table cells constantly
-  * the doubled-period cleanup after that substitution, because text that
-    already ended in punctuation now reads ".."
-  * bullet markers before bold/italic -- otherwise `* **bold**` is read as one
-    nested run of asterisks and the line loses its first word
+  * images before links, or `![alt](url)` leaves a stray `!`
+  * `<br>` -> ". " before the general tag strip, or the pause is lost
+  * the doubled-period cleanup AFTER that, or text already ending in
+    punctuation reads ".."
+  * bullet markers before bold/italic, or `* **bold**` loses its first word
 
 Do not reorder them to group "similar" rules together.
 """

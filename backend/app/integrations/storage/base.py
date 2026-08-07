@@ -1,26 +1,11 @@
-"""The one interface every storage driver implements.
+"""The ObjectStore interface.
 
-CALLERS PASS KEYS, NEVER URLS. That is the whole design, and it buys three
-things:
+Responsible for: the five operations every storage driver must provide.
+Used by: VoiceService; drivers are selected by factory.py from configuration.
 
-* The routers are provider-agnostic. `presign_put` returns a URL and the browser
-  uses it, but no caller inside this app ever holds one, so no caller has to
-  know whether it is an S3 query-signed URL, a GCS V4 signature, or a route on
-  this very service.
-* SSRF cannot exist here. Mitra's `/api/asr/` accepts `{s3Url}` from the client
-  and fetches it, which needs an allowlist check to be safe
-  (`mitra/rest_client.py:_validate_url`). A key is not a destination -- the
-  bucket is fixed by configuration -- so there is nothing for an attacker to
-  point anywhere.
-* Local development needs no cloud account. `LocalObjectStore` satisfies this
-  interface with a directory, so the full record -> transcribe -> speak cycle
-  runs offline.
-
-SYNCHRONOUS BY REQUIREMENT. The reference implementation this is ported from
-(evidence-analysis-service-p1/services/storage_service.py) wraps every SDK call
-in `asyncio.to_thread`. Saarthi forbids `async def` outside the two body-reading
-dependencies -- Starlette already runs plain `def` endpoints in a worker thread,
-so the wrapper would add a hop and buy nothing. See CLAUDE.md § Patterns.
+ADDRESSED BY KEY, NEVER BY URL. A key names an object inside a bucket fixed by
+configuration, so there is no attacker-controlled destination and SSRF is
+structurally impossible.
 """
 from __future__ import annotations
 

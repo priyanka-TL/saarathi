@@ -1,3 +1,11 @@
+"""The composition root.
+
+Responsible for: building every long-lived singleton, once, at startup.
+Used by: create_app(), which stashes the result on app.state.
+
+Per-request services are built fresh around the request's own session in
+app/dependencies/; this module only holds what outlives a request.
+"""
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -16,13 +24,7 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True)
 class Container:
-    """The composition root. Plain constructor injection, no DI framework.
-
-    Singletons (engine, tool registry, llm factory, handler factory, agent
-    registry, authenticator) are built once, here. Per-request services are
-    built fresh around the request's own db session elsewhere (src/api/deps.py,
-    src/api/chat_routes.py) -- this dataclass only holds the long-lived pieces.
-    """
+    """Plain constructor injection, no DI framework. Frozen on purpose."""
 
     settings: Settings
     engine: Optional[Engine]
@@ -39,42 +41,22 @@ class Container:
 
 
 def build_container(settings: Settings) -> Container:
-    # Reuse the EXISTING module-level engine/session-factory singletons
-    # (src/db/engine.py) rather than constructing a second engine here --
-    # a fresh engine would open a second connection pool against the same
-    # database that src/api/deps.py's SessionLocal() also uses.
+    # Reuse the module-level singletons rather than building a second engine,
+    # which would open a second pool against the same database.
     from app.database.engine import engine as shared_engine, SessionLocal as shared_session_factory
 
-    # Tools self-register onto a MODULE-LEVEL singleton (app.tools.registry.registry)
-    # via @registry.register(...) decorators, fired only when their defining
-    # module is imported. `import app.tools` walks every submodule and triggers
-    # that registration. It must happen here, explicitly and before anything
-    # resolves a spec's `tools:` references -- otherwise POST /api/agents/{key}/config
-    # would reject every tool as unknown, and a built handler would find none.
+    # Tools self-register via decorators fired on import. This walks every
+    # submodule to trigger that, and must run before anything resolves a spec's
+    # `tools:` -- otherwise every tool is rejected as unknown.
     import app.tools  # noqa: F401  (import for registration side effect only)
     from app.tools.registry import registry as tool_registry
 
     llm_factory = LlmFactory()
 
-    # mitra_clients / mitra_sessions: built when mitra_enabled is set. When
-    # disabled (the default) both are None and LlmAgentHandler is unaffected
-    # -- it never touches these fields. RemoteFlowAgentHandler checks for
-    # None and raises a clear error if an operator enables a remote_flow agent
-    # without Mitra wired up.
-    #
-    # WHY A REGISTRY RATHER THAN A CLIENT. A MitraRestClient carries a base
-    # URL, timeouts and the Origin credential -- all of which resolve per agent
-    # and per tenant (app/integrations/mitra/connection.py). One shared client
-    # would serve every scope the FIRST scope's endpoint. The registry hands
-    # out one client per distinct connection, cached by checksum, and is shared
-    # with OrchestrationService so a turn and its finalisation use the identical
-    # client rather than two independent pools.
-    #
-    # THERE IS NO DEFAULT-SCOPE CLIENT ANY MORE. There used to be one, built
-    # from the MITRA_* settings at boot. Those settings are gone -- the endpoint
-    # now lives in `remote.connection` on the agent config -- so there is no
-    # connection to build before an agent spec is in hand, and nothing to build
-    # it from. Every caller goes through the registry with a resolved spec.
+    # A REGISTRY, not a client: base URL, timeouts and the Origin credential
+    # all resolve per agent and per tenant, so one shared client would serve
+    # every scope the FIRST scope's endpoint. Nothing can be built before an
+    # agent spec is in hand, which is why there is no default-scope client.
     mitra_clients = None
     mitra_sessions = None
     if settings.mitra_enabled:
@@ -83,19 +65,13 @@ def build_container(settings: Settings) -> Container:
         mitra_clients = MitraClientRegistry()
         mitra_sessions = MitraSessionManager(settings)
 
-    # bhashini / object_store: built when voice_enabled is set. Both None when
-    # disabled, and app/routers/voice.py turns that into 503 VOICE_DISABLED --
-    # the same gating shape mitra_enabled uses above.
+    # BOTH OR NEITHER: voice needs somewhere to put the recording AND something
+    # to transcribe it, so a half-configured deployment must fail at boot rather
+    # than answer upload-url and then fail at transcribe. Both None when
+    # disabled, which the voice router turns into 503 VOICE_DISABLED.
     #
-    # WHY BOTH OR NEITHER. Voice needs a place to put the recording AND a
-    # service to transcribe it; either one alone serves no request. Building
-    # them together means a half-configured deployment fails at boot with a
-    # message, rather than answering upload-url and then failing at transcribe.
-    #
-    # A missing ffmpeg only WARNS. It is a system binary rather than a Python
-    # dependency, so it is the one piece that a working `make install` cannot
-    # guarantee -- and refusing to boot the whole app over a feature flag that
-    # may not even be exercised would be the wrong trade.
+    # A missing ffmpeg only warns: it is a system binary `make install` cannot
+    # guarantee, and refusing to boot over an unexercised feature flag is worse.
     bhashini = None
     object_store = None
     if settings.voice_enabled:
@@ -119,10 +95,8 @@ def build_container(settings: Settings) -> Container:
         # bucket -- a failed deploy rather than an outage mid-turn.
         object_store = get_object_store(settings)
 
-        # Supported, because a deployment may genuinely want it, but never
-        # silent: voice recordings are user speech, and on a public bucket
-        # anyone who guesses a key can listen to them. A warning in the startup
-        # log is the difference between a decision and an accident.
+        # Supported but never silent: recordings are user speech, and on a
+        # public bucket anyone who guesses a key can listen to them.
         if object_store.bucket_type == "public":
             logger.warning(
                 "VOICE_ENABLED=1 with CLOUD_STORAGE_BUCKET_TYPE=public: voice "

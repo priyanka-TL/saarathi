@@ -1,13 +1,7 @@
-"""Exceptions raised by the Bhashini integration layer.
+"""Bhashini failures.
 
-Thin wrappers so callers can catch voice failures without importing
-`requests.exceptions` -- the same discipline `integrations/mitra/exceptions.py`
-applies.
-
-NOTHING HERE MAY CARRY A CREDENTIAL. Three secrets travel in the request headers
-of every call (`BHASHINI_API_KEY`, `BHASHINI_USER_ID`, `BHASHINI_AUTHORIZATION`),
-so messages quote Bhashini's own error text and never the request that produced
-it.
+Responsible for: the error types the speech integration raises.
+Used by: the client raises them; the voice router maps them to status codes.
 """
 from typing import Optional
 

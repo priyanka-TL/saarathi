@@ -1,15 +1,7 @@
-"""ToolExecutionRepository — persists one tool invocation per row.
+"""Persistence for `tool_executions`.
 
-Design invariants (§4.8):
-  * result_excerpt is TRUNCATED to 4096 chars at write time. This is done here,
-    not in a DB CHECK constraint, so truncation is observable in application
-    logs rather than silently enforced. One large tool result must not be able
-    to make the table unreadable.
-  * ck_tool_executions_error (DB-level CHECK) rejects any non-success row whose error
-    column is NULL. This repository enforces the same rule at the Python level
-    so the error surfaces before hitting the DB round-trip.
-  * bulk_insert is the hot path — called once per assistant turn. It flushes
-    after the batch rather than per row to avoid N round-trips.
+Responsible for: storing the tool traces an LLM turn produced.
+Used by: OrchestrationService, when the agent declares record_tool_executions.
 """
 from __future__ import annotations
 

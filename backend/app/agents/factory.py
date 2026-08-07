@@ -1,3 +1,12 @@
+"""Handler construction and registration.
+
+Responsible for: mapping an AgentSpec to a built handler, cached per
+(key, checksum).
+Used by: OrchestrationService, once per turn.
+
+Handlers self-register via @register_handler, fired when their module is
+imported -- factory walks the package to trigger that.
+"""
 import pkgutil
 import importlib
 from dataclasses import dataclass

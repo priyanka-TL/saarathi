@@ -1,20 +1,10 @@
-"""The voice workflow: presign an upload, transcribe a recording, read a reply back.
+"""The voice workflow: presign an upload, transcribe a recording, speak a reply.
 
-`app/routers/voice.py` ran these end to end inside its handlers -- `transcribe`
-alone was a five-stage sequence (fetch from the object store, transcribe via
-Bhashini, delete the recording in a `finally`, conditionally translate, shape the
-response) interleaved with six exception-to-HTTP mappings, and there was no
-VoiceService at all.
+Responsible for: ordering the steps and owning the ownership check.
+Used by: the voice router, via Depends(get_voice_service).
 
-WHAT STAYS IN THE ROUTER: the mapping from a raised integration exception to a
-status code and an error envelope. This service raises `StorageError` /
-`BhashiniError` subtypes and lets the router decide what each means over HTTP,
-which is the layer that owns HTTP.
-
-WHAT MOVED HERE: the ordering, the ownership check, and the two rules that are
-easy to get wrong and expensive to get wrong -- deleting the recording whether or
-not transcription succeeded, and not losing the user's words when translation
-fails.
+Raises StorageError / BhashiniError subtypes and lets the ROUTER map them to
+status codes -- that is an HTTP decision and belongs in the API layer.
 """
 from __future__ import annotations
 

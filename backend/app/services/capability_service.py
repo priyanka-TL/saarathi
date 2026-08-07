@@ -1,40 +1,8 @@
-"""Resolves the sidebar's capability document for one caller's scope.
+"""The sidebar capability document.
 
-Answers the EXACT shape the frontend already consumes, so making this
-database-driven changed no frontend code at all:
-
-    {"version": 1, "capabilities": [ {..., "agents": [...]}, ... ]}
-
-SCOPE RESOLUTION: most specific wins
-------------------------------------
-Every `capabilities` row carries `tenant_id` + `organization_id`, defaulting to
-the sentinel 'default'. Three levels are consulted per capability KEY:
-
-    (tenant, org)  >  (tenant, 'default')  >  ('default', 'default')
-
-so a tenant inherits the default catalogue until it inserts a row of its own,
-and onboarding a tenant costs zero writes. Implemented as one DISTINCT ON,
-because picking the winner per key in SQL is what keeps this two queries rather
-than one per capability -- one request holds one thread and one DB connection
-for its whole lifetime (see app/main.py), so an N+1 here would be the wrong
-shape at any size.
-
-FOUR GATES DECIDE WHETHER AN AGENT APPEARS, and all four must pass:
-
-  1. agents.status = 'enabled'          -- the global kill switch
-  2. capability_agents.is_visible       -- hidden in THIS capability
-  3. an ACTIVE agent_configs row exists in the caller's scope
-  4. spec.access.matches(user)          -- AccessSpec, evaluated in Python
-
-Gate 4 cannot be SQL: AccessSpec lives inside the JSONB config and its rules
-(tenant_codes / organization_codes / required_roles, ANDed, empty == no
-restriction) are already implemented in the domain layer. It is applied by
-calling that same method -- there must never be a second access check to drift
-out of step with it.
-
-This module is deliberately framework-free (the .importlinter contracts forbid
-app.services importing fastapi/starlette): it takes a Session and a
-UserContext and returns plain dicts.
+Responsible for: resolving which capabilities and agents a caller can see, with
+most-specific-wins scope inheritance.
+Used by: GET /api/ui/capabilities.
 """
 from __future__ import annotations
 
@@ -65,18 +33,12 @@ _STATUS_OUT = {
     "disabled": "disabled",
 }
 
-# DISTINCT ON (key) with the ORDER BY below picks the most specific row per
-# capability key. The two CASE expressions rank scope specificity: an exact
-# organization match sorts first, then a tenant-wide row, then the default.
-# Postgres requires the DISTINCT ON expression to lead the ORDER BY, which is
-# why `key` comes first and the display ordering is applied by the outer query.
+# DISTINCT ON picks the most specific row per key; Postgres requires that
+# expression to lead the ORDER BY, so display ordering moves to the outer query.
 #
-# THE STATUS FILTER BELONGS IN THE OUTER QUERY, NOT THE INNER ONE. Filtering
-# `status <> 'disabled'` before DISTINCT ON would drop a tenant's disabled row
-# from the candidate set, and the default row would then win -- so a tenant
-# disabling a capability would SEE THE DEFAULT ONE INSTEAD OF HIDING IT, which
-# is the exact opposite of what it asked for. Resolve the winner first, then
-# decide whether the winner is showable.
+# THE STATUS FILTER MUST STAY IN THE OUTER QUERY. Filtering before DISTINCT ON
+# drops a tenant's disabled row from the candidate set, letting the default win
+# -- so disabling a capability would SHOW THE DEFAULT rather than hide it.
 _CAPABILITIES_SQL = text(f"""
     SELECT * FROM (
         SELECT DISTINCT ON (c.key)
@@ -91,10 +53,9 @@ _CAPABILITIES_SQL = text(f"""
     ORDER BY resolved.display_order, resolved.key
 """)
 
-# Membership inherits the capability's scope, so this needs no scope filter of
-# its own -- it is joined against the ids the query above already resolved.
-# The agent's CONFIG, however, is scoped, and is resolved with the same
-# most-specific-wins rule via a LATERAL subquery.
+# Membership inherits the capability's scope, so it needs no filter of its own.
+# The agent's CONFIG is scoped, and is resolved with the same most-specific-wins
+# rule via the LATERAL below.
 _AGENTS_SQL = text(f"""
     SELECT ca.capability_id,
            a.key                                        AS agent_key,
@@ -118,11 +79,8 @@ _AGENTS_SQL = text(f"""
     WHERE ca.capability_id = ANY(:capability_ids)
       AND ca.is_visible
       AND a.status = 'enabled'
-      -- GATE 5: MITRA_ENABLED. A remote_flow agent has nothing to serve it when
-      -- Mitra is off, so advertising it renders a button that raises at click
-      -- time. This used to be enforced by ConfigSyncService writing
-      -- status='disabled' at startup; with the YAML sync gone it is a runtime
-      -- filter, matching AgentRegistry.reload().
+      -- Gate 5: with Mitra off, a remote_flow agent has nothing to serve it,
+      -- so advertising it renders a button that raises at click time.
       AND (:mitra_enabled OR a.agent_type <> 'remote_flow')
     ORDER BY ca.display_order, a.key
 """)
@@ -134,12 +92,9 @@ def _scope(user: Optional[UserContext]) -> Tuple[str, str]:
 
 
 def _action_from(metadata: Optional[Dict[str, Any]], fallback: Dict[str, Any]) -> Dict[str, Any]:
-    """`action` lives inside `metadata` rather than in its own column.
-
-    Keeps the table to the agreed columns while leaving room for future
-    presentation keys without another migration. A row with no action falls
-    back rather than producing a capability nothing can do.
-    """
+    """`action` lives inside `metadata` rather than its own column, so new
+    presentation keys need no migration. A row with no action falls back rather
+    than producing a capability nothing can do."""
     action = (metadata or {}).get("action")
     return action if isinstance(action, dict) and action.get("type") else fallback
 
@@ -147,9 +102,8 @@ def _action_from(metadata: Optional[Dict[str, Any]], fallback: Dict[str, Any]) -
 def _access_permits(config: Dict[str, Any], user: Optional[UserContext]) -> bool:
     """Gate 4, via the domain layer's own AccessSpec.
 
-    A config that will not parse is treated as NOT permitted: an agent whose
-    spec is unreadable cannot have its access rules evaluated, and rendering a
-    button the router will refuse is worse than rendering nothing.
+    An unparseable config is treated as NOT permitted: rendering a button the
+    router will refuse is worse than rendering nothing.
     """
     from app.domain.agent_spec import AccessSpec
 
@@ -195,9 +149,8 @@ def resolve_for_user(session, user: Optional[UserContext],
             "status": "enabled",
             "order": row.display_order,
             "visible": True,
-            # `agentKey` is injected from the join rather than stored in the
-            # metadata JSON, so renaming an agent key cannot leave a stale copy
-            # of it behind in a blob nothing validates.
+            # From the join, not the metadata blob, so renaming an agent key
+            # cannot leave a stale copy behind.
             "action": {**action, "agentKey": row.agent_key},
         })
 

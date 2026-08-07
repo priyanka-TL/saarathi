@@ -1,3 +1,12 @@
+"""The agent handler contract.
+
+Responsible for: TurnContext in, AgentTurn out -- plus the session view and
+delta types a handler may read and emit.
+Used by: every handler, and OrchestrationService which calls them.
+
+A Protocol rather than a base class: a handler is registered by decorator and
+needs no shared implementation.
+"""
 import enum
 from uuid import UUID
 from typing import Literal, List, Dict, Any, Optional, Protocol, ClassVar

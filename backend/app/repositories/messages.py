@@ -1,3 +1,8 @@
+"""Persistence for `conversation_messages`.
+
+Responsible for: writing turns and reading back a memory window.
+Used by: OrchestrationService and ConversationService.
+"""
 import uuid
 from typing import Optional, List, Any, Dict
 

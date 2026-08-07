@@ -1,25 +1,14 @@
-"""Domain exceptions: the failures this application knows how to describe.
+"""Domain exceptions -- the failures this application knows how to describe.
 
-Before this module the nine domain exceptions were declared in seven different
-packages -- two in `services/orchestration.py`, two in `services/session_service.py`,
-one each in `services/router_service.py`, `services/identity.py`,
-`tools/registry.py` and `agents/factory.py`. Each was a bare `Exception`, so
-nothing could catch "an expected failure" as a category; the chat router ended
-up importing one of them INSIDE an `except Exception` block and dispatching on
-`isinstance` to tell a 404 from a 500.
+Responsible for: a common SaarthiError base, each subclass naming its own HTTP
+status, error code and client-safe message.
+Used by: services, agents and tools raise them; handlers.py maps them once.
 
-A common base fixes that: `app/exceptions/handlers.py` registers one handler for
-`SaarthiError` and each subclass names its own status and code.
+FRAMEWORK-FREE, and must stay so: app.agents imports from here and .importlinter
+forbids anything under app.agents from reaching FastAPI.
 
-FRAMEWORK-FREE, and it must stay that way. `app.agents` imports from here and
-`.importlinter` forbids anything under `app.agents` from reaching FastAPI or
-Starlette -- so nothing in this module may import `fastapi`, and the HTTP
-mapping lives on plain integers rather than on `starlette.status` constants.
-
-NOT TO BE CONFUSED WITH THE INTEGRATION HIERARCHIES. `MitraError`,
-`BhashiniError` and `StorageError` describe an EXTERNAL system failing and
-already translate correctly at their own boundaries. These describe THIS
-application refusing or being unable to do something.
+Not to be confused with MitraError / BhashiniError / StorageError, which
+describe an EXTERNAL system failing. These describe THIS application refusing.
 """
 from __future__ import annotations
 
@@ -30,13 +19,10 @@ from uuid import UUID
 class SaarthiError(Exception):
     """Base for every expected, mapped domain failure.
 
-    `status_code` and `error_code` are class attributes rather than constructor
-    arguments so that a subclass declares its HTTP meaning once, next to the
-    reason it exists, instead of at each raise site where the two could drift.
-
-    The defaults are deliberately 500/INTERNAL: a subclass that forgets to name
-    its mapping degrades to the generic error rather than accidentally telling a
-    client that something unexpected was a clean 400.
+    Status and code are class attributes so a subclass declares its HTTP meaning
+    once, not at each raise site. The 500/INTERNAL defaults mean a subclass that
+    forgets to name its mapping degrades to the generic error rather than
+    claiming something unexpected was a clean 400.
     """
 
     status_code: int = 500
@@ -57,9 +43,8 @@ class SaarthiError(Exception):
 class ConcurrentTurnError(SaarthiError):
     """Another request is already running a turn on this conversation.
 
-    Surfaced as HTTP 409, never retried automatically: the whole point is that
-    the duplicate must not reach Mitra, where two user messages in a row merge
-    into one and destroy an answer (§1.6).
+    Never retried automatically: the duplicate must not reach Mitra, where two
+    user messages in a row merge and destroy an answer (§1.6).
     """
 
     status_code = 409
@@ -164,9 +149,7 @@ class InvalidTokenError(SaarthiError):
 class UnknownToolError(SaarthiError):
     """An AgentSpec referenced tools no registry entry provides.
 
-    Raised while VALIDATING a config (POST /api/agents/{key}/config) and while
-    building a handler, so it must name the missing tools -- an admin fixing a
-    config needs to know which ones.
+    Names the missing tools: an admin fixing the config needs to know which.
     """
 
     status_code = 422

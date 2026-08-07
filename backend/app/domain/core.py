@@ -1,3 +1,8 @@
+"""Core identity value objects.
+
+Responsible for: UserContext and the org membership it carries.
+Used by: every layer -- this is the caller, passed down unchanged.
+"""
 from dataclasses import dataclass
 from typing import Optional
 

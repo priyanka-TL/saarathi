@@ -1,15 +1,13 @@
-"""Ambient per-request state, framework-agnostic.
+"""Ambient per-request state.
 
-Flask carried the request id on `flask.g`, which is a proxy onto a
-request-scoped context that the logging filter could read without being handed
-anything. `ContextVar` is the direct equivalent and, crucially, is copied into
-the worker thread by `anyio.to_thread.run_sync` -- which is how every endpoint
-in this app runs (see app/main.py on why nothing here is `async def`).
+Responsible for: carrying the request id without threading it through calls.
+Used by: the logging filter, and any layer that needs the id but is not handed one.
 
-Set by `app.middleware.request_id.RequestIDMiddleware`, which MUST be pure-ASGI
-middleware: `BaseHTTPMiddleware` runs the downstream app in a separate anyio
-task, so a value set before `call_next` would be invisible to the endpoint and
-every log line would carry `request_id: null`.
+Set by RequestIDMiddleware, which MUST stay pure-ASGI: BaseHTTPMiddleware runs
+the downstream app in a separate anyio task, so a value set before `call_next`
+would be invisible to the endpoint. ContextVar (unlike a thread-local) is copied
+into the worker thread by `anyio.to_thread.run_sync`, which is how every
+endpoint here runs.
 """
 from __future__ import annotations
 

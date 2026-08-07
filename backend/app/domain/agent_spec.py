@@ -1,3 +1,13 @@
+"""The AgentSpec model -- what an agent IS, as validated configuration.
+
+Responsible for: the discriminated union of agent types and their nested specs,
+plus the canonical JSON + checksum used for versioning.
+Used by: the admin route on write, the registry on load, handlers at runtime.
+
+PURE: imports nothing outside app.domain, so it cannot reach Settings. That is
+why `finalize_path` is a plain str rather than a Literal -- the endpoints are
+configurable, and the admin route validates it instead.
+"""
 import json
 import hashlib
 import copy

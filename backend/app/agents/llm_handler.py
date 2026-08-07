@@ -1,3 +1,12 @@
+"""The LLM agent handler.
+
+Responsible for: building the message list, calling the model, and running the
+tool loop up to `limits.max_tool_iterations`.
+Used by: HandlerFactory, for any spec with agent_type="llm".
+
+Messages are built EXPLICITLY rather than through a ChatPromptTemplate, so what
+reaches the model is readable here and history is bounded by the spec's memory.
+"""
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage

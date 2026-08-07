@@ -1,13 +1,12 @@
-"""Session polling/control endpoints (design doc §10.2): a client drives and
-observes a pinned (remote_flow) interview through these once /api/chat itself
-has returned a `session` payload.
+"""Session polling and control for a delegated (remote_flow) interview.
 
-Every route scopes the session to the caller's tenant/identity via the
-owning conversation -- a wrong id OR someone else's session both come back
-as a plain 404, never 403, so a client can't probe for the existence of a
-session it doesn't own.
+Responsible for: reading, finalising, resuming, abandoning a session and
+serving its report URL.
+Used by: the SPA, once /api/chat has returned a `session` payload.
 
-Port of src/api/session_routes.py.
+Every route scopes the session to the caller via the owning conversation. A
+wrong id and someone else's session both answer 404, never 403, so a client
+cannot probe for sessions it does not own.
 """
 from __future__ import annotations
 

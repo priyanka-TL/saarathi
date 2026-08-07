@@ -1,32 +1,19 @@
-"""Capability administration: the CRUD that makes the sidebar configurable.
+"""Capability administration -- the CRUD that makes the sidebar configurable.
 
-This is what "add a capability without a deployment" actually means -- every
-route here writes rows that `GET /api/ui/capabilities` reads on the next
-request, with no restart and no rebuild.
+Responsible for: validating capability and membership writes, then shaping the
+response. The SQL lives in app/repositories/capabilities.py.
+Used by: the admin console. A write here changes GET /api/ui/capabilities on the
+next request, with no restart.
 
-CONVENTIONS INHERITED FROM app/routers/admin.py, deliberately:
+Three conventions inherited from admin.py, all deliberate:
 
-1. **The bare error envelope.** `{"error": CODE}` with optional `path`/`msg` --
-   no `status`, no `error_code`, no `request_id`. The standard envelope
-   (app/exceptions/envelope.py) is NOT used on the admin surface; the
-   integration tests assert both shapes and they must not be unified.
-
-2. **These handlers commit their own session.** Elsewhere `get_db` owns the
-   commit. Here a write must be visible to the read that follows it in the same
-   request, so each mutation commits explicitly; the dependency's later commit
-   is then a harmless no-op.
-
-3. **Raw `text()` rather than the ORM.** The ORM models exist (migration 0006
-   needed them for the FK), but the admin surface stays on raw SQL. That SQL now
-   lives in `app/repositories/capabilities.py` and `app/repositories/agents.py`
-   rather than in this file -- moved verbatim, still `text()`, still not
-   committing. This module routes, validates and shapes responses; it no longer
-   contains a statement.
-
-SCOPE IS EXPLICIT ON EVERY ROUTE, never inferred from the calling admin's own
-token. An admin editing another tenant's configuration is the normal case, and
-silently defaulting to the caller's tenant would make that impossible to
-express -- and would make a mistake look like success.
+1. The bare {"error": CODE} envelope, not the standard one. Tests assert both
+   shapes and they must not be unified.
+2. These handlers commit their own session, so a write is visible to the read
+   that follows it in the same request.
+3. SCOPE IS EXPLICIT ON EVERY ROUTE, never inferred from the calling admin's
+   token -- editing another tenant's configuration is the normal case, and
+   defaulting to the caller's tenant would make a mistake look like success.
 """
 from __future__ import annotations
 

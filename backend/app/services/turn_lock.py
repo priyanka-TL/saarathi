@@ -1,16 +1,10 @@
-"""The per-conversation turn lock: at most one turn in flight, ever.
+"""The per-conversation turn lock.
 
-Four private methods on `OrchestrationService`, now one named object. The
-behaviour is unchanged -- the SQL, the non-blocking claim and the sqlite
-fallback all moved verbatim -- but the guarantee they encode is the single most
-important invariant in the turn pipeline, and it now has a name and a docstring
-of its own rather than being four helpers among thirty.
+Responsible for: guaranteeing at most one turn in flight per conversation.
+Used by: OrchestrationService.handle_turn, around the whole turn.
 
-WHY THE LOCK EXISTS AT ALL. Two concurrent posts for one conversation both used
-to sail through and both call Mitra. On a first turn that meant two
-upsert_profile + generate_session pairs and an orphaned remote session; on a
-later turn it is §1.6 answer destruction, because two user messages in a row
-silently MERGE in Mitra's database and the first answer is lost.
+WHY IT EXISTS: two concurrent posts for one conversation both reached Mitra,
+where two user messages in a row MERGE and the first answer is lost (§1.6).
 """
 from __future__ import annotations
 

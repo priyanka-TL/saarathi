@@ -1,18 +1,11 @@
-"""MitraChannel -- one socket, one daemon reader thread, one bounded frame queue.
+"""One conversation's Mitra WebSocket.
 
-Implements the connection lifecycle described in the design doc (§7.3,
-§1.1): connect with the Origin/User-Agent Mitra gates on, send the
-`authenticate` frame, then settle for `handshake.settle_ms` WITHOUT waiting
-for an acknowledgement -- verified (§1.1) that Mitra never sends one on any
-path. `send_and_await_turn` accumulates chunked bot replies (§1.3), discards
-the user-echo frame Mitra sends back before dispatching the real reply
-(§1.2), and falls back to whatever was accumulated so far when fragments
-stop arriving (the idle-gap backstop), rather than hanging until the full
-turn timeout.
+Responsible for: the handshake, sending a turn, and awaiting the reply frames.
+Used by: MitraSessionManager, which pools one channel per conversation.
 
-Deliberately NOT part of this module: MitraSessionManager (the
-conversation_id -> MitraChannel LRU map, design doc §7.4). That's a
-separate class with its own re-authentication/eviction concerns.
+A daemon reader thread feeds a bounded Queue, so `send_and_await_turn` blocks on
+the queue rather than on the socket. That is why this must run on a real thread
+and why the app has no `async def` endpoints.
 """
 from __future__ import annotations
 

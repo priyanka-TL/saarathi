@@ -1,28 +1,10 @@
-"""Audio normalisation, chunking and merging.
+"""Audio transcoding and chunking, via ffmpeg.
 
-Bhashini's ASR wants 16 kHz mono PCM WAV; browsers record WebM/Opus (or MP4/AAC
-on Safari). Everything in this module exists to bridge that gap, and it is a
-port of Mitra's `chatbot/utils/audio_converter_utils.py`,
-`chatbot/translate/base/speech_to_text.py` and the merge helpers in
-`chatbot/utils/audio_provider_utils.py`.
+Responsible for: normalising any browser recording to WAV, and splitting it.
+Used by: BhashiniClient, before transcription.
 
-FIVE THINGS ARE DELIBERATELY DIFFERENT FROM MITRA:
-
-1. The input extension is not forced. Mitra hardcodes `input_ext = 'opus'`
-   (audio_converter_utils.py:34), overriding the extension it just sniffed,
-   because every upload there is a WhatsApp voice note. Saarthi has Safari
-   clients sending MP4, so the container is left for ffmpeg to detect -- which
-   it does from content, making the extension advisory anyway.
-2. `subprocess.run` has a timeout. Without one a wedged ffmpeg holds a worker
-   thread and its database connection forever, and THREADPOOL_SIZE is small.
-3. stderr is captured. `check=True` alone raises `CalledProcessError` with no
-   detail, so a malformed upload and a missing codec look identical in the log.
-4. Temp files live in a `TemporaryDirectory`, so cleanup cannot miss one. Mitra
-   guards `os.remove` with `'input_path' in locals()`, which silently skips
-   cleanup if the failure happened one line too early.
-5. No silence detection. Mitra drops chunks under -40 dBFS using pydub; the
-   browser already applies an RMS gate before uploading at all (Mitra's own
-   frontend does this too), so the dependency buys nothing here.
+ffmpeg is a SYSTEM binary, not a Python dependency: a deployment image must
+install it. Missing, it warns at boot and fails at request time.
 """
 from __future__ import annotations
 

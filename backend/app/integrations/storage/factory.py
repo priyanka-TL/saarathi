@@ -1,15 +1,11 @@
-"""Resolve CLOUD_STORAGE_PROVIDER to a driver.
+"""Provider name -> ObjectStore driver.
 
-Modelled on Mitra's `StorageFactory` (`chatbot/services/storage/storage_factory.py`),
-which keeps a name -> handler registry so a provider can be added without
-touching a caller. Adding Azure here is one class plus one line in `_STORES`.
+Responsible for: resolving CLOUD_STORAGE_PROVIDER to a driver, at boot.
+Used by: build_container, when VOICE_ENABLED=1.
 
-IMPORTS ARE LAZY, INSIDE THE BRANCH. A deployment running AWS never imports
-`google.cloud.storage`, which is what lets that package stay an optional
-dependency rather than something every install pays for. It also means a
-provider whose SDK is missing fails with a message naming the provider and the
-fix, instead of an ImportError at module load that takes the whole app down
-regardless of which provider was configured.
+Imports are lazy, so an AWS deployment never loads the GCS SDK. NEVER register a
+name with no module behind it: a dangling entry turns a clear "unsupported
+provider" message into a ModuleNotFoundError at boot.
 """
 from __future__ import annotations
 

@@ -1,57 +1,11 @@
-"""MitraConnection -- one resolved Mitra endpoint configuration, and the
-registry of REST clients built from it.
+"""Resolving which Mitra deployment an agent talks to.
 
-WHY THIS EXISTS
-===============
-Every Mitra setting used to be read straight off ``Settings``, which made it
-process-global: one Saarthi process could talk to exactly one Mitra company,
-with one set of bot routes, on one Mitra instance. That contradicts the rest of
-the app, where capabilities and agent configs are scoped
-``(tenant_id, organization_id)`` and resolved most-specific-wins.
+Responsible for: turning a RemoteSpec into a MitraConnection, and caching one
+REST client per distinct connection.
+Used by: the container, orchestration and the handlers.
 
-``MitraConnection`` is the seam. It is a plain value object -- no I/O, no
-Settings import -- carrying everything the REST client and the WebSocket
-channel need. ``resolve_connection`` builds one from the agent spec's
-``remote.connection`` block:
-
-    spec.remote.connection  (per agent, per tenant/org)  ->  MitraConnection
-
-**THE SPEC IS THE ONLY SOURCE.** There is no MITRA_* environment floor behind
-it any more: ``MITRA_BASE_URL``, ``MITRA_WS_URL``, ``MITRA_USER_AGENT``,
-``MITRA_ALLOWED_HOSTS``, the three timeouts, the three ``MITRA_IP_*`` fields
-and the six ``MITRA_*_PATH`` keys were all deleted from ``Settings`` and moved
-into ``MitraConnectionSpec``, whose defaults now live in
-``app/domain/agent_spec.py``. A scoped config row therefore fully determines
-which Mitra deployment that agent reaches -- there is no second place a value
-can come from and no merge order to reason about.
-
-TWO THINGS STILL COME FROM SETTINGS, AND BOTH ARE DELIBERATE
-============================================================
-``resolve_connection`` still takes ``settings``, for exactly two values that
-cannot live in a config row:
-
-  * ``mitra_origin_url`` -- a CREDENTIAL (below);
-  * ``mitra_host_ceiling`` -- the operator's SSRF backstop ON a config-supplied
-    ``allowed_hosts``. A control that config can widen is not a control, so it
-    has to sit outside config. See ``_apply_host_ceiling``.
-
-THE ORIGIN URL IS A CREDENTIAL, AND IT IS HANDLED SPECIALLY
-==========================================================
-Mitra gates admission on the ``Origin`` header (see MitraRestClient's module
-docstring). It must never reach the database, a config row, a log line or an
-error response. So:
-
-  * it is NEVER read from the spec by value. A spec may carry
-    ``origin_env: "MITRA_TENANT_X_ORIGIN"`` -- a variable NAME, resolved here
-    with ``os.getenv``. This is the one environment indirection left in agent
-    configuration, and it exists solely because of this credential;
-  * ``repr=False`` keeps it out of every log line that reprs a connection;
-  * it enters the checksum only as its OWN sha256, never as plaintext.
-
-That last point is not decoration. The checksum is the cache key for both the
-REST client and the pooled WebSocket channel, so omitting the origin entirely
-would let two scopes with different origins share a client carrying the wrong
-credential. Hashing it keeps the cache correct without ever storing the value.
+Endpoint, timeouts and the Origin credential are all per agent and per tenant,
+so a shared client would serve every scope the first scope's endpoint.
 """
 from __future__ import annotations
 

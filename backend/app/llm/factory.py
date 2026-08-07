@@ -1,3 +1,8 @@
+"""LLM client construction.
+
+Responsible for: one cached chat model per distinct ModelSpec.
+Used by: HandlerFactory, lazily, per request.
+"""
 from app.core.settings import settings as config
 from app.core.logger import get_logger
 from app.domain.agent_spec import ModelSpec

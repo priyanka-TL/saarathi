@@ -1,24 +1,14 @@
 """Request-id ingress/egress, as pure ASGI middleware.
 
-Replaces Flask's `before_request` (read/generate the id onto `g`) and
-`after_request` (echo it back on the response) pair.
+Responsible for: reading or generating X-Request-ID, and echoing it back.
+Used by: mounted on the app in create_app(); runs for every HTTP request.
 
-WHY PURE ASGI AND NOT `BaseHTTPMiddleware`
-------------------------------------------
-`BaseHTTPMiddleware` runs the downstream app in a *separate anyio task*, and a
-ContextVar set before `call_next` is therefore invisible inside the endpoint.
-`app.core.logger.RequestIDFilter` reads exactly that ContextVar, so using
-`BaseHTTPMiddleware` here would silently put `"request_id": null` on every log
-line in the process. Verified before this file was written.
+MUST stay pure ASGI. BaseHTTPMiddleware runs the downstream app in a separate
+anyio task, so a ContextVar set before `call_next` is invisible inside the
+endpoint -- which would silently put "request_id": null on every log line.
 
-A plain ASGI class sets the value in the same task the endpoint is dispatched
-from, and `anyio.to_thread.run_sync` (how every `def` endpoint runs) copies the
-context into the worker thread.
-
-Both channels are populated on purpose:
-  * `scope["state"]["request_id"]` -- for `Depends(get_request_id)`, which the
-    routers hand to `TurnInput` and the error envelope.
-  * the ContextVar -- for the logging filter, which is handed nothing.
+Both channels are populated: scope["state"] for Depends(get_request_id), and the
+ContextVar for the logging filter, which is handed nothing.
 """
 from __future__ import annotations
 

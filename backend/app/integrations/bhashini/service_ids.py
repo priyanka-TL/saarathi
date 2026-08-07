@@ -1,25 +1,9 @@
-"""Which Bhashini model serves which language.
+"""Bhashini service ids and supported languages.
 
-REPLACES A 2,800-LINE FILE. Mitra's `chatbot/translate/ai4Bharat/base_translation.py`
-embeds a frozen snapshot of a full ULCA `getModelsPipeline` response as a Python
-literal, and reads exactly one thing out of it: the `serviceId` for a
-(task, language) pair. Everything else in that response -- model ids, script
-codes, per-pair translation entries, the socket endpoint -- is never consulted.
-So the snapshot is reduced here to the lookup it was serving.
+Responsible for: the per-language, per-task model ids Dhruva expects.
+Used by: BhashiniClient, on every request.
 
-Its live counterpart, `get_ulca_pipeline_models()`, is dead code in Mitra
-(nothing imports it) and is not ported. Resolving service ids over the network
-on every call would add a second upstream dependency, and a hop, to buy a
-mapping that changes about once a year.
-
-MITRA'S RUNTIME DEFAULTS ARE NOT COPIED. Its `voice_provider_defaults.py` uses a
-single ASR serviceId -- `bhashini/iitm/asr-dravidian--gpu--t4` -- for EVERY
-language unless a per-bot database row overrides it, so out of the box Hindi and
-English are transcribed by a Dravidian-family model. The per-language mapping
-below is what the pipeline response actually specifies.
-
-Saarthi supports en/hi/kn/te (the CHECK constraint on `conversations.locale`).
-The other languages cost nothing to carry and are what a fifth would need.
+A third-party contract: these change when Bhashini publishes new models.
 """
 from __future__ import annotations
 

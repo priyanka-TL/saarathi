@@ -1,3 +1,17 @@
+"""The turn pipeline: one user message in, one agent reply out.
+
+Responsible for: ordering the thirteen steps of a turn -- claim the lock, store
+the message, route, resolve scope, enforce limits, open the session, call the
+handler, persist, finalise.
+Used by: the chat and sessions routers, via Depends(get_orchestrator).
+
+Finalisation lives in turn_finalization.py, the advisory lock in turn_lock.py
+and rate limiting in turn_limits.py; this module keeps the sequence.
+
+THE STEP ORDER IN _handle_turn_locked IS THE CONTRACT. Its numbered comments
+record why each step sits where it does -- several encode constraints whose
+failure mode is silent.
+"""
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -327,16 +341,11 @@ class OrchestrationService:
         # 1. get_or_create conv
         conv = self._conversations.get_or_create(ctx_in.conversation_id, ctx_in.user)
 
-        # 1b. CLAIM THE TURN, covering the handler call too.
-        #
-        # Step 2's row lock is released by the COMMIT at step 9, which happens
-        # BEFORE the handler runs -- so two concurrent posts for one
-        # conversation both sailed through and both called Mitra. On a first
-        # turn that meant two upsert_profile + generate_session pairs and an
-        # orphaned remote session; on a later turn it is §1.6 answer
-        # destruction, since two user messages in a row silently merge in
-        # Mitra's database. Claimed here, before the user message is written,
-        # so a refused turn leaves nothing behind.
+        # 1b. CLAIM THE TURN, covering the handler call too. Step 2's row lock
+        # is released by the commit at step 8, BEFORE the handler runs, so two
+        # concurrent posts would both reach Mitra -- §1.6 answer destruction.
+        # Claimed before the user message is written, so a refused turn leaves
+        # nothing behind.
         if not self._try_lock_conversation(conv.id):
             raise ConcurrentTurnError(conv.id)
         try:
@@ -348,23 +357,16 @@ class OrchestrationService:
         """Steps 2, 3 and 3b: allocate a seq, store the message, title the
         conversation.
 
-        THE ROW LOCK IN next_seq_for_update IS LOAD-BEARING. It serialises
-        double-submits (§1.6) in addition to allocating the sequence number.
+        The row lock in next_seq_for_update also serialises double-submits.
 
-        THE TITLE IS WRITTEN HERE, NOT AT STEP 13. Step 13 only runs on a
-        successful turn, so a turn that failed after this commit (an upstream
-        429, say) left the conversation titleless and with a NULL
-        last_message_at -- it showed up in the sidebar as "New conversation / No
-        messages yet" even though the user had clearly said something. touch()
-        COALESCEs the title, so the first message still wins and step 13 remains
-        harmless.
+        THE TITLE IS WRITTEN HERE, NOT AT STEP 13, which only runs on a
+        successful turn -- a turn failing after this commit otherwise left the
+        conversation showing "New conversation / No messages yet" despite the
+        user having said something. touch() COALESCEs, so the first message
+        still wins.
 
-        AN AUTOSTART TURN TIMESTAMPS BUT DOES NOT TITLE. Its text is the UI's
-        canned opener, so titling from it gave every discussion in the sidebar
-        the identical, useless name "I want to capture a discussion". The first
-        thing the user actually types titles the conversation instead, and
-        _agent_fallback_title covers the case where the interview is answered
-        entirely with option buttons.
+        AN AUTOSTART TURN TIMESTAMPS BUT DOES NOT TITLE: its text is the UI's
+        canned opener, which named every discussion identically.
         """
         seq = self._conversations.next_seq_for_update(conv.id)
 
@@ -406,15 +408,11 @@ class OrchestrationService:
         agent = decision.agent
 
         # 4b. Resolve the agent for THIS caller's tenant/organization.
-        #
-        # ONE PLACE, deliberately. `agent.spec` is read a dozen times below and
-        # `agent.checksum` keys HandlerFactory's cache, so resolving once here
-        # makes every one of those tenant-correct with no further changes --
-        # and means there is a single line to audit when asking "can one tenant
-        # be served another's configuration?".
-        #
-        # A no-op for a tenant that has not customised anything, which is the
-        # common case: one indexed lookup, then the unchanged agent.
+        # ONE PLACE, deliberately: `agent.spec` is read a dozen times below and
+        # `agent.checksum` keys the handler cache, so resolving once here makes
+        # all of it tenant-correct and leaves a single line to audit when asking
+        # "can one tenant be served another's configuration?". A no-op, and one
+        # indexed lookup, for a tenant that has customised nothing.
         turn_tenant_id, turn_organization_id = scope_for_user(ctx_in.user)
         agent = self._registry.resolve_for_scope(
             self._db, agent, turn_tenant_id, turn_organization_id,
@@ -423,20 +421,14 @@ class OrchestrationService:
         # 5. enforce limits
         self._rate_limits.check(conv.id, ctx_in.user, agent.spec.limits)
 
-        # 6. open the session -- which IS the pin. open_for() creates a row only
-        #    when the agent declares routing.pin_session, and
-        #    uq_agent_sessions_one_open_per_conversation makes that row the
-        #    single answer to "which agent is driving this conversation", so
-        #    RouterService Gate 2 finds it on the next turn with no LLM call.
-        #    There is no separate step writing conversations.pinned_agent_id any
-        #    more: that column duplicated this row under the identical condition
-        #    and had to be cleared in step with it by hand.
+        # 6. Open the session -- which IS the pin. The unique index makes that
+        #    row the single answer to "which agent is driving this
+        #    conversation", so Gate 2 finds it next turn with no LLM call.
         #
-        #    on_displace fires when the conversation had an open session
-        #    belonging to a DIFFERENT agent: that session is abandoned, and its
-        #    Mitra socket has to go with it or the pool would hand the new agent
-        #    a channel still authenticated against the old agent's remote
-        #    session. That path is how one conversation spans several agents.
+        #    on_displace fires when the open session belongs to a DIFFERENT
+        #    agent: it is abandoned, and its Mitra socket must go with it or the
+        #    pool hands the new agent a channel still authenticated against the
+        #    old remote session. That is how one conversation spans agents.
         session_view = self._sessions.open_for(
             conv.id, agent, on_displace=self._close_remote_channel,
             actor=ctx_in.user.user_id,
@@ -543,13 +535,9 @@ class OrchestrationService:
             self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
         self._db.commit()
 
-        # ONE line per completed turn, all fields, no interpolation.
-        #
-        # There was previously no success log at all: the pipeline logged only
-        # its failures, so "which agent served this conversation, on what model,
-        # and how long did it take" was answerable only from the database. The
-        # latency was already measured and persisted -- it just never reached a
-        # log line, which is where anyone actually looks first.
+        # ONE line per completed turn, all fields, no interpolation -- the
+        # pipeline previously logged only its failures, so "which agent, what
+        # model, how long" was answerable only from the database.
         logger.info(
             "turn completed",
             extra={

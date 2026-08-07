@@ -1,3 +1,9 @@
+"""Conversation lifecycle and history.
+
+Responsible for: resolving, listing and starting conversations, and the
+flow breadcrumb.
+Used by: the chat and conversations routers.
+"""
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Set
 

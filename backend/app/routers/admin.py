@@ -1,30 +1,15 @@
 """Agent administration: status, config versioning, registry reload, tools.
 
-Port of src/api/admin_routes.py.
+Responsible for: validating and authorising admin writes, then shaping the
+response. The SQL lives in app/repositories/agents.py.
+Used by: the admin console; every route is gated by require_admin.
 
-TWO THINGS THAT LOOK LIKE BUGS AND ARE NOT
-------------------------------------------
-1. **A different error envelope.** These routes answer with a bare
-   `{"error": CODE}` (plus optional `path`/`msg`) -- no `status`, no
-   `error_code`, no `request_id`. The standard envelope lives in
-   app/exceptions/envelope.py and is deliberately NOT imported here.
-   tests/integration/test_config_versioning_lifecycle.py pins this shape.
+TWO THINGS THAT LOOK LIKE BUGS AND ARE NOT:
 
-2. **These handlers commit their own session.** Everywhere else the
-   `get_db` dependency owns the commit. Here each write commits before calling
-   `agent_registry.reload(db)`, because the reload must observe the row it just
-   wrote. The dependency's later commit is then a harmless no-op.
-
-Raw `sqlalchemy.text()` is still how `agents` and `agent_configs` are queried --
-they have no ORM model, see app/models/orm.py -- but that SQL now lives in
-`app/repositories/agents.py` rather than in this module. The statements moved
-verbatim; what changed is only where they live. In particular the
-deactivate-before-insert ordering that `uq_agent_configs_one_active` requires is
-now inside `AgentConfigRepository`, expressed once, instead of being spelled out
-at each of the two call sites that activate a version.
-
-This module routes, validates, authorises and shapes responses. It owns the
-transaction boundary (point 2 above) but issues no statements of its own.
+1. A DIFFERENT ERROR ENVELOPE -- a bare {"error": CODE}, not the standard one.
+   Pinned by tests/integration/test_config_versioning_lifecycle.py.
+2. THESE HANDLERS COMMIT THEIR OWN SESSION, because the registry reload that
+   follows must observe the row just written.
 """
 from __future__ import annotations
 

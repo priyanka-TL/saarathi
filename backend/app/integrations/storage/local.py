@@ -1,26 +1,11 @@
-"""Filesystem object store, for development.
+"""Local-filesystem object storage. DEVELOPMENT ONLY.
 
-WHY THIS EXISTS. Voice is the first feature in this app that needs a bucket, and
-without a local driver every developer would need cloud credentials before they
-could see a microphone work at all. This satisfies the same interface with a
-directory, so `CLOUD_STORAGE_PROVIDER=local` runs the full record -> transcribe
--> speak cycle offline. Mitra has the same escape hatch
-(`chatbot/services/storage/local_storage_handler.py` plus a
-`PUT /api/storage/upload-local/<key>` route); this is that idea, tightened.
+Responsible for: standing in for a bucket when there is none.
+Used by: selected by factory.py when CLOUD_STORAGE_PROVIDER=local.
 
-"PRESIGNED" URLS POINT BACK AT THIS SERVICE. There is no storage origin to
-upload to, so `presign_put` returns a URL for `PUT {prefix}/api/voice/upload-local/{key}`
-carrying an HMAC of the key and an expiry. The route is otherwise unauthenticated
--- it has to be, because a presigned URL is used by a bare `fetch` with no
-Authorization header -- so without the signature it would be an open
-write-anything-anywhere endpoint on a developer's machine.
-
-The signing key is random per process and held only in memory: restarting the
-backend invalidates outstanding URLs, which is correct for something that lives
-five minutes and costs nothing to reissue.
-
-DEV ONLY. No lifecycle expiry, no concurrent-writer story, no durability. Do not
-set CLOUD_STORAGE_PROVIDER=local in a deployment.
+There is no storage origin to PUT to, so presigned URLs point back at this app's
+own /api/voice/upload-local route, signed with an HMAC. That signature is the
+only thing authorising the write.
 """
 from __future__ import annotations
 

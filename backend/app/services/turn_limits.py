@@ -1,14 +1,11 @@
 """Turn limits, enforced against the agent's own LimitsSpec.
 
-This was a no-op stub (`RateLimitsDummy`), so every `limits:` block in every
-agent config was decorative -- max_turns and both rate limits were declared,
-validated, checksummed into the config table, and then never consulted. An
-interview had no turn ceiling at all.
+Responsible for: refusing a turn that exceeds max_turns or the per-minute rate.
+Used by: OrchestrationService, at step 5 of a turn.
 
-Deliberately cheap: two indexed counts against tables the turn is about to write
-to anyway. No Redis, and no in-process state -- which would be wrong the moment
-there is a second worker, and MITRA_ENABLED=1 already pins this deployment to
-one worker for an unrelated reason that will not always hold.
+Two indexed counts against tables the turn is about to write anyway. No Redis
+and no in-process state, which would be wrong the moment there is a second
+worker.
 """
 from __future__ import annotations
 

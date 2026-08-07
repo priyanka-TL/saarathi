@@ -1,18 +1,15 @@
 """JSON body parsing with Flask's exact semantics.
 
-Deliberately NOT Pydantic body models. Two reasons:
+Responsible for: turning a request body into a dict, or None.
+Used by: every route that accepts a body.
 
-* `POST /api/chat` must answer a missing/!JSON body with its OWN
-  `400 INVALID_REQUEST` envelope. A Pydantic model would emit FastAPI's 422
-  first and the handler would never run.
-* `{"message": ""}` is VALID -- an empty string is an accepted message (pinned
-  by tests/characterisation/test_chat_errors.py). The check is
-  `"message" in data`, never truthiness, so no model may mark it required-and-
-  non-empty.
+Deliberately NOT Pydantic body models: a model would emit FastAPI's 422 before
+the handler could return its own 400 INVALID_REQUEST envelope, and `{"message":
+""}` must stay valid (an empty string is an accepted message).
 
-These are the only `async def` callables in the request path, and correctly so:
-reading the request body is genuine async I/O with no blocking work. Every
-endpoint that consumes them is still a plain `def`.
+These are the only `async def` callables in the request path, correctly so --
+reading a body is genuine async I/O. Every endpoint consuming them is a plain
+`def`.
 """
 from __future__ import annotations
 

@@ -1,20 +1,11 @@
-"""S3 and every S3-compatible service, on boto3.
+"""S3-compatible object storage.
 
-ONE DRIVER, FOUR PROVIDERS. `CLOUD_ENDPOINT` is passed straight to boto3 as
-`endpoint_url`, so this same class serves AWS S3, OCI Object Storage, MinIO and
-anything else speaking the S3 API. That is most of the reason a per-vendor
-driver is not needed -- the protocol is the interface, not the hostname.
+Responsible for: presigned PUT/GET, fetch and delete against S3, OCI or MinIO.
+Used by: selected by factory.py when CLOUD_STORAGE_PROVIDER is aws/s3/oci/minio.
 
-CREDENTIAL PRECEDENCE mirrors the reference implementation:
-
-  both ACCOUNTNAME and SECRET set  -> explicit static credentials
-  exactly one set                  -> IGNORE BOTH and warn
-  neither set                      -> IAM role / instance credential chain
-
-The middle case matters. Passing a key with no secret makes boto3 raise deep
-inside the first API call with a message about partial credentials, which reads
-like an outage; treating it as "unconfigured" and saying so at boot is the
-difference between a five-minute fix and an hour.
+CLOUD_ENDPOINT is what distinguishes the three -- one boto3 driver serves them
+all. boto3 resolves credentials while the client is being CONSTRUCTED, which is
+why tests must state their own rather than falling through to the IMDS chain.
 """
 from __future__ import annotations
 

@@ -1,25 +1,11 @@
-"""HTTP client for Bhashini (AI4Bharat / ULCA Dhruva).
+"""The Bhashini (AI4Bharat / ULCA Dhruva) speech client.
 
-One endpoint serves every task. The `taskType` in `pipelineTasks[0]` selects
-between ASR, TTS and translation, and the response is shaped differently for
-each -- which is why the three public methods do not share a parser.
+Responsible for: transcription, synthesis and translation over one HTTP session.
+Used by: VoiceService, built once by the container when VOICE_ENABLED=1.
 
-SYNCHRONOUS, with one reusable `requests.Session`, matching
-`integrations/mitra/rest_client.py`. Endpoints are plain `def` and Starlette
-already runs them in a worker thread; an async client would need the endpoint to
-be `async def`, which this codebase forbids for good reasons (CLAUDE.md
-§ Patterns).
-
-NO RETRIES, deliberately. ASR requests carry ten seconds of audio and take
-seconds to answer, so a blind retry doubles the wall time a user waits before
-being told it failed -- and a worker thread is held for all of it. The frontend
-decides whether to retry, because only it knows the user is still there.
-
-THE AUTH HEADERS ARE ASYMMETRIC, and that is faithful to Mitra: ASR sends
-`Authorization` + `userID` + `ulcaApiKey`, while TTS and translation send
-`Authorization` alone. Dhruva accepts both shapes. Sending all three everywhere
-would probably work, but "probably" against an undocumented public service is
-not worth the change.
+Long recordings are split and transcribed in parallel because Dhruva degrades on
+long clips. Provider errors are translated to BhashiniError subtypes here, so
+`requests` exceptions never escape this package.
 """
 from __future__ import annotations
 

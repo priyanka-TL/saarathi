@@ -1,20 +1,12 @@
-"""Google Cloud Storage, on google-cloud-storage.
+"""Google Cloud Storage.
 
-CREDENTIALS COME FROM AN ENVIRONMENT VARIABLE, NOT A FILE. `CLOUD_STORAGE_SECRET`
-carries the entire service-account JSON, which is what lets one config
-convention cover both providers -- and it avoids having to mount a key file into
-a container just to sign a URL.
+Responsible for: V4 signed URLs, fetch and delete against GCS.
+Used by: selected by factory.py when CLOUD_STORAGE_PROVIDER is gcp/gcs/google.
 
-V4 SIGNED URLS NEED A PRIVATE KEY IN PROCESS. This is the one place GCS is
-meaningfully harder than S3: `blob.generate_signed_url` signs locally, so
-Application Default Credentials from a metadata server are NOT enough (they have
-no private key, and signing would need an IAM SignBlob round trip). A
-service-account JSON with `private_key` is therefore required, and saying so at
-boot beats a signing error on the first upload.
-
-`google.cloud.storage` is imported INSIDE this module, and this module is only
-imported when the provider is gcp -- so an AWS deployment never loads it, and
-the package stays an optional dependency.
+THE ELEVATE ENV CONVENTION HAS NO PROJECT SLOT, so CLOUD_STORAGE_REGION carries
+the PROJECT ID here, and CLOUD_STORAGE_SECRET is a whole service-account JSON.
+Getting the project wrong fails at BOOT with "Project was not passed and could
+not be determined".
 """
 from __future__ import annotations
 

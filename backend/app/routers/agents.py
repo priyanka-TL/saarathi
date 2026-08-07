@@ -1,6 +1,8 @@
-"""The public agent catalogue -- what the sidebar renders.
+"""GET /api/agents -- the agents this caller may select.
 
-Port of src/api/agent_routes.py.
+Responsible for: shaping the agent list; scope resolution and the access filter
+live in AgentRegistry.routable_for_user.
+Used by: the SPA, to render the agent picker.
 """
 from __future__ import annotations
 

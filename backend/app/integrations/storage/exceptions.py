@@ -1,13 +1,8 @@
-"""Exceptions raised by the storage integration layer.
+"""Storage failures, provider-agnostic.
 
-Thin wrappers so callers can catch storage failures without importing
-`botocore.exceptions` or `google.api_core.exceptions` -- which is what keeps
-the router provider-agnostic. A router that had to `except ClientError` would
-be an AWS router with a GCP branch bolted on.
-
-NOTHING HERE MAY CARRY A CREDENTIAL. `CLOUD_STORAGE_SECRET` is a service-account
-JSON under gcp, and boto3/google exceptions are formatted into these messages by
-callers -- so the drivers pass a short summary, never the raw upstream repr.
+Responsible for: the error types every driver raises, so callers never see a
+boto3 ClientError or a google-cloud exception.
+Used by: the drivers raise them; VoiceService and the voice router map them.
 """
 from typing import Optional
 

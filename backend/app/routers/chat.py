@@ -1,11 +1,10 @@
-"""The turn endpoint and the conversation reset.
+"""The chat surface: POST /api/chat and POST /api/reset.
 
-Port of the /api/chat and /api/reset halves of src/api/chat_routes.py.
+Responsible for: validating the request, delegating one turn, mapping failures.
+Used by: the SPA on every message the user sends.
 
-This router is a plain `def`, like every other. That is what lets
-OrchestrationService.handle_turn hold a session-scoped Postgres advisory lock
-on one connection across a commit and across a handler call of up to 60s. See
-app/dependencies/db.py and app/main.py.
+The turn pipeline itself is OrchestrationService; /api/reset is
+ConversationService.begin_new_chat. This module holds neither.
 """
 from __future__ import annotations
 
@@ -114,21 +113,13 @@ def chat(
     except MitraError as e:
         return mitra_error_response(e)
     except SaarthiError as e:
-        # Every mapped domain failure, including the LLM ones, in one clause.
-        # Each carries its own status, code and client-safe message
-        # (app/exceptions/domain.py, app/llm/exceptions.py), so a new domain
+        # Every mapped domain failure, LLM ones included, in one clause. Each
+        # carries its own status, code and client-safe message, so a new domain
         # exception needs no edit here.
-        #
-        # This replaces a runtime `from app.services.router_service import
-        # AgentNotFound` INSIDE the blanket except below, followed by an
-        # isinstance check -- which meant every other domain failure, an LLM
-        # rate limit included, fell through to an indistinguishable 500.
         return error_response(e.public_message, e.error_code, e.status_code)
     except Exception as e:  # noqa: BLE001 -- mirrors the original blanket catch
-        # exc_info so the traceback lands IN the JSON record rather than on
-        # stderr where nothing can correlate it. The fields are what make this
-        # answerable without a redeploy: which conversation, whose tenant, and
-        # which agent was selected when it broke.
+        # exc_info puts the traceback in the JSON record; the fields make this
+        # answerable without a redeploy.
         tenant_id, organization_id = scope_for_user(user)
         logger.error(
             "Error handling request: %s", e,
@@ -159,14 +150,11 @@ def reset(
     conversation_id_str = data.get("conversation_id")
     req_conv_id = parse_uuid(conversation_id_str) if conversation_id_str else None
     if conversation_id_str and req_conv_id is None:
-        # This route has no exception handler of its own, so a malformed id used
-        # to escape as a bare 500.
+        # No handler of its own here, so a malformed id would escape as a 500.
         return error_response("conversation_id must be a UUID", "INVALID_REQUEST", 400)
 
-    # The find -> abandon -> close-channel -> start ordering, and the reason for
-    # it, live in the service. This route supplies only the one thing the
-    # service cannot know: how to reach the Mitra channel pool, which is held on
-    # the container.
+    # Ordering lives in the service. This route supplies only what the service
+    # cannot know: how to reach the Mitra channel pool.
     new_conv = ConversationService(db).begin_new_chat(
         req_conv_id,
         user,

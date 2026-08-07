@@ -1,19 +1,10 @@
-"""MitraSessionManager -- the channel pool: conversation_id -> MitraChannel.
+"""The pool of live Mitra channels, keyed by conversation.
 
-In-process, LRU-bounded, with an idle reaper and atexit cleanup (design doc
-§7.2, §7.4). Persistent-with-re-auth (rather than connect-per-turn) is
-correct specifically because Mitra's interview state lives in MITRA'S OWN
-Postgres (ChatSession.current_step, CompanyChat rows), not in the socket --
-so re-authenticating with the same remote_session_id genuinely resumes the
-interview rather than losing it. Connect-per-turn is disqualified because
-disconnecting stamps `PAUSED` onto Mitra's own completion-tracking field
-(CompanyChat.status, §1.4) and costs ~2s per turn.
+Responsible for: reusing one socket per conversation, and reaping idle ones.
+Used by: the container builds one; orchestration and the routers close through it.
 
-This class does NOT read from Postgres itself -- `acquire(spec, sess)` takes
-an already-resolved `sess` (the caller is responsible for having fetched it
-fresh), and on a miss just constructs a new MitraChannel with it. That's
-what makes re-authentication correct: the caller's fresh remote_session_id
-flows straight into the new channel's authenticate frame.
+IN PROCESS MEMORY, which is why MITRA_ENABLED=1 pins the app to a single worker:
+a second worker opens a SECOND channel for the same interview.
 """
 from __future__ import annotations
 

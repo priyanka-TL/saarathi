@@ -1,9 +1,8 @@
-"""Validation and redaction rules for an agent configuration.
+"""Validation and redaction for an agent configuration.
 
-Both of these were defined inside `app/routers/admin.py`. Neither is routing:
-one resolves a Mitra connection to check an endpoint (a router has no business
-importing an integration), and the other is a recursive security transform over
-arbitrary config data.
+Responsible for: rejecting a remote_flow config that would fail silently, and
+blanking unresolved credential placeholders before a config is returned.
+Used by: the admin router, on write and on read.
 """
 from __future__ import annotations
 

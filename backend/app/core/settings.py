@@ -1,3 +1,12 @@
+"""Application settings.
+
+Responsible for: every configurable value, and the one .env file behind them.
+Used by: build_container and anything that needs a tunable; imported once, at
+startup, where a validation error exits the process.
+
+PRECEDENCE (highest first): real environment variables, then backend/.env, then
+the field defaults here.
+"""
 import sys
 from pathlib import Path
 from typing import Literal, Optional
@@ -6,39 +15,15 @@ from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import ValidationError, field_validator
 
-# The backend package root (.../backend). The env file is resolved against
-# THIS, not the CWD -- so `python -m app.main` finds the same configuration
-# whatever directory it was launched from.
+# The backend package root. The env file resolves against THIS, not the CWD, so
+# `python -m app.main` finds the same config whatever directory launched it.
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# ---------------------------------------------------------------------------
-# Populate os.environ from .env, explicitly and first.
-#
-# Settings itself does NOT need this -- pydantic-settings reads the file
-# directly. ONE thing still does: `RemoteSpec.origin_env`, which names the
-# variable holding a scope's Mitra Origin credential and is resolved with
-# os.getenv (app/integrations/mitra/connection.py). It is the only remaining
-# environment indirection in agent configuration, and it exists because the
-# Origin header is a credential that must not be stored in a config row.
-#
-# The agent YAML's `${VAR}` substitution and the `bot_route_env` / `company_env`
-# fields used to depend on this too. Both are gone -- agent config lives in the
-# database and carries literal values.
-#
-# Under Flask this worked by accident twice over -- `flask run` loads .env, and
-# so does litellm on import. Neither applies under uvicorn as a guarantee, and
-# depending on a transitive import side effect is not worth keeping.
-#
-# PRECEDENCE (highest first):
-#
-#   1. real environment variables   (container / CI injection, one-off overrides)
-#   2. backend/.env                 (the single config file)
-#   3. the field defaults in this file
-#
-# override=False, so a real environment variable still beats the file -- which
-# is what makes `PORT=9000 make run` and container-injected config work without
-# editing anything.
-# ---------------------------------------------------------------------------
+# Settings does not need this -- pydantic-settings reads the file itself. One
+# thing still does: RemoteSpec.origin_env names the variable holding a scope's
+# Mitra Origin credential and is resolved with os.getenv. That indirection
+# exists because the Origin header is a credential that must not sit in a
+# config row. override=False keeps real environment variables winning.
 load_dotenv(BASE_DIR / ".env", override=False)
 
 class Settings(BaseSettings):
@@ -111,16 +96,10 @@ class Settings(BaseSettings):
     jwt_email_suffix: str = "@shikshalokam.org"
 
     # ---- mitra ----
-    #
-    # ONLY FOUR MITRA KEYS LIVE HERE (mitra_enabled is up with the feature flags
-    # above). Which Mitra deployment an agent reaches -- base URL, WebSocket URL,
-    # user agent, allowed hosts, timeouts, ip_* and the six endpoint paths -- is
-    # NOT configuration of this process. It is per agent and per tenant, so it
-    # lives in `remote.connection` on the agent config row. See
-    # docs/agent-configuration.md.
-    #
-    # NOTE extra="ignore" above: a stale MITRA_BASE_URL left in a .env is
-    # accepted silently and does nothing. Delete them from your .env.
+    # ONLY FOUR KEYS LIVE HERE. Which Mitra deployment an agent reaches (base
+    # URL, timeouts, endpoint paths) is per agent and per tenant, so it lives in
+    # `remote.connection` on the agent config row -- not here. Note extra=ignore
+    # above: a stale MITRA_BASE_URL in a .env is accepted and does nothing.
 
     # A CREDENTIAL -- Mitra gates admission on the Origin header. Never log it,
     # never store it in a config row, never echo it in an error response.
@@ -134,19 +113,11 @@ class Settings(BaseSettings):
     mitra_idle_close_s: float = 1200.0
 
     # ---- cloud storage (provider-agnostic) ----
-    #
-    # Voice recordings go straight from the browser to a bucket via a presigned
-    # URL, so the process needs storage credentials before it can serve the
-    # first /api/voice request -- which is why these are env, not config rows.
-    #
-    # SWITCHING PROVIDER IS A .env CHANGE, NOT A CODE CHANGE. The names follow
-    # the ELEVATE convention shared with the Node services, so one deployment's
-    # values drop into another unchanged. `identity` and `secret` mean different
-    # things per provider, which is the price of one name for one slot:
-    #
-    #   aws / s3 / oci -> ACCOUNTNAME = access key id, SECRET = secret access key
-    #   gcp            -> ACCOUNTNAME = service-account email,
-    #                     SECRET      = the full service-account JSON
+    # Switching provider is a .env change, not a code change. Names follow the
+    # ELEVATE convention shared with the Node services, so ACCOUNTNAME/SECRET
+    # mean different things per provider:
+    #   aws / s3 / oci -> access key id / secret access key
+    #   gcp            -> service-account email / the full service-account JSON
     #   local          -> both unused
     cloud_storage_provider: str = "local"
     # The ELEVATE Node services also accept a bare CLOUD_STORAGE key and some of

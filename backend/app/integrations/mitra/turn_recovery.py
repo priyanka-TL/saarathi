@@ -1,28 +1,10 @@
-"""Reconciling a lost turn against Mitra's own record -- WITHOUT re-sending it.
+"""Deciding what became of a turn Mitra never answered.
 
-WHY THIS EXISTS
-===============
-When ``send_and_await_turn`` gives up, the turn has NOT necessarily failed.
-Verified live (session ``q6geuug...``): Mitra answered in 8.4s, Saarthi stopped
-listening, and the reply was simply never read. Two things then went wrong:
+Responsible for: reconciling the text we sent against Mitra's recent chat rows.
+Used by: TurnFinalizer, after a turn timeout and on POST /sessions/{id}/resume.
 
-  1. ``MitraChannel._drain_stale()`` discards the late frame at the start of the
-     next turn, so the answer is lost even if the user does nothing.
-  2. The UI's Retry button re-POSTed the same text. Mitra had already moved on,
-     so the answer was recorded against the NEXT question -- the §1.6
-     answer-destruction hazard the codebase warns about.
-
-So recovery must be READ-ONLY against Mitra. This module holds the decision:
-given Mitra's own CompanyChat tail, did our turn land, and did it get answered?
-
-WHY THERE IS NO STORED CURSOR
-=============================
-The obvious design records the highest CompanyChat id before each send. That
-costs a REST round-trip on EVERY turn to learn an id we almost never need, and
-the write would have to land before ``handle_turn``'s step-9 commit, i.e. in the
-hot path. Instead we match on the last USER row, which needs nothing persisted:
-Mitra merges consecutive same-sender messages (common_chat_tasks.py:32-45), so a
-repeated answer cannot produce two adjacent user rows to confuse the match.
+READ-ONLY against Mitra. Re-sending is unsafe: Mitra may have answered and moved
+on, so the resend would land against the NEXT question (§1.6).
 """
 from __future__ import annotations
 

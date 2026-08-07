@@ -1,3 +1,13 @@
+"""The in-process agent catalogue.
+
+Responsible for: holding the enabled agents and their active configs, reloading
+them on a TTL, and resolving a tenant's own config on top.
+Used by: routing, the agents router and the admin reload endpoint.
+
+The snapshot holds the DEFAULT scope. `resolve_for_scope` layers a tenant's own
+config over it -- every path that reads an agent for a caller must go through
+it, or one tenant is served another's configuration.
+"""
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 import time
@@ -31,42 +41,26 @@ class RegisteredAgent:
 class AgentRegistry:
     def __init__(self, ttl_s: float = 60.0, mitra_enabled: bool = True):
         self._ttl_s = ttl_s
-        # MITRA_ENABLED=0 must hide every remote_flow agent, or the sidebar
-        # offers interviews nothing can serve and RemoteFlowAgentHandler raises
-        # at construction time.
-        #
-        # This used to be a DB WRITE: ConfigSyncService forced those agents to
-        # status='disabled' at startup, and had to flip them back when the flag
-        # was re-enabled. That is gone with the YAML sync, and a runtime filter
-        # is the better home anyway -- a deployment-level switch has no business
-        # mutating rows that a tenant's configuration also lives in.
+        # MITRA_ENABLED=0 hides every remote_flow agent, or the sidebar offers
+        # interviews nothing can serve. A runtime filter, not a DB write: a
+        # deployment switch has no business mutating tenant configuration.
         self._mitra_enabled = mitra_enabled
         self._snapshot: Dict[str, RegisteredAgent] = {}
         self._legacy_names: Dict[str, str] = {}
         self._version: int = 0
         self._loaded_at: float = 0.0
         self._max_updated_at = None
-        # Keyed by (registry_version, tenant, org, agent_key), so a reload
-        # invalidates every scoped entry for free -- the version is part of the
-        # key, and stale entries age out when the cache is cleared on overflow.
+        # The registry version is part of the key, so a reload invalidates
+        # every scoped entry for free.
         self._scope_cache: Dict[tuple, "RegisteredAgent"] = {}
 
     def reload(self, session) -> int:
         try:
-            # Query enabled agents joined with their active DEFAULT-SCOPE
-            # configuration.
-            #
-            # THE SCOPE FILTER IS LOAD-BEARING, not decoration. Since migration
-            # 0006 an agent may have SEVERAL active configs -- one per
-            # (tenant_id, organization_id) -- so an unfiltered join returns one
-            # row per scope and the dict assignment below would keep whichever
-            # arrived last. That is non-deterministic, and it would let one
-            # tenant's configuration become the global snapshot every other
-            # tenant is served from.
-            #
-            # The snapshot is the DEFAULT scope, i.e. what a tenant sees when
-            # it has not customised anything. Tenant-specific configs are
-            # applied per request by resolve_for_scope() below.
+            # THE SCOPE FILTER IS LOAD-BEARING. An agent may have several
+            # active configs, one per (tenant, org); unfiltered, the dict
+            # assignment below keeps whichever row arrived last -- letting one
+            # tenant's configuration become the snapshot everyone is served
+            # from. resolve_for_scope() layers tenant configs on per request.
             query = text("""
                 SELECT a.id, a.key, a.name, a.description, a.agent_type, a.is_default, a.updated_at, c.config, c.checksum
                 FROM agents a
@@ -84,16 +78,9 @@ class AgentRegistry:
             for row in result:
                 if row.agent_type == "remote_flow" and not self._mitra_enabled:
                     continue
-                # PER-ROW, so ONE bad config costs ONE agent rather than all of
-                # them. That matters more than it used to: config is written
-                # through the API now, with no YAML validated at startup, so a
-                # row can predate a schema change. Letting it abort the whole
-                # loop meant the snapshot came back empty and `sync_and_reload`
-                # refused to boot -- one editable row able to take down every
-                # agent, including the ones it has nothing to do with.
-                #
-                # Same posture as resolve_for_scope, which already falls back
-                # rather than failing a turn.
+                # PER-ROW: one bad config costs one agent, not all of them.
+                # Aborting the loop left the snapshot empty and refused the
+                # boot -- one editable row able to take down every agent.
                 try:
                     spec = _agent_spec_adapter.validate_python(row.config)
                 except Exception as exc:  # noqa: BLE001

@@ -1,3 +1,9 @@
+"""The tool catalogue.
+
+Responsible for: name -> LangChain tool, and validating a spec's `tools:` list.
+Used by: the admin route on config write, and HandlerFactory when building an
+LLM agent.
+"""
 from typing import List, Dict, Any
 from app.exceptions.domain import UnknownToolError
 from langchain_core.tools import BaseTool, tool

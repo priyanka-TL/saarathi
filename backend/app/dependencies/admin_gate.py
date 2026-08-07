@@ -1,17 +1,16 @@
 """The admin surface gate.
 
-Port of admin_bp's blueprint-level `before_request`. Two ordering facts are
-load-bearing and preserved:
+Responsible for: refusing non-admins, and hiding the surface entirely when the
+feature flag is off.
+Used by: every route in the admin routers, as a router-level dependency.
 
-1. `get_current_user` resolves first, so a bad credential is still a 401 before
-   the gate is consulted -- Flask's app-wide before_request ran before the
-   blueprint's.
-2. The feature flag is checked BEFORE the role, so a disabled admin surface
-   answers 404 to everyone, admins included. It masquerades as "this route does
-   not exist" on purpose.
+Two orderings are load-bearing: get_current_user resolves first, so a bad
+credential is a 401 before the gate is consulted; and the feature flag is
+checked BEFORE the role, so a disabled admin surface answers 404 to everyone,
+admins included.
 
-`user.roles` is active-org scoped (see app/domain/core.py). Never flatten roles
-across organisations to make this pass.
+`user.roles` is active-org scoped -- never flatten roles across organisations to
+make this pass.
 """
 from __future__ import annotations
 

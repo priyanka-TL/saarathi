@@ -1,11 +1,10 @@
-"""Identifier parsing. Framework-free, deliberately.
+"""Identifier parsing.
 
-`parse_uuid` used to live in `app/utils/responses.py` next to `json_response`,
-which imports `fastapi.responses`. That was fine while only routers called it --
-but the moment a service needed it, importing it dragged FastAPI into the
-framework-agnostic core and broke the `core_is_framework_free` import-linter
-contract. The function itself has nothing to do with HTTP; only its neighbour
-did.
+Responsible for: lenient UUID parsing.
+Used by: routers and services alike.
+
+Framework-free on purpose, so services can import it without pulling FastAPI
+into the framework-agnostic core.
 """
 from __future__ import annotations
 
@@ -14,15 +13,11 @@ from typing import Any, Optional
 
 
 def parse_uuid(raw: Any) -> Optional[uuid.UUID]:
-    """Lenient UUID parse, returning None instead of raising.
+    """Parse a UUID, returning None instead of raising.
 
-    Path parameters are declared `str` and parsed with this rather than typed
-    as `uuid.UUID`, because FastAPI would answer a malformed segment with a 422
-    and its own `{"detail": [...]}` body. Flask's `<uuid:...>` converter simply
-    failed to match, so the URL did not exist and the answer was a 404 -- and
-    the frontend treats 404 on a conversation as "forget this conversation"
-    (see loadConversationHistory). Returning None lets each route answer with
-    its own 404 envelope.
+    Path params are typed `str` and parsed here so a malformed segment gets this
+    app's own 404 envelope rather than FastAPI's 422 `{"detail": [...]}`. The
+    frontend treats a 404 on a conversation as "forget this conversation".
     """
     if raw is None:
         return None

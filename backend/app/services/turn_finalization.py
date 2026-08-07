@@ -1,21 +1,17 @@
 """Finalising a delegated interview, and recovering a turn Mitra swallowed.
 
-Split out of `orchestration.py`, which had grown past 990 lines. These methods
-were already private and already cohesive -- they are the tail of a remote_flow
-interview -- and they moved VERBATIM: the ordering, the claim, the comments and
-the exception handling are unchanged. Only the collaborators are now explicit
-constructor arguments rather than attributes of the turn pipeline.
+Responsible for: the claim-then-submit sequence that ends an interview, and the
+read-only reconciliation that recovers a timed-out turn.
+Used by: OrchestrationService, which owns the ordering around it.
 
-THE ORDERING IN `finalize_claiming` IS THE WHOLE POINT OF THIS MODULE. Mitra's
-`Story.session` is UNIQUE, so a second finalize() call for one session fails on
-Mitra's side; `claim_finalizing()`'s conditional UPDATE plus
-`uq_agent_sessions_remote_session` make a duplicate structurally impossible on
-Saarthi's side too. That is why the claim is step 1 and nothing else runs unless
-it is won. Do not reorder the numbered steps.
+THE CLAIM IS STEP 1 AND NOTHING ELSE RUNS UNLESS IT IS WON. Mitra's
+`Story.session` is UNIQUE, so a second finalize() for one session fails on
+Mitra's side; claim_finalizing()'s conditional UPDATE makes a duplicate
+structurally impossible here too. Do not reorder the numbered steps.
 
-`rest_for` is injected as a CALLABLE rather than a Mitra client, because which
-client finalises a story is a per-agent, per-tenant decision -- the one that
-finalises must be built from the same connection the interview ran over.
+`rest_for` is injected as a callable because which client finalises a story is a
+per-agent, per-tenant decision -- it must be the one built from the same
+connection the interview ran over.
 """
 from __future__ import annotations
 
