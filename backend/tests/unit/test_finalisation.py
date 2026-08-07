@@ -9,6 +9,7 @@ from app.domain.sessions import AgentSessionDTO
 from app.integrations.mitra.exceptions import MitraError, MitraSSRFError, MitraTurnTimeout
 from app.integrations.mitra.turn_recovery import ChatRow
 from app.services.orchestration import OrchestrationService
+from app.services.turn_finalization import TurnFinalizer
 from app.services.session_service import SessionService
 
 
@@ -103,6 +104,26 @@ def _make_orch(
     orch._router = MagicMock()
     orch._rate_limits = MagicMock()
     orch._tools_repo = MagicMock()
+
+    # Finalisation and lost-turn recovery live in TurnFinalizer, which the real
+    # constructor builds. This helper bypasses __init__ (it sets every
+    # collaborator by hand), so it has to build the collaborator too -- built
+    # from the SAME mocks, so every assertion below still observes the objects
+    # the test handed in.
+    #
+    # rest_for is the bound method, exactly as production passes it: that is
+    # what makes the mitra_clients=None fallback to the single injected client
+    # work, which is what these assertions are written against.
+    orch._finalizer = TurnFinalizer(
+        sessions=orch._sessions,
+        messages=orch._messages,
+        conversations=orch._conversations,
+        audit=orch._audit,
+        mitra_sessions=orch._mitra_sessions,
+        mitra_clients=orch._mitra_clients,
+        mitra_rest=orch._mitra_rest,
+        rest_for=orch.rest_for,
+    )
     return orch
 
 

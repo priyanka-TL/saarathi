@@ -59,7 +59,6 @@ from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.container import Container
-from app.database.engine import engine
 from app.dependencies.container import get_container
 
 
@@ -67,7 +66,15 @@ def get_db(request: Request, container: Container = Depends(get_container)) -> I
     # One connection, checked out for the whole request. Everything below --
     # the registry reload, the turn, the advisory lock AND its unlock -- runs
     # on this exact connection.
-    connection = engine.connect()
+    #
+    # FROM THE CONTAINER, not from the module-level `app.database.engine.engine`
+    # global this used to import. Both resolve to the same object today --
+    # build_container deliberately reuses that singleton rather than opening a
+    # second pool -- but reading it off the container is what makes the frozen
+    # Container.engine field honest. Importing the global meant the field was
+    # bypassed on every single request, so overriding it (in a test, say) had no
+    # effect while appearing to.
+    connection = container.engine.connect()
     db = Session(
         bind=connection,
         autocommit=False,
