@@ -502,7 +502,32 @@ class OrchestrationService:
         else:
             self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
         self._db.commit()
-        
+
+        # ONE line per completed turn, all fields, no interpolation.
+        #
+        # There was previously no success log at all: the pipeline logged only
+        # its failures, so "which agent served this conversation, on what model,
+        # and how long did it take" was answerable only from the database. The
+        # latency was already measured and persisted -- it just never reached a
+        # log line, which is where anyone actually looks first.
+        logger.info(
+            "turn completed",
+            extra={
+                "conversation_id": str(conv.id),
+                "tenant_id": turn_tenant_id,
+                "organization_id": turn_organization_id,
+                "user_id": ctx_in.user.user_id,
+                "agent_key": agent.key,
+                "agent_type": agent.spec.agent_type,
+                "route_reason": decision.reason,
+                "route_confidence": decision.confidence,
+                "router_latency_ms": decision.router_latency_ms,
+                "model": turn.model,
+                "latency_ms": turn.latency_ms,
+                "tool_call_count": len(turn.tool_traces),
+            },
+        )
+
         return TurnResult(
             conversation=conv,
             message=msg,
@@ -559,7 +584,10 @@ class OrchestrationService:
                 {"key": self._turn_lock_key(conversation_id)},
             )
         except Exception as e:
-            logger.warning("failed to release turn lock for %s: %s", conversation_id, e)
+            logger.warning(
+                "failed to release turn lock: %s", e,
+                extra={"conversation_id": str(conversation_id)},
+            )
 
     def _close_remote_channel(self, conversation_id: uuid.UUID) -> None:
         """Drop this conversation's pooled Mitra socket. Best-effort: the DB
@@ -570,7 +598,10 @@ class OrchestrationService:
         try:
             self._mitra_sessions.close(conversation_id)
         except Exception as e:
-            logger.warning("failed to close Mitra channel for %s: %s", conversation_id, e)
+            logger.warning(
+                "failed to close Mitra channel: %s", e,
+                extra={"conversation_id": str(conversation_id)},
+            )
 
     # ------------------------------------------------------------------
     # Lost-turn recovery (see src/integrations/mitra/turn_recovery.py)
@@ -605,7 +636,10 @@ class OrchestrationService:
             result = self._reconcile(agent, session_view, sent_text)
         except Exception as recovery_error:
             # Recovery is best-effort: never let it mask the original timeout.
-            logger.warning("turn recovery failed after %s: %s", exc, recovery_error)
+            logger.warning(
+                "turn recovery failed after %s: %s", exc, recovery_error,
+                extra={"agent_key": getattr(agent, "key", None)},
+            )
             return None
 
         if result is None or result.outcome is not TurnOutcome.ANSWERED:
@@ -615,7 +649,10 @@ class OrchestrationService:
             )
             return None
 
-        logger.info("turn recovery: recovered a reply Mitra had already sent (stage=%s)", result.stage)
+        logger.info(
+            "turn recovery: recovered a reply Mitra had already sent",
+            extra={"stage": result.stage, "agent_key": getattr(agent, "key", None)},
+        )
 
         # completion_poll_every_turn normally runs inside the handler, which
         # never got that far. Without this an interview that COMPLETED during

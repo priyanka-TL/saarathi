@@ -124,7 +124,14 @@ class AgentRegistry:
             self._version += 1
             self._loaded_at = time.monotonic()
             self._max_updated_at = max_ts
-            logger.info(f"AgentRegistry reloaded version {self._version} with {len(self._snapshot)} agents")
+            logger.info(
+                "AgentRegistry reloaded",
+                extra={
+                    "registry_version": self._version,
+                    "agent_count": len(self._snapshot),
+                    "skipped_count": len(skipped),
+                },
+            )
             if skipped:
                 logger.warning(
                     "AgentRegistry: %s agent(s) EXCLUDED for an unparseable config: %s. "
@@ -135,7 +142,11 @@ class AgentRegistry:
             
         except Exception as e:
             # Failure to reload must LOG and keep the cached snapshot
-            logger.error(f"Failed to reload AgentRegistry: {e}. Keeping cached snapshot.")
+            logger.error(
+                "Failed to reload AgentRegistry: %s. Keeping cached snapshot.", e,
+                exc_info=True,
+                extra={"registry_version": self._version},
+            )
             
         return self._version
 
@@ -153,7 +164,10 @@ class AgentRegistry:
             else:
                 self._loaded_at = time.monotonic()
         except Exception as e:
-            logger.error(f"Failed to check for AgentRegistry updates: {e}")
+            logger.error(
+                "Failed to check for AgentRegistry updates: %s", e,
+                extra={"registry_version": self._version},
+            )
 
     @property
     def version(self) -> int:

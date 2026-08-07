@@ -23,6 +23,7 @@ from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
 from app.dependencies.request_context import get_request_id
 from app.domain.core import UserContext
+from app.domain.scope import scope_for_user
 from app.exceptions.envelope import error_response, mitra_error_response
 from app.integrations.mitra.exceptions import MitraError
 from app.services.conversations import ConversationService
@@ -124,7 +125,22 @@ def chat(
         from app.services.router_service import AgentNotFound
         if isinstance(e, AgentNotFound):
             return error_response("Agent not found", "AGENT_NOT_FOUND", 404)
-        logger.error("Error handling request: %s", e)
+        # exc_info so the traceback lands IN the JSON record rather than on
+        # stderr where nothing can correlate it. The fields are what make this
+        # answerable without a redeploy: which conversation, whose tenant, and
+        # which agent was selected when it broke.
+        tenant_id, organization_id = scope_for_user(user)
+        logger.error(
+            "Error handling request: %s", e,
+            exc_info=True,
+            extra={
+                "conversation_id": str(req_conv_id) if req_conv_id else None,
+                "tenant_id": tenant_id,
+                "organization_id": organization_id,
+                "user_id": getattr(user, "user_id", None),
+                "agent_key": target_agent,
+            },
+        )
         return error_response("An internal error occurred.", "INTERNAL", 500)
 
 

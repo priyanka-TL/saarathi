@@ -13,7 +13,6 @@ corrupt it. This handler never reads `ctx.history` at all, which is what
 structurally guarantees that.
 """
 import dataclasses
-import time
 
 from app.agents.factory import HandlerDeps, register_handler
 from app.agents.protocol import (
@@ -23,6 +22,7 @@ from app.agents.protocol import (
     SessionState,
     TurnContext,
 )
+from app.core import timing
 from app.domain.agent_spec import RemoteFlowAgentSpec
 from app.integrations.mitra.connection import resolve_connection
 from app.integrations.mitra.exceptions import MitraChannelClosed
@@ -54,7 +54,7 @@ class RemoteFlowAgentHandler:
         self._rest = deps.mitra_clients.get(self._conn)
 
     def handle(self, ctx: TurnContext) -> AgentTurn:
-        t0 = time.monotonic()
+        t0 = timing.start()
 
         if ctx.session is None:
             raise RuntimeError(
@@ -131,7 +131,7 @@ class RemoteFlowAgentHandler:
                 remote_bot_route=bot_route,
                 step=bot.step,
             ),
-            latency_ms=int((time.monotonic() - t0) * 1000),
+            latency_ms=timing.elapsed_ms(t0),
             terminal=done,
         )
 

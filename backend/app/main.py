@@ -37,7 +37,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.router import api_router
 from app.core.concurrency import size_threadpool
-from app.core.logger import get_logger
+from app.core.logger import configure_logging, get_logger
 from app.core.runtime import resolve_reloader  # noqa: F401  (re-exported for __main__)
 from app.exceptions.handlers import register_exception_handlers
 from app.middleware.request_id import RequestIDMiddleware
@@ -67,6 +67,11 @@ def create_app() -> FastAPI:
     # Importing settings triggers validation; a missing OPENROUTER_API_KEY
     # exits the process here, before anything else is built.
     from app.core.settings import settings
+
+    # FIRST, before build_container -- container construction logs (the storage
+    # bucket-type warning, the missing-ffmpeg warning), and those lines are
+    # worth having in the same JSON format as everything else.
+    configure_logging(settings.LOG_LEVEL)
 
     # Mounted in front of every route, including /healthz and the docs. Empty
     # by default, so the paths are byte-identical to the unprefixed app.

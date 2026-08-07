@@ -6,7 +6,6 @@ app.services.config_mode_router's temporary stand-in (that module's own
 docstring says to delete it once this ships -- not done in this task, per
 explicit scope decision; this file is additive only).
 """
-import time
 from dataclasses import dataclass
 from operator import itemgetter
 from typing import List, Literal, Optional
@@ -16,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.agents.protocol import HistoryTurn, TurnContext
 from app.domain.agent_spec import ModelSpec
+from app.core import timing
 from app.core.logger import get_logger
 from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -54,8 +54,8 @@ def _as_text(msg: AIMessage) -> str:
     return str(content) if content else ""
 
 
-def _ms(t0: float) -> int:
-    return int((time.monotonic() - t0) * 1000)
+#: Local alias kept so the five gates below stay one line each.
+_ms = timing.elapsed_ms
 
 
 class RouterService:
@@ -75,7 +75,7 @@ class RouterService:
     # ------------------------------------------------------------------
 
     def select(self, conv, ctx: TurnContext, explicit_key: Optional[str]) -> RouteDecision:
-        t0 = time.monotonic()
+        t0 = timing.start()
 
         # GATE 1 -- explicit selection from the UI
         if explicit_key:
@@ -116,7 +116,17 @@ class RouterService:
                     and conf >= a.spec.routing.confidence_threshold):
                 return RouteDecision(a, "llm", conf, _ms(t0))
         except Exception as e:
-            logger.warning(f"router failed, falling back: {e}")
+            # Gate 4 is the only gate that can fail, and falling through to the
+            # default agent hides that it did. The fields are what distinguish
+            # "the router model is down" from "it answered but below threshold".
+            logger.warning(
+                "router failed, falling back: %s", e,
+                extra={
+                    "conversation_id": str(getattr(conv, "id", "")) or None,
+                    "candidate_count": len(visible),
+                    "latency_ms": _ms(t0),
+                },
+            )
 
         # GATE 5 -- default. Routing NEVER fails.
         return RouteDecision(self._registry.default(), "default", 0.0, _ms(t0))

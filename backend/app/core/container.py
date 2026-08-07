@@ -4,11 +4,14 @@ from typing import Any, Optional
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core.logger import get_logger
 from app.core.settings import Settings
 from app.tools.registry import ToolRegistry
 from app.llm.factory import LlmFactory
 from app.agents.factory import HandlerFactory, HandlerDeps
 from app.services.agent_registry import AgentRegistry
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -96,8 +99,6 @@ def build_container(settings: Settings) -> Container:
     bhashini = None
     object_store = None
     if settings.voice_enabled:
-        import logging
-
         from app.integrations.bhashini import BhashiniClient
         from app.integrations.bhashini.audio import ffmpeg_available
         from app.integrations.storage import get_object_store
@@ -108,7 +109,7 @@ def build_container(settings: Settings) -> Container:
                 "Set the Bhashini credentials in .env, or set VOICE_ENABLED=0."
             )
         if not ffmpeg_available():
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "VOICE_ENABLED=1 but ffmpeg is not on PATH. Speech-to-text will "
                 "fail at request time. Install it: `brew install ffmpeg` or "
                 "`apt-get install -y ffmpeg`."
@@ -123,7 +124,7 @@ def build_container(settings: Settings) -> Container:
         # anyone who guesses a key can listen to them. A warning in the startup
         # log is the difference between a decision and an accident.
         if object_store.bucket_type == "public":
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "VOICE_ENABLED=1 with CLOUD_STORAGE_BUCKET_TYPE=public: voice "
                 "recordings in bucket %r will be WORLD-READABLE. Recordings are "
                 "user speech (PII) -- set CLOUD_STORAGE_BUCKET_TYPE=private "

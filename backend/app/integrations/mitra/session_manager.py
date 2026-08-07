@@ -139,7 +139,7 @@ class MitraSessionManager:
             try:
                 self._reap_once()
             except Exception as e:
-                logger.error(f"idle reaper failed: {e}")
+                logger.error("idle reaper failed: %s", e, exc_info=True)
 
     def _reap_once(self) -> None:
         """Closes channels idle beyond mitra_idle_close_s (or no longer

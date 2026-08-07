@@ -307,4 +307,6 @@ class MitraChannel:
         except Exception:
             pass
         if not quiet:
-            logger.warning(f"MitraChannel closed (reason={self._close_reason!r})")
+            logger.warning(
+                "MitraChannel closed", extra={"close_reason": self._close_reason},
+            )
