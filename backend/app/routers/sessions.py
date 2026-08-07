@@ -1,18 +1,16 @@
-"""Session polling/control endpoints (design doc §10.2): a client drives and
-observes a pinned (remote_flow) interview through these once /api/chat itself
-has returned a `session` payload.
+"""Session polling and control for a delegated (remote_flow) interview.
 
-Every route scopes the session to the caller's tenant/identity via the
-owning conversation -- a wrong id OR someone else's session both come back
-as a plain 404, never 403, so a client can't probe for the existence of a
-session it doesn't own.
+Responsible for: reading, finalising, resuming, abandoning a session and
+serving its report URL.
+Used by: the SPA, once /api/chat has returned a `session` payload.
 
-Port of src/api/session_routes.py.
+Every route scopes the session to the caller via the owning conversation. A
+wrong id and someone else's session both answer 404, never 403, so a client
+cannot probe for sessions it does not own.
 """
 from __future__ import annotations
 
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -22,6 +20,7 @@ from app.core.container import Container
 from app.dependencies.container import get_container
 from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
+from app.dependencies.orchestrator import get_orchestrator
 from app.domain.core import UserContext
 from app.exceptions.envelope import error_response, mitra_error_response
 from app.integrations.mitra.exceptions import MitraError
@@ -33,6 +32,16 @@ from app.utils.responses import json_response, parse_uuid
 from app.utils.serializers import agent_key_for, serialize_session
 
 router = APIRouter(tags=["sessions"])
+
+# Seconds the client is told to wait before polling again on a 202.
+#
+# NOT Settings fields, deliberately: these go out IN THE RESPONSE BODY and the
+# frontend polls on them, so they are part of the API contract rather than an
+# operator tuning knob. The two differ because the waits differ -- a turn that
+# is still running with Mitra settles in a few seconds, where finalisation has
+# to generate a report.
+TURN_PENDING_RETRY_AFTER_S = 3
+FINALIZE_PENDING_RETRY_AFTER_S = 5
 
 
 def _not_found() -> JSONResponse:
@@ -50,18 +59,6 @@ def _scoped_session(db: Session, session_id: uuid.UUID, user: UserContext):
     if conv is None:
         return None
     return dto
-
-
-def _orchestrator(db: Session, container: Container) -> OrchestrationService:
-    return OrchestrationService(
-        session=db,
-        registry=container.agent_registry,
-        handler_factory=container.handler_factory,
-        llm_factory=container.llm_factory,
-        mitra_sessions=container.mitra_sessions,
-        mitra_clients=container.mitra_clients,
-        settings=container.settings,
-    )
 
 
 def _resolve(session_id: str, db: Session, user: UserContext):
@@ -92,6 +89,7 @@ def get_session(
 def finalize_session(
     session_id: str,
     container: Container = Depends(get_container),
+    orch: OrchestrationService = Depends(get_orchestrator),
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
@@ -100,7 +98,7 @@ def finalize_session(
         return miss
 
     try:
-        result = _orchestrator(db, container).finalize_now(sid, user)
+        result = orch.finalize_now(sid, user)
     except MitraError as e:
         return mitra_error_response(e)
 
@@ -113,6 +111,7 @@ def finalize_session(
 def resume_session(
     session_id: str,
     container: Container = Depends(get_container),
+    orch: OrchestrationService = Depends(get_orchestrator),
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
@@ -134,7 +133,7 @@ def resume_session(
         return miss
 
     try:
-        result = _orchestrator(db, container).resume_turn(sid, user)
+        result = orch.resume_turn(sid, user)
     except MitraError as e:
         return mitra_error_response(e)
 
@@ -157,7 +156,7 @@ def resume_session(
         return json_response({
             "status": "pending",
             "outcome": result.outcome.value,
-            "retry_after": 3,
+            "retry_after": TURN_PENDING_RETRY_AFTER_S,
         }, status_code=202)
 
     return json_response({
@@ -179,11 +178,16 @@ def abandon_session(
     if miss is not None:
         return miss
 
-    updated = SessionService(db).abandon(
-        dto.conversation_id, reason="user_requested", actor=user.user_id,
+    updated = SessionService(db).abandon_and_close(
+        dto.conversation_id,
+        reason="user_requested",
+        actor=user.user_id,
+        on_abandoned=(
+            container.mitra_sessions.close
+            if container.mitra_sessions is not None
+            else None
+        ),
     )
-    if updated is not None and container.mitra_sessions is not None:
-        container.mitra_sessions.close(dto.conversation_id)
 
     # Idempotent: if there was no open session to abandon (already terminal),
     # fall back to returning the cached row rather than a spurious 404.
@@ -195,6 +199,7 @@ def abandon_session(
 def get_report(
     session_id: str,
     container: Container = Depends(get_container),
+    orch: OrchestrationService = Depends(get_orchestrator),
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
@@ -208,30 +213,14 @@ def get_report(
     if miss is not None:
         return miss
 
-    # SCOPE-RESOLVED, like every other read of an agent off a session.
-    # get_by_id alone answers from the default-scope snapshot, so a tenant that
-    # had customised report_media_type -- or that points at its own Mitra --
-    # would have had its report fetched with the default scope's settings.
-    orch = _orchestrator(db, container)
-    agent = orch.agent_for_session(dto, user)
-    media_type: Optional[str] = (
-        agent.spec.remote.report_media_type if agent is not None else "application/pdf"
+    report = orch.report_for(dto, user)
+    if report.ready:
+        return json_response({
+            "report_url": report.report_url,
+            "media_type": report.media_type,
+            "story_id": report.story_id,
+        })
+
+    return json_response(
+        {"retry_after": FINALIZE_PENDING_RETRY_AFTER_S}, status_code=202,
     )
-
-    if dto.report_url:
-        return json_response(
-            {"report_url": dto.report_url, "media_type": media_type, "story_id": dto.result_ref}
-        )
-
-    rest = orch.rest_for(agent)
-    if dto.state == "completed" and rest is not None and dto.remote_session_id:
-        try:
-            url = rest.get_report(dto.remote_session_id, media_type=media_type)
-        except MitraError:
-            url = None
-        if url:
-            return json_response(
-                {"report_url": url, "media_type": media_type, "story_id": dto.result_ref}
-            )
-
-    return json_response({"retry_after": 5}, status_code=202)

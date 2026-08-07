@@ -1,5 +1,11 @@
+"""Conversation lifecycle and history.
+
+Responsible for: resolving, listing and starting conversations, and the
+flow breadcrumb.
+Used by: the chat and conversations routers.
+"""
 import uuid
-from typing import Optional, List, Dict, Any, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -8,6 +14,7 @@ from app.repositories.conversations import ConversationRepository
 from app.repositories.messages import MessageRepository
 from app.domain.core import UserContext, MemorySpec
 from app.domain.conversations import ConversationDTO, ConversationPageDTO, MessageDTO
+from app.services.session_service import SessionService
 
 
 class ConversationService:
@@ -114,5 +121,50 @@ class ConversationService:
         NOTE: /api/reset no longer calls this -- archiving on "New chat" is what
         hid every finished conversation from the recent list. Kept for a real,
         user-initiated archive action; `archived` now means only that.
+
+        NOT what POST /api/reset does; see `begin_new_chat` for that. The two
+        names are close and the behaviours are not: this one hides a
+        conversation, that one leaves it in history.
         """
         self._conv_repo.archive(conversation_id)
+
+    def begin_new_chat(
+        self,
+        conversation_id: Optional[uuid.UUID],
+        user: UserContext,
+        on_session_abandoned: Optional[Callable[[uuid.UUID], None]] = None,
+    ) -> ConversationDTO:
+        """What POST /api/reset does: leave the current conversation, start one.
+
+        The three steps were driven from the router, which had to know both the
+        ordering rule and that a Mitra socket exists at all.
+
+        1. Find the conversation being left, WITHOUT creating one. `resolve()`
+           is get_or_create: on a first-ever reset it would materialise an empty
+           conversation purely to abandon nothing, and step 3 would then create
+           a second -- two empty rows per reset, with the stray one competing to
+           be "most recent active" on the next turn.
+        2. Abandon any open session and close its Mitra channel BEFORE moving
+           on. A reset mid-interview otherwise orphans the socket and the story
+           is never finalised (design doc §10.2).
+        3. Start a fresh conversation, LEAVING THE PREVIOUS ONE IN HISTORY.
+           `start_new()` reuses an already-empty conversation when the user has
+           one, so repeated resets do not accumulate dead rows.
+
+        :param on_session_abandoned: called with the conversation id only when a
+            session was actually abandoned. Same shape as `SessionService.open_for`'s
+            `on_displace`, and for the same reason -- it keeps this service free
+            of any knowledge of Mitra, whose channel pool lives in the container.
+        :returns: the new conversation.
+        """
+        conv = self.find_current(conversation_id, user)
+
+        if conv is not None:
+            SessionService(self._session).abandon_and_close(
+                conv.id,
+                reason="reset",
+                actor=user.user_id,
+                on_abandoned=on_session_abandoned,
+            )
+
+        return self.start_new(user)

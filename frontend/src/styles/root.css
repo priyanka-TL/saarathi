@@ -699,3 +699,265 @@ body {
 .message.user {
     max-width: calc(78% + 40px);
 }
+
+/* =========================================================================
+ * VOICE
+ *
+ * Speech-to-text (the composer's mic) and text-to-speech (a speaker on each
+ * agent reply). Everything lives here rather than in style.css, which is a
+ * byte-verbatim port of the original Flask CSS and must not be edited.
+ *
+ * All colours come from the existing custom properties, so these controls
+ * follow the light/dark cascade without declaring a palette of their own.
+ * ====================================================================== */
+
+/*
+ * 6. The mic button.
+ *
+ * Sits between the textarea and #send-btn inside #chat-form, which is already
+ * `display: flex` (style.css). Circular and 48px so it reads as secondary to
+ * the pill-shaped Send, while still clearing the 44px minimum touch target.
+ * `margin-bottom: 2px` matches #send-btn so the two sit on one baseline as the
+ * textarea grows.
+ */
+.mic-btn {
+    flex-shrink: 0;
+    width: 48px;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    margin-bottom: 2px;
+    padding: 0;
+}
+
+.mic-btn:hover:not(:disabled) {
+    color: var(--primary-color);
+    border-color: var(--primary-color);
+    transform: translateY(-1px);
+}
+
+.mic-btn:active:not(:disabled) {
+    transform: scale(0.97);
+}
+
+.mic-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/*
+ * Recording. The colour change alone is not enough -- a user needs to be able
+ * to tell at a glance that the microphone is LIVE, so the pulse does the work
+ * and the fill makes it unmistakable.
+ */
+.mic-btn.is-recording {
+    background: var(--accent-color, #b83d78);
+    border-color: var(--accent-color, #b83d78);
+    color: #fff;
+    animation: mic-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(184, 61, 120, 0.45); }
+    50%      { box-shadow: 0 0 0 8px rgba(184, 61, 120, 0); }
+}
+
+/* Indeterminate progress, while transcribing or synthesising. */
+.voice-spinner {
+    animation: voice-spin 0.9s linear infinite;
+}
+
+@keyframes voice-spin {
+    to { transform: rotate(360deg); }
+}
+
+/*
+ * Respect the OS setting. A pulsing, spinning control is exactly the kind of
+ * motion this preference exists to suppress -- and both states stay legible
+ * without it, since each also changes colour or glyph.
+ */
+@media (prefers-reduced-motion: reduce) {
+    .mic-btn.is-recording { animation: none; }
+    .voice-spinner { animation: none; }
+}
+
+/*
+ * 7. Voice errors.
+ *
+ * Above the composer rather than in the transcript: a blocked microphone is a
+ * problem with the CONTROL, not a message in the conversation, and putting it
+ * in the transcript would leave a permanent artefact of a transient failure.
+ */
+.voice-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 10px;
+    padding: 10px 14px;
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+.voice-error-dismiss {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.9rem;
+    line-height: 1;
+    padding: 4px;
+}
+
+.voice-error-dismiss:hover {
+    color: var(--text-primary);
+}
+
+/*
+ * 8. The speaker button, on agent replies.
+ *
+ * `.message-footer` is a new flex row wrapping the existing `.message-meta`,
+ * so the button sits on the timestamp line instead of taking one of its own.
+ * `.message-meta` keeps every style it had; only its parent is new.
+ */
+.message-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.speaker-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: none;
+    border-radius: 9999px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    /*
+     * Faded until the bubble is hovered: one of these appears on EVERY agent
+     * reply, and at full strength a long transcript becomes a column of
+     * speaker icons competing with the text.
+     */
+    opacity: 0.55;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.message:hover .speaker-btn,
+.speaker-btn:focus-visible,
+.speaker-btn.is-playing {
+    opacity: 1;
+}
+
+.speaker-btn:hover:not(:disabled),
+.speaker-btn.is-playing {
+    color: var(--primary-color);
+}
+
+.speaker-btn:disabled {
+    cursor: default;
+}
+
+/*
+ * Touch devices have no hover, so the reveal above would never fire and the
+ * button would sit permanently at 55%. Show it outright instead.
+ */
+@media (hover: none) {
+    .speaker-btn { opacity: 0.8; }
+}
+
+/*
+ * 9. The voice language selector, in the sidebar.
+ */
+.voice-language {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 0 14px;
+}
+
+.voice-language-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.voice-language-select {
+    width: 100%;
+    padding: 9px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.voice-language-select:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+}
+
+/*
+ * 10. Mobile.
+ *
+ * Mirrors what style.css:1136 does to #send-btn at the same breakpoint (the
+ * label is hidden and the button shrinks). The mic is already icon-only, so it
+ * only needs to give back width -- while staying at the 44px minimum touch
+ * target, which is why this shrinks to 44 and not further.
+ */
+@media (max-width: 768px) {
+    .mic-btn {
+        width: 44px;
+        height: 44px;
+    }
+
+    .voice-error {
+        font-size: 0.8rem;
+        padding: 9px 12px;
+    }
+}
+
+/*
+ * 11. Send, disabled while the microphone is busy.
+ *
+ * style.css has no :disabled rule for #send-btn -- nothing ever disabled it
+ * before -- so without this the button greys out semantically and looks
+ * completely untouched, which reads as an unresponsive app rather than a
+ * deliberate state.
+ *
+ * The :hover and :active overrides are not redundant. CSS still applies :hover
+ * to a disabled button, so #send-btn:hover (style.css:1006) would keep lifting
+ * it and swapping in the hover colour under the cursor. These are one
+ * pseudo-class more specific and win.
+ */
+#send-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+#send-btn:disabled:hover,
+#send-btn:disabled:active {
+    background: var(--primary-color);
+    transform: none;
+}

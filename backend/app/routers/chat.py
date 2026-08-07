@@ -1,11 +1,10 @@
-"""The turn endpoint and the conversation reset.
+"""The chat surface: POST /api/chat and POST /api/reset.
 
-Port of the /api/chat and /api/reset halves of src/api/chat_routes.py.
+Responsible for: validating the request, delegating one turn, mapping failures.
+Used by: the SPA on every message the user sends.
 
-This router is a plain `def`, like every other. That is what lets
-OrchestrationService.handle_turn hold a session-scoped Postgres advisory lock
-on one connection across a commit and across a handler call of up to 60s. See
-app/dependencies/db.py and app/main.py.
+The turn pipeline itself is OrchestrationService; /api/reset is
+ConversationService.begin_new_chat. This module holds neither.
 """
 from __future__ import annotations
 
@@ -21,8 +20,11 @@ from app.dependencies.body import json_body_silent, json_body_strict
 from app.dependencies.container import get_container
 from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
+from app.dependencies.orchestrator import get_orchestrator
 from app.dependencies.request_context import get_request_id
 from app.domain.core import UserContext
+from app.domain.scope import scope_for_user
+from app.exceptions.domain import SaarthiError
 from app.exceptions.envelope import error_response, mitra_error_response
 from app.integrations.mitra.exceptions import MitraError
 from app.services.conversations import ConversationService
@@ -32,7 +34,6 @@ from app.services.orchestration import (
     TurnInput,
     TurnLimitExceeded,
 )
-from app.services.session_service import SessionService
 from app.utils.responses import json_response, parse_uuid
 from app.utils.serializers import serialize_session_summary
 
@@ -46,6 +47,7 @@ def chat(
     data: Optional[Dict[str, Any]] = Depends(json_body_strict),
     request_id: Optional[str] = Depends(get_request_id),
     container: Container = Depends(get_container),
+    orch: OrchestrationService = Depends(get_orchestrator),
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
@@ -68,16 +70,6 @@ def chat(
         return error_response("conversation_id must be a UUID", "INVALID_REQUEST", 400)
 
     try:
-        orch = OrchestrationService(
-            session=db,
-            registry=container.agent_registry,
-            handler_factory=container.handler_factory,
-            llm_factory=container.llm_factory,
-            mitra_sessions=container.mitra_sessions,
-            mitra_clients=container.mitra_clients,
-            settings=container.settings,
-        )
-
         ctx_in = TurnInput(
             request_id=request_id,
             conversation_id=req_conv_id,
@@ -120,11 +112,26 @@ def chat(
         return error_response(e.detail, "RATE_LIMITED", 429)
     except MitraError as e:
         return mitra_error_response(e)
+    except SaarthiError as e:
+        # Every mapped domain failure, LLM ones included, in one clause. Each
+        # carries its own status, code and client-safe message, so a new domain
+        # exception needs no edit here.
+        return error_response(e.public_message, e.error_code, e.status_code)
     except Exception as e:  # noqa: BLE001 -- mirrors the original blanket catch
-        from app.services.router_service import AgentNotFound
-        if isinstance(e, AgentNotFound):
-            return error_response("Agent not found", "AGENT_NOT_FOUND", 404)
-        logger.error("Error handling request: %s", e)
+        # exc_info puts the traceback in the JSON record; the fields make this
+        # answerable without a redeploy.
+        tenant_id, organization_id = scope_for_user(user)
+        logger.error(
+            "Error handling request: %s", e,
+            exc_info=True,
+            extra={
+                "conversation_id": str(req_conv_id) if req_conv_id else None,
+                "tenant_id": tenant_id,
+                "organization_id": organization_id,
+                "user_id": getattr(user, "user_id", None),
+                "agent_key": target_agent,
+            },
+        )
         return error_response("An internal error occurred.", "INTERNAL", 500)
 
 
@@ -143,32 +150,21 @@ def reset(
     conversation_id_str = data.get("conversation_id")
     req_conv_id = parse_uuid(conversation_id_str) if conversation_id_str else None
     if conversation_id_str and req_conv_id is None:
-        # This route has no exception handler of its own, so a malformed id used
-        # to escape as a bare 500.
+        # No handler of its own here, so a malformed id would escape as a 500.
         return error_response("conversation_id must be a UUID", "INVALID_REQUEST", 400)
 
-    svc = ConversationService(db)
-    # 1. Find the conversation being left, WITHOUT creating one. resolve() is
-    #    get_or_create: on a first-ever reset it would materialise an empty
-    #    conversation purely to abandon nothing, and step 2 then creates a
-    #    second one -- two empty rows per reset, and the stray one competes to
-    #    be "most recent active" on the next turn.
-    conv = svc.find_current(req_conv_id, user)
+    # Ordering lives in the service. This route supplies only what the service
+    # cannot know: how to reach the Mitra channel pool.
+    new_conv = ConversationService(db).begin_new_chat(
+        req_conv_id,
+        user,
+        on_session_abandoned=(
+            container.mitra_sessions.close
+            if container.mitra_sessions is not None
+            else None
+        ),
+    )
 
-    # Abandon any open session and close its Mitra channel BEFORE moving on --
-    # otherwise a reset mid-interview orphans the socket and the story is
-    # never finalized (design doc §10.2).
-    if conv is not None:
-        abandoned = SessionService(db).abandon(conv.id, reason="reset", actor=user.user_id)
-        if abandoned is not None and container.mitra_sessions is not None:
-            container.mitra_sessions.close(conv.id)
-
-    # 2. Start a fresh conversation, LEAVING THE PREVIOUS ONE IN HISTORY.
-    #    start_new() reuses an already-empty conversation when the user has one,
-    #    so repeated resets don't accumulate dead rows.
-    new_conv = svc.start_new(user)
-
-    # 3. Return the new id.
     return json_response({
         "status": "success",
         "conversation_id": str(new_conv.id),

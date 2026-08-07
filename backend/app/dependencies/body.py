@@ -1,18 +1,15 @@
 """JSON body parsing with Flask's exact semantics.
 
-Deliberately NOT Pydantic body models. Two reasons:
+Responsible for: turning a request body into a dict, or None.
+Used by: every route that accepts a body.
 
-* `POST /api/chat` must answer a missing/!JSON body with its OWN
-  `400 INVALID_REQUEST` envelope. A Pydantic model would emit FastAPI's 422
-  first and the handler would never run.
-* `{"message": ""}` is VALID -- an empty string is an accepted message (pinned
-  by tests/characterisation/test_chat_errors.py). The check is
-  `"message" in data`, never truthiness, so no model may mark it required-and-
-  non-empty.
+Deliberately NOT Pydantic body models: a model would emit FastAPI's 422 before
+the handler could return its own 400 INVALID_REQUEST envelope, and `{"message":
+""}` must stay valid (an empty string is an accepted message).
 
-These are the only `async def` callables in the request path, and correctly so:
-reading the request body is genuine async I/O with no blocking work. Every
-endpoint that consumes them is still a plain `def`.
+These are the only `async def` callables in the request path, correctly so --
+reading a body is genuine async I/O. Every endpoint consuming them is a plain
+`def`.
 """
 from __future__ import annotations
 
@@ -48,3 +45,18 @@ async def json_body_silent(request: Request) -> Dict[str, Any]:
     Content-Type at all.
     """
     return await json_body_strict(request) or {}
+
+
+async def raw_body(request: Request) -> bytes:
+    """The request body, unparsed.
+
+    For `PUT /api/voice/upload-local/{key}`, the only endpoint that receives
+    bytes rather than JSON -- the browser PUTs a recording straight to it under
+    the `local` storage provider.
+
+    A dependency rather than `await request.body()` inside the route, because
+    the route is a plain `def` (as every route here must be) and so cannot
+    await anything. Reading the body is real async I/O with no blocking work,
+    which is exactly the exception the two functions above already occupy.
+    """
+    return await request.body()

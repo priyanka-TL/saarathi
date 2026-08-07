@@ -1,91 +1,28 @@
-"""MitraRestClient — typed REST adapter for the five Mitra HTTP endpoints.
+"""MitraRestClient -- the five Mitra REST endpoints.
 
-SECURITY NOTICE — THE ORIGIN HEADER IS A CREDENTIAL
-====================================================
-Mitra's Django backend (chatbot/consumers/async_consumer.py) gates WebSocket
-admission on the HTTP `Origin` header. The REST endpoints share the same
-admission check. Sending `Origin: <MITRA_ORIGIN_URL>` plus a browser
-User-Agent is *required* for any request to succeed, and is technically
-*impersonation of a trusted browser client*.
+Responsible for: profile upsert, session creation, completion polling,
+finalisation and report fetch.
+Used by: OrchestrationService and TurnFinalizer, one client per connection.
 
-This is a known workaround, not a correct server-to-server credential. It is
-treated as a secret:
+THE ORIGIN HEADER IS A CREDENTIAL. Mitra gates admission on it, so it lives only
+in env, is built into `_fixed_headers` once, and must never be logged, printed
+or included in an exception -- `__repr__` is overridden for that reason. Without
+it every request is a 403; do not remove it "to clean up".
 
-  - Lives ONLY in MITRA_ORIGIN_URL env var (never in YAML, never in DB)
-  - Built into ``_fixed_headers`` once at construction time
-  - ``_fixed_headers`` is NEVER printed, logged, or included in exceptions
-  - ``__repr__`` is overridden to omit it
+WHICH FINALIZE ENDPOINT (v1 vs v2) IS PER-AGENT CONFIG, NOT A CONSTANT, and the
+choice has two independent consequences:
 
-The correct long-term fix is a server-to-server credential from the Mitra
-team. File that as a follow-up. DO NOT remove this header "to clean up" —
-without it every request returns 403.
+  * BOT RESOLUTION. v2 requires a row in Mitra's Flow table keyed on the flow
+    route; a flow without one is a deterministic HTTP 500.
+  * PDF RENDERER. Only v1 knows the chaupal (discussion) flow exists. A v2
+    finalisation of a chaupal flow returns a story, a StoryMedia row, a 200 from
+    get-story and a downloadable file that is COMPLETELY BLANK, with nothing
+    logged anywhere.
 
-See also: design doc §13.2.
-
-ENDPOINT CONTRACT (§1.8)
-========================
-All five methods in this module correspond to steps in the §1.8 table:
-
-  upsert_profile       POST /api/profile/              step 1
-  generate_session     GET  /api/generate-session/     step 2
-  is_session_completed GET  /api/companychat/          step 7
-  finalize             POST <spec.remote.finalize_path> step 8
-  get_report           GET  /api/get-story/            step 9
-
-WHICH FINALIZE ENDPOINT (v1 vs v2)
-==================================
-The two end-story endpoints resolve the story bot by DIFFERENT mechanisms,
-and that -- not the token placement -- is what decides which one a flow may
-use (verified against mitra-service source):
-
-  /api/end-story/v2/  generate_story() -> get_story_company_bot_simple(flow)
-                      -> Flow.objects.get(flow_route=flow)
-                      Requires a row in Mitra's Flow table keyed on
-                      flow_route == flow.
-
-  /api/end-story/     create_story_object() -> get_story_company_bot(profile, flow)
-                      -> CompanyBot.objects.get(route='/guest-story') etc.,
-                      branching on the SessionFlowName enum. No Flow row
-                      needed.
-
-A flow with no Flow row 500s on v2 -- `Flow.objects.get` raises
-Flow.DoesNotExist, which get_story_company_bot_simple re-raises as DRF
-NotFound, which end_story_v2's `except Flow.DoesNotExist` does NOT match, so
-it lands in the view's generic `except Exception` -> HTTP 500. It is a
-CONFIGURATION error reported as a server error; it is deterministic, not a
-race. Which endpoint each agent uses is therefore per-agent config
-(``spec.remote.finalize_path``), not a global constant.
-
-THE ENDPOINT ALSO SELECTS THE PDF RENDERER
-==========================================
-The bot-resolution difference above is not the only consequence, and for
-`guest-discussion` it is not even the important one. The two views run two
-different story-and-PDF pipelines, and only v1 knows the chaupal (discussion)
-flow exists:
-
-  v1  create_story_object: flow == GuestDiscussion -> save_chaupal_report
-      -> save_shikshalokam_story -> get_story_html -> get_mom_report_html
-      = the populated minutes-of-meeting report.
-
-  v2  generate_story: NO chaupal branch. Always save_generic_story
-      -> save_project_story -> get_html_from_template, which returns ""
-      when no PDFTemplates row matches the flow -- and save_project_story
-      passes that "" to Gotenberg, which renders an empty page and returns
-      HTTP 200.
-
-So a v2 finalisation of a chaupal flow yields a story, a StoryMedia row, a
-200 from get-story and a downloadable file that is COMPLETELY BLANK, with
-nothing logged anywhere. Choosing the endpoint is choosing the renderer.
-
-WHY ``as_guest`` EXISTS
-=======================
-Mitra derives ``auth = access_token is not None`` and uses it to pick the PDF
-template's ``user_type`` (AUTH vs GUEST). Presenting a token on a guest flow
-therefore looks up a template nobody registered and lands in the same empty
--> blank-PDF branch. It must match what MitraChannel._authenticate sends on
-the socket (``access_token: None``): interviewing as a guest and finalising as
-an authenticated user is the mismatch, not either half. Per-agent via
-``spec.remote.finalize_as_guest``.
+`as_guest` exists for the same class of silent failure: Mitra derives
+`auth = access_token is not None` and picks the PDF template's user_type from
+it, so finalising with a token on a guest flow renders a blank PDF. It must
+match what the socket authenticated as.
 """
 from __future__ import annotations
 
@@ -96,6 +33,7 @@ from urllib.parse import urlparse
 import requests
 from requests import Session as HTTPSession
 
+from app.domain.agent_spec import DEFAULT_REPORT_MEDIA_TYPE
 from app.integrations.mitra.exceptions import (
     MitraError,
     MitraHTTPError,
@@ -104,12 +42,9 @@ from app.integrations.mitra.exceptions import (
 )
 from app.integrations.mitra.turn_recovery import ChatRow
 
-# Mitra's own endpoint paths, appended to the connection's base URL. A
-# third-party API contract rather than a preference -- change them when Mitra
-# moves an endpoint, not to suit a deployment. Overridable per agent through
-# `remote.connection.paths`; app/domain/agent_spec.py mirrors these defaults
-# (it cannot import them -- the domain layer is import-pure) and
-# tests/unit/mitra/test_paths_defaults.py asserts the two stay in step.
+# A third-party API contract, not a preference: change these when Mitra moves
+# an endpoint. app/domain/agent_spec.py mirrors them (it cannot import them --
+# the domain layer is import-pure) and a test asserts the two stay in step.
 FINALIZE_V1_PATH = "/api/end-story/"
 FINALIZE_V2_PATH = "/api/end-story/v2/"
 
@@ -129,40 +64,27 @@ class MitraPaths:
     finalize_v2: str = FINALIZE_V2_PATH
 
     def is_v2_finalize(self, path: str) -> bool:
-        """Trailing slashes vary between the YAML and the configured value;
-        compare on the normalised path so `/api/end-story/v2` and
-        `/api/end-story/v2/` do not disagree about where the token goes."""
+        """Compared on the normalised path, so a trailing slash cannot change
+        where the token goes."""
         return path.strip("/") == self.finalize_v2.strip("/")
 
     def is_known_finalize(self, path: str) -> bool:
-        """True iff `path` is one of the configured finalize endpoints.
+        """Whether `path` is one of the configured finalize endpoints.
 
-        `RemoteSpec.finalize_path` is a plain string (the domain layer cannot
-        import Settings), so this is what POST /api/agents/{key}/config checks
-        to catch a YAML path that matches neither endpoint -- which would
-        otherwise fall through to the v1 branch and finalize with the wrong
-        body shape.
+        What the admin config route checks: a path matching neither would fall
+        through to the v1 branch and finalise with the wrong body shape.
         """
         return path.strip("/") in {self.finalize_v1.strip("/"), self.finalize_v2.strip("/")}
 
 
 class MitraRestClient:
-    """Thin, typed HTTP client for the Mitra REST surface.
+    """Synchronous HTTP client for the Mitra REST surface. Stateless, no threads.
 
-    Instantiate once per process (or once per request — it is stateless).
-    All I/O is synchronous; the class has no background threads.
-
-    Args:
-        base_url:        MITRA_BASE_URL — e.g. "https://mitra.example.com"
-        origin_url:      MITRA_ORIGIN_URL — sent as ``Origin`` on every call.
-                         **Credential: never log, never print, never raise.**
-        user_agent:      MITRA_USER_AGENT — browser UA string.
-        allowed_hosts:   Extra FQDNs whose presigned URLs may be fetched.
-                         The hostname from ``base_url`` is always included.
-        connect_timeout: Seconds to wait for TCP connection.
-        read_timeout:    Seconds to wait for the first response byte.
-        paths:           Mitra's endpoint paths (MITRA_*_PATH). Defaults to the
-                         shipped contract; only a Mitra-side move needs these.
+    :param origin_url: sent as `Origin` on every call. A CREDENTIAL -- never
+        log, print or raise it.
+    :param allowed_hosts: extra FQDNs whose presigned URLs may be fetched;
+        base_url's own host is always included.
+    :param paths: Mitra's endpoint paths; only a Mitra-side move needs these.
     """
 
     def __init__(
@@ -171,8 +93,12 @@ class MitraRestClient:
         origin_url: str,
         user_agent: str,
         allowed_hosts: list[str],
-        connect_timeout: float = 10.0,
-        read_timeout: float = 30.0,
+        # NO DEFAULTS, deliberately. MitraConnection (app/integrations/mitra/
+        # connection.py) owns these numbers -- Mitra's timeouts are part of the
+        # DB-backed remote spec, not .env, so the connection is the single place
+        # they are declared and MitraClientRegistry.get() always passes them.
+        connect_timeout: float,
+        read_timeout: float,
         paths: Optional[MitraPaths] = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -185,24 +111,21 @@ class MitraRestClient:
             h.strip().lower() for h in [base_host] + allowed_hosts if h.strip()
         )
 
-        # ----------------------------------------------------------------
-        # SECURITY: _fixed_headers contains the Origin credential.
-        # This attribute must NEVER appear in logs, __repr__, or exceptions.
-        # See the module-level docstring for full rationale.
-        # ----------------------------------------------------------------
+        # SECURITY: holds the Origin credential. Must never appear in a log,
+        # a __repr__ or an exception.
         self._fixed_headers: dict[str, str] = {
             "Origin": origin_url,
             "User-Agent": user_agent,
             "Accept": "application/json",
         }
 
-        # One reusable session — shares connection pool, applies fixed headers.
+        # One reusable session: shared pool, fixed headers applied once.
         self._session: HTTPSession = requests.Session()
         self._session.headers.update(self._fixed_headers)
 
     def __repr__(self) -> str:
-        # Intentionally omits _fixed_headers to prevent the Origin credential
-        # from leaking into log messages that repr objects.
+        # Omits _fixed_headers so the Origin credential cannot leak into a log
+        # line that reprs this object.
         return f"MitraRestClient(base_url={self._base_url!r})"
 
     # ------------------------------------------------------------------
@@ -210,20 +133,11 @@ class MitraRestClient:
     # ------------------------------------------------------------------
 
     def upsert_profile(self, email: str, latest_flow_used: str, company: str) -> str:
-        """Create or retrieve the Mitra profile for this user.
+        """Create or retrieve this user's Mitra profile. Idempotent.
 
-        POST /api/profile/ → returns the profile id.
-
-        ``company`` comes from the AGENT's own ``remote.company`` -- per agent and
-        per tenant, not a global. ``email`` must be the *derived* email from module 2.4
-        (``user_id + JWT_EMAIL_SUFFIX``). A different derivation produces a
-        second profile and splits the user's story history. §1.7 trap 1.
-
-        In the static-token POC the same user is always looked up and Mitra
-        returns their existing profile id — this is idempotent.
-
-        Returns:
-            profile_id (str)
+        `email` MUST be the derived email (user_id + JWT_EMAIL_SUFFIX): a
+        different derivation creates a SECOND profile and splits the user's
+        story history. `company` is per-agent, not a global.
         """
         data = self._request(
             "POST",
@@ -376,7 +290,9 @@ class MitraRestClient:
             raise MitraError("finalize: response missing 'id' (story id) key")
         return story_id, content
 
-    def get_report(self, session_id: str, media_type: str = "application/pdf") -> Optional[str]:
+    def get_report(
+        self, session_id: str, media_type: str = DEFAULT_REPORT_MEDIA_TYPE,
+    ) -> Optional[str]:
         """Fetch the generated report URL for a completed session.
 
         GET /api/get-story/?session=<id> → walks results[0].story_media[],

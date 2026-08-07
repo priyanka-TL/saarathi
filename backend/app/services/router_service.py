@@ -1,12 +1,17 @@
-"""RouterService -- five gates, in order (design doc §6.2-§6.4).
+"""Agent routing: five gates, in order.
 
-Replaces app.agents.orchestrator.OrchestratorAgent's single-gate LLM
-classifier (which has a substring-collision bug at orchestrator.py:62-65) and
-app.services.config_mode_router's temporary stand-in (that module's own
-docstring says to delete it once this ships -- not done in this task, per
-explicit scope decision; this file is additive only).
+Responsible for: choosing which agent serves a turn.
+Used by: OrchestrationService, once per turn.
+
+    1 explicit selection from the UI
+    2 session pin        -- zero LLM calls
+    3 keyword pre-route  -- zero LLM calls
+    4 LLM classifier     -- the only gate that can fail
+    5 default            -- routing NEVER fails
+
+Gate 4 falling through to Gate 5 is why a router outage degrades rather than
+errors.
 """
-import time
 from dataclasses import dataclass
 from operator import itemgetter
 from typing import List, Literal, Optional
@@ -16,6 +21,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.agents.protocol import HistoryTurn, TurnContext
 from app.domain.agent_spec import ModelSpec
+from app.exceptions.domain import AgentNotFound
+from app.core import timing
 from app.core.logger import get_logger
 from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -34,10 +41,7 @@ class RouteDecision:
     unpinned: bool = False
 
 
-class AgentNotFound(Exception):
-    def __init__(self, key: str):
-        super().__init__(f"agent not found or not selectable: {key!r}")
-        self.key = key
+# Declared in app/exceptions/domain.py; re-exported here for existing callers.
 
 
 # Stripped from both ends of a candidate command before comparing it to an exit
@@ -54,8 +58,8 @@ def _as_text(msg: AIMessage) -> str:
     return str(content) if content else ""
 
 
-def _ms(t0: float) -> int:
-    return int((time.monotonic() - t0) * 1000)
+#: Local alias kept so the five gates below stay one line each.
+_ms = timing.elapsed_ms
 
 
 class RouterService:
@@ -75,7 +79,7 @@ class RouterService:
     # ------------------------------------------------------------------
 
     def select(self, conv, ctx: TurnContext, explicit_key: Optional[str]) -> RouteDecision:
-        t0 = time.monotonic()
+        t0 = timing.start()
 
         # GATE 1 -- explicit selection from the UI
         if explicit_key:
@@ -116,7 +120,17 @@ class RouterService:
                     and conf >= a.spec.routing.confidence_threshold):
                 return RouteDecision(a, "llm", conf, _ms(t0))
         except Exception as e:
-            logger.warning(f"router failed, falling back: {e}")
+            # Gate 4 is the only gate that can fail, and falling through to the
+            # default agent hides that it did. The fields are what distinguish
+            # "the router model is down" from "it answered but below threshold".
+            logger.warning(
+                "router failed, falling back: %s", e,
+                extra={
+                    "conversation_id": str(getattr(conv, "id", "")) or None,
+                    "candidate_count": len(visible),
+                    "latency_ms": _ms(t0),
+                },
+            )
 
         # GATE 5 -- default. Routing NEVER fails.
         return RouteDecision(self._registry.default(), "default", 0.0, _ms(t0))

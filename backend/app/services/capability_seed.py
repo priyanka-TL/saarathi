@@ -1,36 +1,11 @@
-"""Links seeded capabilities to seeded agents, once agents exist.
+"""Default capability membership.
 
-WHY THIS EXISTS AT ALL -- an ordering problem, not a design preference
----------------------------------------------------------------------
-Two seeds run at different times against different sources:
+Responsible for: repairing a database where the capability and agent migrations
+got out of step.
+Used by: sync_and_reload, once at startup.
 
-  * `capabilities` are seeded by MIGRATION 0006. A migration cannot depend on
-    agents existing, because on a fresh database it runs before anything has
-    been synced.
-  * `agents` are seeded by migration 0007, which is
-    after every migration has run.
-
-`capability_agents` needs both. On a fresh database the migration therefore
-cannot create the membership rows -- the agents do not exist yet, and the table
-holds a real foreign key. Without this module a brand-new deployment would come
-up with capability cards that have no buttons.
-
-WHY IT IS SAFE TO RUN ON EVERY BOOT
------------------------------------
-It only ever fills a capability that has NO membership at all, and only at the
-DEFAULT scope. So:
-
-  * a fresh database gets a working catalogue;
-  * an admin who curated membership -- including one who deliberately removed a
-    single agent -- is never contradicted, because that capability still has
-    members and is skipped entirely;
-  * a tenant's own capabilities are never touched.
-
-An admin who empties a default capability completely WILL see it refilled on
-the next restart. That is the accepted edge: "no members at all" is
-indistinguishable from "never seeded", and self-healing a fresh install matters
-more than honouring a deliberate total-emptying that the admin can express
-better by disabling the capability.
+Only ever fills a default-scope capability with NO members at all, so a curated
+membership is never contradicted.
 """
 from __future__ import annotations
 
@@ -39,11 +14,10 @@ import json
 from sqlalchemy import text
 
 from app.core.logger import get_logger
+from app.domain.scope import DEFAULT_SCOPE
 from app.models.orm import SYSTEM_ACTOR
 
 logger = get_logger("capability_seed")
-
-DEFAULT_SCOPE = "default"
 
 #: The shipped membership: capability key -> the agents beneath it, in order.
 #: `autostart` is sent with autostart:true so the server does not title the

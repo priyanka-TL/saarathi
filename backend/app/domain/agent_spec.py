@@ -1,3 +1,13 @@
+"""The AgentSpec model -- what an agent IS, as validated configuration.
+
+Responsible for: the discriminated union of agent types and their nested specs,
+plus the canonical JSON + checksum used for versioning.
+Used by: the admin route on write, the registry on load, handlers at runtime.
+
+PURE: imports nothing outside app.domain, so it cannot reach Settings. That is
+why `finalize_path` is a plain str rather than a Literal -- the endpoints are
+configurable, and the admin route validates it instead.
+"""
 import json
 import hashlib
 import copy
@@ -6,6 +16,14 @@ from typing import Any, Literal, Optional, Union, List
 from pydantic import BaseModel, Field, ConfigDict, model_validator, PrivateAttr
 
 from app.domain.core import UserContext
+
+#: What a finalised interview report is fetched as, unless a spec overrides it.
+#: Declared here (rather than defaulted separately in RemoteSpec, in
+#: MitraRestClient.get_report and in the sessions router) because the three have
+#: to agree: the media type requested from Mitra is what the browser is then
+#: told it is downloading.
+DEFAULT_REPORT_MEDIA_TYPE = "application/pdf"
+
 
 class ModelSpec(BaseModel):
     provider:    Literal["openrouter"] = "openrouter"
@@ -239,7 +257,7 @@ class RemoteSpec(BaseModel):
     # as -- a mismatch yields a valid but BLANK PDF, silently.
     finalize_as_guest: bool = False
     # NOT report_path: get_report hardcodes its endpoint and never read one.
-    report_media_type: str = "application/pdf"
+    report_media_type: str = DEFAULT_REPORT_MEDIA_TYPE
 
 class RemoteFlowAgentSpec(BaseAgentSpec):
     agent_type: Literal["remote_flow"]

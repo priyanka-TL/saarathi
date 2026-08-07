@@ -1,51 +1,23 @@
-"""Caller identity, resolved once from configuration.
+"""Caller identity.
 
-AUTH_CHECK is the only switch:
+Responsible for: producing a UserContext from configuration.
+Used by: built once by the container; called per request by the identity
+dependency.
 
-  AUTH_CHECK=true   SAARTHI_STATIC_TOKEN (from .env) is DECODED, not
-                    validated -- no signature check, no expiry check. Saarthi
-                    has already validated it upstream and is the only component
-                    allowed to; re-validating here can only reject a request
-                    Saarthi already accepted.
-
-  AUTH_CHECK=false  No token is read at all. Every request resolves to the
-                    hardcoded development identity below.
-
-Resolved ONCE, at container build time, and reused for every request
-(`authenticate()` just returns the cached result). This is the identity source
-for the whole app; there is no per-request alternative. That is a deliberate
-choice, not an oversight: the frontend is a bare SPA with no login flow and
-nothing that could supply a real per-caller JWT, so there is no request-borne
-identity to read in the first place. An undecodable SAARTHI_STATIC_TOKEN is
-therefore a STARTUP failure, which is the right shape for a misconfiguration --
-it cannot reach a user.
-
-TENANCY STILL EXISTS, just not per end-user request. `tenant_id` /
-`organization_id` are explicit parameters on the admin API
-(`/api/admin/capabilities`, ...), not derived from the caller's own identity,
-so per-tenant configuration remains fully writable and readable there. What
-does not exist is an ordinary request resolving to more than one tenant --
-there is currently nothing upstream of this class that could assert who a
-browser's user is.
-
-Downstream -- routes, repositories, AccessSpec, the admin gate -- reads a
-UserContext and is unaware of which mode produced it. No auth logic exists
-anywhere else.
-
-This module stays free of any web framework (the .importlinter contracts forbid
-app.services importing fastapi/starlette). Nothing here reads a request: the
-identity does not depend on one.
+AUTH_CHECK picks the branch: decode SAARTHI_STATIC_TOKEN, or serve the
+hardcoded development identity. Signature and expiry are deliberately NOT
+verified -- Saarthi is not the token's issuer and never was its validator.
 """
 from __future__ import annotations
 
 import jwt
 
 from app.core.settings import Settings
+from app.exceptions.domain import InvalidTokenError
 from app.domain.core import UserContext, OrgMembership
 
 
-class InvalidTokenError(Exception):
-    """The env token could not be decoded at all (malformed / not a JWT)."""
+# InvalidTokenError now lives in app/exceptions/domain.py (imported above).
 
 
 # ---------------------------------------------------------------------------

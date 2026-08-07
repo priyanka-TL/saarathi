@@ -1,9 +1,18 @@
-import time
+"""The LLM agent handler.
+
+Responsible for: building the message list, calling the model, and running the
+tool loop up to `limits.max_tool_iterations`.
+Used by: HandlerFactory, for any spec with agent_type="llm".
+
+Messages are built EXPLICITLY rather than through a ChatPromptTemplate, so what
+reaches the model is readable here and history is bounded by the spec's memory.
+"""
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages import BaseMessage
 
+from app.core import timing
 from app.domain.agent_spec import LlmAgentSpec
 from app.agents.protocol import AgentHandler, AgentTurn, ToolTrace, TurnContext
 from app.agents.factory import register_handler, HandlerDeps
@@ -36,7 +45,7 @@ class LlmAgentHandler:
         self._bound = self._llm.bind_tools(self._tools) if self._tools else self._llm
 
     def handle(self, ctx: TurnContext) -> AgentTurn:
-        t0 = time.monotonic()
+        t0 = timing.start()
         
         # Build messages EXPLICITLY. No ChatPromptTemplate.
         msgs: list[BaseMessage] = [SystemMessage(content=self._spec.prompt)]
@@ -52,7 +61,7 @@ class LlmAgentHandler:
         if not self._tools:
             r = self._bound.invoke(msgs)
             text = _as_text(r) or "I couldn't generate a clear answer."
-            latency_ms = int((time.monotonic() - t0) * 1000)
+            latency_ms = timing.elapsed_ms(t0)
             return AgentTurn(text=text, model=self._spec.model.name, latency_ms=latency_ms, **_usage(r))
 
         traces: list[ToolTrace] = []
@@ -63,13 +72,13 @@ class LlmAgentHandler:
             
             if not r.tool_calls:
                 text = _as_text(r) or "I couldn't generate a clear answer."
-                latency_ms = int((time.monotonic() - t0) * 1000)
+                latency_ms = timing.elapsed_ms(t0)
                 return AgentTurn(text=text, tool_traces=traces, model=self._spec.model.name, latency_ms=latency_ms, **_usage(r))
                 
             msgs.append(r)
             
             for call in r.tool_calls:
-                tstart = time.monotonic()
+                tstart = timing.start()
                 tool_name = call["name"]
                 tool_args = call["args"]
                 tool = self._tools_by_name.get(tool_name)
@@ -87,7 +96,7 @@ class LlmAgentHandler:
                         # Propagate exception to service layer instead of stringifying into answer
                         raise e
 
-                duration_ms = int((time.monotonic() - tstart) * 1000)
+                duration_ms = timing.elapsed_ms(tstart)
                 traces.append(ToolTrace(
                     tool_name=tool_name, 
                     iteration=i, 
@@ -105,5 +114,5 @@ class LlmAgentHandler:
         if not text:
             text = f"Here is the raw data I found:\n{last_result}"
             
-        latency_ms = int((time.monotonic() - t0) * 1000)
+        latency_ms = timing.elapsed_ms(t0)
         return AgentTurn(text=text, tool_traces=traces, model=self._spec.model.name, latency_ms=latency_ms, **_usage(final))

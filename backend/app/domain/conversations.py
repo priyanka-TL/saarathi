@@ -1,3 +1,8 @@
+"""Conversation DTOs.
+
+Responsible for: the shapes repositories return and services pass around.
+Used by: the conversation repository and service.
+"""
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, List

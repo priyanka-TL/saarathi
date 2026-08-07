@@ -1,9 +1,8 @@
-"""Exceptions raised by the Mitra integration layer.
+"""Mitra failures.
 
-These are thin wrappers so callers can catch Mitra-specific failures
-without depending on `requests.exceptions` directly.
+Responsible for: the error types the Mitra integration raises.
+Used by: the REST client and channel raise them; the routers map them to 502/504.
 """
-
 from typing import Optional
 
 

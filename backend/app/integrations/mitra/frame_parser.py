@@ -1,71 +1,11 @@
-"""MitraFrameParser — tolerant WebSocket frame normaliser.
+"""Parsing Mitra's WebSocket frames.
 
-WHAT THIS MODULE IS FOR
-=======================
-The Mitra WebSocket emits several distinct payload shapes depending on which
-code path inside Django handled the turn. This module normalises all of them
-into one ``Frame`` dataclass so the rest of Saarthi never has to branch on
-wire format.
+Responsible for: turning a raw frame into a typed event the channel can act on.
+Used by: MitraChannel's reader thread, on every inbound frame.
 
-THREE VERIFIED DEFECTS IN MITRA'S PROTOCOL (§1.2, §1.3)
-=========================================================
-
-**Defect 1 — User-echo (§1.2).** After Saarthi sends a user message, Mitra
-immediately echoes it back on the same socket with ``text.source == "user"``
-*before* dispatching the bot reply to Celery
-(``async_consumer.py:88-96``). Without filtering, every user turn appears
-twice in the Saarthi transcript — once as the actual user message and once as
-a spurious "bot" reply. ``Frame.kind == FrameKind.USER_ECHO`` marks these so
-the channel can discard them without touching any higher-level logic.
-
-**Defect 2 — Chunked delivery (§1.3).** Free-flow replies arrive as many
-frames with ``finish_reason == null`` and ``text.type == "chunk"``. The
-terminating frame carries a truthy ``finish_reason``. Reading only the first
-frame truncates every free-flow answer. The *accumulation* of chunks into a
-complete turn is the responsibility of ``MitraChannel``; the parser's only
-job is to set ``Frame.finish_reason`` correctly so the channel knows when to
-stop accumulating.
-
-**Defect 3 — Three ``extra_content`` shapes (§1.3).** Mitra emits options /
-choices in three structurally different objects:
-
-  * ``{question, options}`` — state-machine flow with choice buttons
-    (``celery_tasks/handle_message.py:32-62``)
-  * ``{problem_statement, should_move_forward, validation}`` — story
-    evaluation frame (``mitra_bedrock_tasks.py:79-83``)
-  * ``{sources: [...]}`` — free-flow RAG citations
-
-All three are normalised to ``Frame.options: list[ParsedOption]``. The
-channel sees one shape regardless of which Mitra code path fired.
-
-**Defect 4 — Internal LLM payload leaked as ``msg``.** ``msg`` is a string on
-every legitimate frame. But when the model answers with a LIST holding both a
-response object and a tool call --
-``[{'response': ..., 'response_reason': ...}, {'name': 'get_state_information',
-'parameters': {...}}]`` -- Mitra's own guard misses it:
-``guided_guest_tool_call.py:63-68`` only tests ``isinstance(response, dict)``
-and ``isinstance(response, str)``, so a list is neither a function call nor
-text, and the raw object is passed to ``translate_and_send_message`` as the
-bot's reply. ``async_base_consumer.py:45`` then ``json.dumps``es it, so ``msg``
-arrives as a JSON ARRAY. Coercing that with ``str()`` renders Mitra's internal
-tool-call payload into the user's chat bubble.
-
-``Frame.control_payload`` marks these. A non-string ``msg`` is never
-user-facing text, so the parser recovers the embedded ``response`` string when
-there is one and otherwise contributes no text at all. Mitra does NOT advance
-``chat_session.current_step`` on this path (it takes the else-branch), so the
-interview is not lost -- the user's next answer is processed against the same
-step.
-
-DESIGN RULES
-============
-* ``parse(raw)`` NEVER raises. Malformed JSON, missing keys, wrong types —
-  all yield ``Frame(kind=FrameKind.ERROR, error=<reason>)``.
-* The parser is a pure function (no I/O, no state). Chunk accumulation is
-  done by the caller.
-* Legacy envelope types from the Node bot reference client are handled
-  defensively so the parser does not break if Mitra's wire format varies
-  between deployments.
+Mitra's frame vocabulary is not versioned and varies by flow, so parsing is
+tolerant by design: an unrecognised frame becomes an ignorable event rather than
+an error, because raising in the reader thread would kill the socket.
 """
 from __future__ import annotations
 

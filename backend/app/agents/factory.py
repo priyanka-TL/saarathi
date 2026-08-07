@@ -1,9 +1,19 @@
+"""Handler construction and registration.
+
+Responsible for: mapping an AgentSpec to a built handler, cached per
+(key, checksum).
+Used by: OrchestrationService, once per turn.
+
+Handlers self-register via @register_handler, fired when their module is
+imported -- factory walks the package to trigger that.
+"""
 import pkgutil
 import importlib
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Type
 
 from app.domain.agent_spec import AgentSpec
+from app.exceptions.domain import UnknownAgentType
 from app.agents.protocol import AgentHandler
 import app.agents
 
@@ -19,8 +29,7 @@ class HandlerDeps:
     mitra_sessions: Any
     settings: Any
 
-class UnknownAgentType(Exception):
-    pass
+# UnknownAgentType now lives in app/exceptions/domain.py (imported above).
 
 _HANDLERS: Dict[str, Type[AgentHandler]] = {}
 

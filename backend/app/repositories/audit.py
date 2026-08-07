@@ -1,3 +1,8 @@
+"""Persistence for `audit_log`.
+
+Responsible for: recording who changed what, with before/after snapshots.
+Used by: every service that mutates configuration or session state.
+"""
 import uuid
 from typing import Optional, Dict, Any
 

@@ -24,6 +24,12 @@ export const CONVERSATIONS = 'conversations';
 export const conversationMessages = (conversationId) =>
   `conversations/${conversationId}/messages`;
 
+// Voice. All three answer 503 VOICE_DISABLED when the backend has
+// VOICE_ENABLED=0, which is how the UI knows to hide the mic and speaker.
+export const VOICE_UPLOAD_URL = 'voice/upload-url';
+export const VOICE_TRANSCRIBE = 'voice/transcribe';
+export const VOICE_SPEAK = 'voice/speak';
+
 export const session = (sessionId) => `sessions/${sessionId}`;
 export const sessionReport = (sessionId) => `sessions/${sessionId}/report`;
 export const sessionResume = (sessionId) => `sessions/${sessionId}/resume`;

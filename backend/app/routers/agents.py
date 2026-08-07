@@ -1,6 +1,8 @@
-"""The public agent catalogue -- what the sidebar renders.
+"""GET /api/agents -- the agents this caller may select.
 
-Port of src/api/agent_routes.py.
+Responsible for: shaping the agent list; scope resolution and the access filter
+live in AgentRegistry.routable_for_user.
+Used by: the SPA, to render the agent picker.
 """
 from __future__ import annotations
 
@@ -38,27 +40,12 @@ def get_agents(
         {"name": "Saarthi", "description": "Automatically routes your request to the best agent"}
     ]
 
-    registered = sorted(container.agent_registry.routable(), key=lambda r: r.spec.sort_order)
-
-    # Resolve each agent for THIS caller's scope, then apply AccessSpec.
-    #
-    # THE ACCESS FILTER IS A FIX, not a refactor. This route previously listed
-    # every routable agent regardless of `access`, while RouterService._visible
-    # has always filtered by the same AccessSpec -- so the sidebar advertised
-    # agents the router would refuse for that caller, and selecting one
-    # silently fell through to the default agent. The two now agree, and they
-    # agree by calling the SAME AccessSpec.matches(): there must never be a
-    # second access check here to drift out of step with routing.
-    tenant_id = getattr(user, "tenant_code", "") or "default"
-    organization_id = getattr(user, "active_org_id", None) or "default"
-
-    visible = []
-    for reg in registered:
-        scoped = container.agent_registry.resolve_for_scope(db, reg, tenant_id, organization_id)
-        if scoped.spec.access.matches(user):
-            visible.append(scoped)
-
-    for reg in visible:
+    # Scope resolution and the access filter both live in the registry -- see
+    # AgentRegistry.routable_for_user, which uses the SAME AccessSpec.matches()
+    # RouterService does. There must never be a second access check here to
+    # drift out of step with routing: an agent listed but not routable renders a
+    # sidebar entry that silently falls through to the default agent.
+    for reg in container.agent_registry.routable_for_user(db, user):
         spec = reg.spec
         agents_list.append({
             "name": reg.name,

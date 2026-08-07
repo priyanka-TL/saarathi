@@ -1,3 +1,8 @@
+"""Session DTOs.
+
+Responsible for: the persisted-row shape of an agent session.
+Used by: the session repository and SessionService.
+"""
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any

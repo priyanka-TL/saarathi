@@ -1,3 +1,11 @@
+"""Persistence for `conversations` and their sequence numbers.
+
+Responsible for: creating, scoping, listing and touching conversations.
+Used by: ConversationService, OrchestrationService and the routers.
+
+`next_seq_for_update` takes a ROW LOCK -- it is what serialises two concurrent
+turns on one conversation, not merely a counter.
+"""
 import json
 import uuid
 from datetime import datetime

@@ -1,3 +1,8 @@
+"""The SQLAlchemy engine and session factory.
+
+Responsible for: one engine, one pool, for the process.
+Used by: build_container, which reuses these rather than opening a second pool.
+"""
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 

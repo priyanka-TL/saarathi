@@ -12,12 +12,44 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.logger import get_logger
-from app.exceptions.envelope import AdminGateError, UnauthorizedError, error_response
+from app.exceptions.domain import SaarthiError
+from app.exceptions.envelope import (
+    AdminGateError,
+    UnauthorizedError,
+    error_body,
+    error_response,
+)
 
 logger = get_logger("api.errors")
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(SaarthiError)
+    def _domain(request: Request, exc: SaarthiError) -> JSONResponse:
+        """One handler for the whole domain hierarchy.
+
+        Each subclass declares its own `status_code`, `error_code` and
+        `public_message` (app/exceptions/domain.py), so adding a new domain
+        failure never means editing this file.
+
+        THIS IS A SAFETY NET, NOT THE PRIMARY PATH. Routers still map their
+        expected failures with an explicit `return error_response(...)`, because
+        a RAISE propagates through the `get_db` yield-dependency and rolls the
+        transaction back where a return commits. What this catches is a domain
+        exception from a layer that had no router mapping -- which used to
+        become an opaque 500.
+        """
+        logger.warning(
+            "domain error: %s", exc,
+            extra={
+                "error_code": exc.error_code,
+                "status_code": exc.status_code,
+                "exception_type": type(exc).__name__,
+                "path": request.url.path,
+            },
+        )
+        return error_response(exc.public_message, exc.error_code, exc.status_code)
+
     @app.exception_handler(AdminGateError)
     def _admin_gate(request: Request, exc: AdminGateError) -> JSONResponse:
         # Bare payload, NOT the standard envelope -- admin has always answered
@@ -45,15 +77,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         # This runs inside Starlette's ServerErrorMiddleware, which re-raises
         # after sending, so uvicorn still logs the traceback.
         request_id = request.scope.get("state", {}).get("request_id")
-        logger.error("unhandled error on %s %s: %s", request.method, request.url.path, exc)
+        logger.error(
+            "unhandled error on %s %s: %s", request.method, request.url.path, exc,
+            exc_info=True,
+        )
         headers = {"X-Request-ID": request_id} if request_id else None
         return JSONResponse(
-            {
-                "status": "error",
-                "error": "An internal error occurred.",
-                "error_code": "INTERNAL",
-                "request_id": request_id,
-            },
+            error_body("An internal error occurred.", "INTERNAL", request_id),
             status_code=500,
             headers=headers,
         )

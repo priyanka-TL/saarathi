@@ -1,38 +1,14 @@
-from typing import Any, List, Optional
+"""LLM client construction.
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
-from langchain_core.messages import BaseMessage
-from langchain_core.outputs import ChatResult
-from langchain_litellm import ChatLiteLLM
+`LlmFactory.get(spec)` (see `factory.py`) is the ONE way to obtain a chat model:
+it is per-spec cached and is what `HandlerFactory` calls at request time.
 
-from app.core.settings import settings as config
-from app.core.logger import get_logger
+LiteLLM is the single abstraction layer for all LLM calls in this project --
+provider/model selection, retries and timeouts are driven by the AgentSpec and
+Settings rather than scattered across call sites.
 
-logger = get_logger("llm_client")
-
-
-from .normalization import _NormalizedChatLiteLLM
-
-def get_llm(temperature: float = 0.0) -> ChatLiteLLM:
-    """
-    Returns a LangChain-compatible chat model backed by LiteLLM, routed to
-    OpenRouter. LiteLLM is the single abstraction layer for all LLM calls in
-    this project -- provider/model selection, retries, and timeouts are all
-    driven by configuration here rather than scattered across call sites.
-    """
-    # LiteLLM routes requests based on the "<provider>/<model>" prefix.
-    model = f"openrouter/{config.OPENROUTER_MODEL}"
-
-    logger.info(
-        f"Initializing LLM via LiteLLM -> OpenRouter | model='{model}' "
-        f"temperature={temperature} timeout={config.LLM_TIMEOUT}s "
-        f"max_retries={config.LLM_MAX_RETRIES}"
-    )
-
-    return _NormalizedChatLiteLLM(
-        model=model,
-        api_key=config.OPENROUTER_API_KEY,
-        temperature=temperature,
-        request_timeout=config.LLM_TIMEOUT,
-        max_retries=config.LLM_MAX_RETRIES,
-    )
+The old module-level `get_llm()` helper is gone. Its only caller was the legacy
+`BaseAgent` in `app/agents/base.py`, which was itself unreachable; keeping it
+meant a second, un-cached construction path that hardcoded the model and read
+`Settings` at import time.
+"""

@@ -12,6 +12,10 @@
 export const STORAGE_KEYS = {
   conversationId: 'saarthi_cid',
   theme: 'theme',
+  // localStorage, unlike the two above. The voice language is a preference
+  // about the PERSON, not the tab -- it should survive a new tab and a new
+  // visit. See utils/storage.js.
+  voiceLanguage: 'saarthi_voice_lang',
 };
 
 // --- layout --------------------------------------------------------------
@@ -99,4 +103,52 @@ export const COPY = {
   // `action.message`. Capability TITLES are not here on purpose -- they are
   // configuration (src/config/capabilities.js), not fixed copy.
   comingSoonSuffix: 'is coming soon.',
+
+  // Voice. Every one of these is a reason the mic did nothing, and each names
+  // a DIFFERENT fix -- "voice failed" would leave the user with no next step.
+  micStart: 'Speak your message',
+  micStop: 'Stop recording',
+  micTranscribing: 'Transcribing…',
+  micDenied: 'Microphone access was blocked. Allow it in your browser settings to speak.',
+  micUnsupported: 'This browser cannot record audio. Try Chrome, Edge, Firefox or Safari.',
+  micInsecure: 'Recording needs a secure (https) connection.',
+  micNoDevice: 'No microphone was found.',
+  micSilent: "We didn't catch that. Try speaking a little louder.",
+  micFailed: 'That recording could not be transcribed. Please try again or type instead.',
+  micTooLong: 'That recording is too long. Try a shorter one.',
+  speakStart: 'Read this out',
+  speakStop: 'Stop reading',
+  speakFailed: 'Could not read that out.',
+  // Why Send is greyed out mid-recording. Shown as a tooltip, because at
+  // <=768px the button is icon-only and has no label to reason about.
+  sendBlockedByVoice: 'Finish recording first',
 };
+
+// --- voice ---------------------------------------------------------------
+/**
+ * The four languages the backend supports, matching the CHECK constraint on
+ * `conversations.locale` and Bhashini's configured service ids. Labels are in
+ * their own script -- someone who needs Kannada is best served by seeing
+ * "ಕನ್ನಡ", and these are exactly the four Mitra offers.
+ */
+export const VOICE_LANGUAGES = [
+  { value: 'en', label: 'English' },
+  { value: 'hi', label: 'हिंदी' },
+  { value: 'kn', label: 'ಕನ್ನಡ' },
+  { value: 'te', label: 'తెలుగు' },
+];
+
+export const DEFAULT_VOICE_LANGUAGE = 'en';
+
+/**
+ * Below this RMS a recording is treated as silence and never uploaded. Same
+ * value Mitra uses. Raising it starts discarding quiet speech.
+ */
+export const VOICE_SILENCE_RMS = 0.02;
+
+/**
+ * Hard stop for a single recording. The backend's VOICE_MAX_AUDIO_BYTES would
+ * reject a longer one anyway, and finding that out after the upload wastes the
+ * user's time and bandwidth.
+ */
+export const VOICE_MAX_RECORDING_MS = 120000;

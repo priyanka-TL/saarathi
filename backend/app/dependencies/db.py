@@ -1,55 +1,23 @@
 """Per-request database session.
 
-Port of Flask's `before_request` (open) / `teardown_request` (commit, rollback,
-close) pair, plus the TTL-gated registry reload that rode along with it.
+Responsible for: opening one session, committing or rolling it back, closing it,
+and running the TTL-gated agent-registry reload.
+Used by: every route, via Depends(get_db).
 
-TWO PROPERTIES THAT MUST NOT DRIFT
-----------------------------------
-1. **Commit on a returned error.** Flask's teardown committed whenever no
-   exception escaped -- including when a handler *returned* a 400/404/409/500
-   error tuple, which every mapped failure did. So the routers here must
-   `return` a JSONResponse for every mapped error and never `raise`; only a
-   genuinely unexpected exception should reach the `except` below and roll
-   back. See app/exceptions/envelope.error_response.
+TWO PROPERTIES THAT MUST NOT DRIFT:
 
-2. **One connection for the whole request, pinned explicitly.** See below --
-   this is the one place the port had to fix a latent bug rather than copy it.
+1. COMMIT ON A RETURNED ERROR. Mapped failures must `return` a JSONResponse,
+   never `raise` -- a raise reaches the `except` below and rolls back, losing
+   the write the error response was supposed to accompany.
 
-Note that FastAPI runs the post-`yield` block *before* the response is sent,
-where Flask's teardown ran after serialization. That is benign here (routers
-serialize from DTOs, and the session factory sets `expire_on_commit=False`) and
-strictly safer -- a failing commit becomes a 500 instead of a silently lost
-write behind a 200.
-
-CONNECTION PINNING -- THE ONE DELIBERATE FIX IN THIS PORT
---------------------------------------------------------
-`OrchestrationService.handle_turn` takes a SESSION-scoped
-`pg_try_advisory_lock`, commits mid-turn (to avoid holding a transaction across
-a Mitra round trip of up to 60s), runs the handler, and finally releases the
-lock with `pg_advisory_unlock`.
-
-A session-scoped advisory lock belongs to the CONNECTION, and a plain
-`Session` hands its connection back to the pool on `commit()`, checking one out
-again for the next statement. Single-threaded that is invisible: the pool
-returns the most recently used connection, so the unlock lands on the same one.
-Under real concurrency it does not -- another worker can check that connection
-out in the window between the commit and the unlock, so:
-
-  * the unlock runs on some other connection and silently returns false, and
-  * the original connection keeps the advisory lock FOREVER, poisoning that
-    conversation with permanent 409s for every later turn that happens to be
-    handed the same pooled connection.
-
-This is latent in the Flask original too -- identical SQLAlchemy setup and
-identical orchestration code -- but its dev server never ran turns
-concurrently, so it could not surface. Under uvicorn with a 16-thread pool it
-surfaces immediately: `tests/guards/test_turn_concurrency.py` reproduced it on
-the first run.
-
-Binding the Session to an explicitly checked-out `Connection` fixes it at the
-root. The connection is checked out once, used for every statement in the
-request including the lock and the unlock, and returned exactly once in the
-`finally`. No business logic changes; `handle_turn` is untouched.
+2. ONE CONNECTION, PINNED. handle_turn takes a SESSION-scoped advisory lock,
+   commits mid-turn, then unlocks. A session-scoped lock belongs to the
+   CONNECTION, and a plain Session returns its connection to the pool on
+   commit() -- so under concurrency the unlock can land on a different
+   connection, silently returning false and leaving the original locked
+   FOREVER, poisoning that conversation with permanent 409s. Binding to an
+   explicitly checked-out Connection fixes it at the root.
+   See tests/guards/test_turn_concurrency.py.
 """
 from __future__ import annotations
 
@@ -59,15 +27,15 @@ from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.container import Container
-from app.database.engine import engine
 from app.dependencies.container import get_container
 
 
 def get_db(request: Request, container: Container = Depends(get_container)) -> Iterator[Session]:
-    # One connection, checked out for the whole request. Everything below --
-    # the registry reload, the turn, the advisory lock AND its unlock -- runs
-    # on this exact connection.
-    connection = engine.connect()
+    # One connection for the whole request -- the registry reload, the turn,
+    # the advisory lock and its unlock all run on this exact one. Taken from the
+    # container rather than the module-level global, so Container.engine is not
+    # bypassed on every request.
+    connection = container.engine.connect()
     db = Session(
         bind=connection,
         autocommit=False,
@@ -77,14 +45,10 @@ def get_db(request: Request, container: Container = Depends(get_container)) -> I
         expire_on_commit=False,
     )
 
-    # TTL-gated agent registry reload, /api/ paths only -- same predicate as
-    # Flask's `request.path.startswith("/api/")`, so the health check and any
-    # non-API route still never touch the DB for this.
-    #
-    # The predicate MUST carry api_prefix. Under API_PREFIX=/saarathi-service
-    # the real path is /saarathi-service/api/chat, which does not start with
-    # "/api/" -- the registry would silently stop reloading and agent config
-    # changes would never take effect until a restart.
+    # TTL-gated registry reload, /api/ paths only, so the health check never
+    # touches the DB. The predicate MUST carry api_prefix: under
+    # API_PREFIX=/saarathi-service the path does not start with "/api/", and the
+    # registry would silently stop reloading until a restart.
     if request.url.path.startswith(f"{container.settings.api_prefix}/api/"):
         container.agent_registry.maybe_reload(db)
 
@@ -97,8 +61,7 @@ def get_db(request: Request, container: Container = Depends(get_container)) -> I
         db.commit()
     finally:
         db.close()
-        # Returns the connection to the pool. Postgres does NOT drop
-        # session-scoped advisory locks on transaction end, but it does reset
-        # them when the pooled connection is later recycled; the real guarantee
-        # is that handle_turn's explicit unlock ran on this same connection.
+        # Postgres does not drop session-scoped advisory locks on transaction
+        # end -- the guarantee is that handle_turn's explicit unlock ran on this
+        # same connection.
         connection.close()

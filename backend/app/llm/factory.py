@@ -1,3 +1,8 @@
+"""LLM client construction.
+
+Responsible for: one cached chat model per distinct ModelSpec.
+Used by: HandlerFactory, lazily, per request.
+"""
 from app.core.settings import settings as config
 from app.core.logger import get_logger
 from app.domain.agent_spec import ModelSpec
@@ -19,10 +24,18 @@ class LlmFactory:
         if cache_key not in self._cache:
             model_id = f"{spec.provider}/{spec.name}"
             
+            # Fields, not an f-string: "which model is this deployment actually
+            # using?" and "did the timeout change?" are questions a log search
+            # should answer without a substring match on a sentence.
             logger.info(
-                f"Initializing LLM via LiteLLM -> {spec.provider} | model='{model_id}' "
-                f"temperature={spec.temperature} max_tokens={spec.max_tokens} "
-                f"timeout={spec.timeout_s}s"
+                "Initializing LLM client via LiteLLM",
+                extra={
+                    "provider": spec.provider,
+                    "model": model_id,
+                    "temperature": spec.temperature,
+                    "max_tokens": spec.max_tokens,
+                    "timeout_s": spec.timeout_s,
+                },
             )
 
             kwargs = {

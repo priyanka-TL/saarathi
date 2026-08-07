@@ -1,3 +1,13 @@
+"""Agent session lifecycle.
+
+Responsible for: the state machine over `agent_sessions` -- open, transition,
+abandon -- and auditing each change.
+Used by: OrchestrationService and the sessions router.
+
+A session's state IS the pin: `uq_agent_sessions_one_open_per_conversation`
+allows one open row per conversation, so opening is pinning and reaching a
+terminal state is unpinning. There is no second column to keep in step.
+"""
 import uuid
 from datetime import datetime
 from typing import Callable, List, Optional
@@ -7,29 +17,19 @@ from sqlalchemy.orm import Session
 
 from app.agents.protocol import SessionDelta
 from app.models.orm import SYSTEM_ACTOR, AgentSession
+from app.exceptions.domain import ConcurrentModificationError, InvalidTransitionError
 from app.domain.sessions import AgentSessionDTO
 from app.repositories.audit import AuditLogRepository
 from app.repositories.sessions import AgentSessionRepository
 
-# Lifecycle table, design doc §4.7. Same-state entries are allowed (a delta
-# that doesn't change state is a field-only update -- e.g. bumping step/
-# turn_count while remaining in 'awaiting_user'); terminal states accept no
-# apply() call at all, including a same-state one, since they're final.
+# Lifecycle table (design doc §4.7). Same-state entries are field-only updates
+# (bumping step/turn_count); terminal states accept no apply() at all.
 #
-# 'pending' additionally allows 'awaiting_user'/'finalizing' directly:
-# RemoteFlowAgentHandler.handle() (src/agents/remote_flow_handler.py) is one
-# synchronous call that does profile+session creation, the WS handshake, AND
-# the first turn, then returns a single delta reporting the outcome -- per
-# the design doc's own §8.3 sequence diagram, the first turn's real state
-# path is pending -> authenticating -> awaiting_user, with 'in_progress'
-# never actually set on turn 1 (it's only meaningful as "a turn is in
-# flight" on a RETURNING turn, i.e. awaiting_user -> in_progress ->
-# awaiting_user -- and that same-state round trip already works today via
-# the existing awaiting_user -> awaiting_user entry below, since the handler
-# only reports the post-turn outcome, never the momentary in-flight state).
-# Without this, a session's very first turn -- or one that completes the
-# interview in a single turn -- raises InvalidTransitionError before the
-# reply is ever persisted.
+# 'pending' allows 'awaiting_user'/'finalizing' DIRECTLY because
+# RemoteFlowAgentHandler.handle() does profile creation, the handshake and the
+# first turn in one call, reporting only the post-turn outcome -- 'in_progress'
+# is never set on turn 1. Without these, a session's first turn raises
+# InvalidTransitionError before the reply is ever persisted.
 ALLOWED = {
     "pending": {"pending", "authenticating", "awaiting_user", "finalizing", "failed"},
     "authenticating": {"authenticating", "in_progress", "failed"},
@@ -43,20 +43,8 @@ ALLOWED = {
 TERMINAL = {"completed", "failed", "abandoned"}
 
 
-class InvalidTransitionError(Exception):
-    def __init__(self, session_id: uuid.UUID, current_state: str, target_state: str):
-        super().__init__(f"session {session_id}: cannot transition {current_state!r} -> {target_state!r}")
-        self.session_id = session_id
-        self.current_state = current_state
-        self.target_state = target_state
-
-
-class ConcurrentModificationError(Exception):
-    """A guarded UPDATE matched zero rows: the session's state changed between
-    the caller's read and this call."""
-    def __init__(self, session_id: uuid.UUID):
-        super().__init__(f"session {session_id} was modified concurrently")
-        self.session_id = session_id
+# InvalidTransitionError / ConcurrentModificationError are imported above and
+# re-exported for existing callers; they live in app/exceptions/domain.py.
 
 
 class SessionService:
@@ -72,30 +60,19 @@ class SessionService:
         on_displace: Optional[Callable[[uuid.UUID], None]] = None,
         actor: str = SYSTEM_ACTOR,
     ) -> Optional[AgentSessionDTO]:
-        """Attach the existing open session for this conversation if it belongs
-        to `agent`; otherwise create one in 'pending', but only if the agent
-        declares pin_session (stateless agents get no session at all).
+        """Attach this conversation's open session if it belongs to `agent`,
+        else open a new one -- but only if the agent declares pin_session.
 
-        A SESSION IS NEVER SHARED ACROSS AGENTS. uq_agent_sessions_one_open_per_conversation
-        allows at most one open session per conversation but says nothing about
-        whose it is, and this method used to hand back whichever one it found --
-        its docstring delegated the agent check to the caller, but RouterService
-        Gate 1 (explicit selection from the UI) returns an agent without ever
-        consulting the pin, so nothing enforced it.
+        A SESSION IS NEVER SHARED ACROSS AGENTS. The unique index allows one
+        open session per conversation but says nothing about whose it is, and
+        handing back whichever was found was a genuine cross-agent hijack: the
+        next turn went to the other agent's remote_session_id, and a later
+        finalize submitted the wrong flow to Mitra for that story.
 
-        The effect was a genuine cross-agent hijack: with `currentAgentKey`
-        still set to capture_discussion, opening a Record Stories conversation
-        from the sidebar sent the next turn to record_stories'
-        remote_session_id, while RemoteFlowAgentHandler overwrote
-        remote_bot_route with capture_discussion's `remote.bot_route` and apply() stamped
-        remote_flow='guest-discussion' onto a 'guest-mi-story' session. A later
-        finalize would then submit the wrong flow to Mitra for that story.
-
-        A conversation legitimately spanning several agents is the intended
-        product model, so a mismatch ABANDONS the other agent's session and
-        starts a fresh one rather than refusing the turn. `on_displace` is
-        invoked with the conversation id when that happens, so the caller can
-        close the orphaned Mitra channel (this layer owns no socket).
+        A conversation spanning several agents is the intended product model, so
+        a mismatch ABANDONS the other session rather than refusing the turn.
+        `on_displace` then lets the caller close the orphaned Mitra channel --
+        this layer owns no socket.
         """
         existing = self._sessions.get_open_for_conversation(conversation_id)
         if existing is not None:
@@ -126,12 +103,11 @@ class SessionService:
             raise InvalidTransitionError(session_id, current_state, target_state)
 
     def apply(self, session: AgentSessionDTO, delta: SessionDelta) -> AgentSessionDTO:
-        """State transition + field updates, validated against the lifecycle
-        table. Terminal targets set ended_at (required by ck_agent_sessions_terminal);
-        'completed' additionally sets finalized_at -- ck_agent_sessions_completed_has_result
-        is enforced by the database itself and is deliberately not pre-checked
-        here, so a caller bug (transitioning to completed with no result_ref
-        anywhere) surfaces as a real IntegrityError rather than being swallowed.
+        """State transition plus field updates, validated against ALLOWED.
+
+        Terminal targets set ended_at; 'completed' also sets finalized_at.
+        ck_agent_sessions_completed_has_result is deliberately NOT pre-checked --
+        a caller bug should surface as a real IntegrityError, not be swallowed.
         """
         target_state = delta.state.value
         self._check_transition(session.state, target_state, session.id)
@@ -211,6 +187,33 @@ class SessionService:
             after=updated.model_dump(mode="json"),
             note=reason,
         )
+        return updated
+
+    def abandon_and_close(
+        self,
+        conversation_id: uuid.UUID,
+        reason: str,
+        actor: str,
+        on_abandoned: Optional[Callable[[uuid.UUID], None]] = None,
+    ) -> Optional[AgentSessionDTO]:
+        """`abandon`, plus whatever has to be torn down alongside it.
+
+        The pairing matters and is easy to half-do: abandoning the session
+        without closing its Mitra socket orphans the channel, and the pool then
+        hands the next agent a channel still authenticated against the old
+        remote session.
+
+        `on_abandoned` fires ONLY when a session was actually abandoned. Calling
+        it unconditionally would close a live channel belonging to a session
+        this call did not touch.
+
+        :param on_abandoned: same shape as `open_for`'s `on_displace`, and for
+            the same reason -- it keeps this service free of any knowledge of
+            Mitra, whose channel pool lives on the container.
+        """
+        updated = self.abandon(conversation_id, reason=reason, actor=actor)
+        if updated is not None and on_abandoned is not None:
+            on_abandoned(conversation_id)
         return updated
 
     def sweep_abandoned(self, older_than: datetime) -> List[AgentSessionDTO]:
