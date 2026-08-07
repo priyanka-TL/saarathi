@@ -56,6 +56,12 @@ below. Everything else is a config row.
 | `MITRA_HOST_CEILING` | the operator's backstop *on* a config-supplied value — it would be pointless if the thing it constrains could edit it |
 | `REGISTRY_TTL_S` | governs how configuration itself is loaded — circular if database-driven |
 | `JWT_IDENTIFIER_FIELD`, `JWT_EMAIL_SUFFIX` | identity resolves in `dependencies/identity.py`, upstream of any agent. Safe to keep global: Mitra keys a profile on `(email, company)`, and `company` is per-tenant, so two tenants sharing a suffix still get distinct profiles |
+| `VOICE_ENABLED` | decides whether the Bhashini client and the object store are built at all (`core/container.py`) — the same boot-order cycle as `MITRA_ENABLED` |
+| `BHASHINI_API_KEY`, `BHASHINI_USER_ID`, `BHASHINI_AUTHORIZATION` | secrets |
+| `CLOUD_STORAGE_SECRET` | a **secret**, and under `gcp` an entire service-account JSON. Never in the database, never in a log line, never in `__repr__` |
+| `CLOUD_STORAGE_PROVIDER`, `CLOUD_STORAGE_ACCOUNTNAME`, `CLOUD_STORAGE_REGION`, `CLOUD_ENDPOINT`, `CLOUD_STORAGE_BUCKETNAME`, `CLOUD_STORAGE_BUCKET_TYPE` | needed to build a storage client at boot, before anything can be read from a database. Names follow the ELEVATE convention shared with the Node services, so one deployment's values drop into another |
+| `BHASHINI_BASE_URL`, `BHASHINI_*_TIMEOUT`, `VOICE_MAX_AUDIO_BYTES`, `VOICE_CHUNK_DURATION_S`, `VOICE_TTS_BYTE_LIMIT`, `VOICE_ASR_MAX_WORKERS` | one shared upstream, not a per-agent choice. Voice is a property of the deployment, not of which agent happens to be answering |
+| `LOCAL_STORAGE_DIR` | only read by the `local` provider, which is development-only |
 
 ### Database only — no `.env` key at all
 

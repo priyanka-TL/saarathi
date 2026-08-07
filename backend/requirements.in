@@ -31,6 +31,23 @@ import-linter
 # a valid, empty file), so verifying it means extracting the text.
 pypdf
 
+# Object storage for voice recordings, which go browser -> bucket via a
+# presigned URL. boto3 covers AWS S3 and, through CLOUD_ENDPOINT, every
+# S3-compatible service (OCI Object Storage, MinIO) -- see
+# app/integrations/storage/aws.py.
+boto3
+# google-cloud-storage is deliberately NOT pinned here. It is needed ONLY for
+# CLOUD_STORAGE_PROVIDER=gcp (or its gcs/gcloud/google aliases) and is imported
+# lazily inside that branch, so an AWS or local deployment should not pay to
+# install it. Install it explicitly when running against GCS:
+#
+#   uv pip install google-cloud-storage
+#
+# app/integrations/storage/gcp.py turns the resulting ImportError into a
+# StorageConfigError naming that command. Verified against a live bucket with
+# 3.13.1; the driver uses only Client/Blob/signed-URL APIs, which have been
+# stable across 2.x and 3.x.
+
 # gunicorn is deliberately NOT here. MITRA_ENABLED=1 requires a single worker
 # process (MitraSessionManager pools live WebSockets in process memory), so the
 # only thing a process manager would add is a way to violate that. Run uvicorn

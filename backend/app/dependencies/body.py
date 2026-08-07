@@ -48,3 +48,18 @@ async def json_body_silent(request: Request) -> Dict[str, Any]:
     Content-Type at all.
     """
     return await json_body_strict(request) or {}
+
+
+async def raw_body(request: Request) -> bytes:
+    """The request body, unparsed.
+
+    For `PUT /api/voice/upload-local/{key}`, the only endpoint that receives
+    bytes rather than JSON -- the browser PUTs a recording straight to it under
+    the `local` storage provider.
+
+    A dependency rather than `await request.body()` inside the route, because
+    the route is a plain `def` (as every route here must be) and so cannot
+    await anything. Reading the body is real async I/O with no blocking work,
+    which is exactly the exception the two functions above already occupy.
+    """
+    return await request.body()

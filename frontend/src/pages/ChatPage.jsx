@@ -17,10 +17,12 @@ import { usePollRegistry } from '../hooks/usePollRegistry';
 import { useRecentConversations } from '../hooks/useRecentConversations';
 import { useSendMessage } from '../hooks/useSendMessage';
 import { useSessionLifecycle } from '../hooks/useSessionLifecycle';
+import { useSpeech } from '../hooks/useSpeech';
+import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import AppLayout from '../layouts/AppLayout.jsx';
 import { runResume } from '../services/resumeFlow';
 import { renderAgentHtml } from '../utils/markdown';
-import { readTheme } from '../utils/storage';
+import { readTheme, readVoiceLanguage, writeVoiceLanguage } from '../utils/storage';
 
 const HIDDEN_BANNER = {
   hidden: true,
@@ -53,6 +55,24 @@ export default function ChatPage() {
   const [draft, setDraft] = useState('');
   const [activeCard, setActiveCard] = useState(null);
   const [activeAgentKey, setActiveAgentKey] = useState(null);
+  const [voiceLanguage, setVoiceLanguageState] = useState(readVoiceLanguage);
+
+  // --- voice --------------------------------------------------------------
+  const setVoiceLanguage = useCallback((language) => {
+    setVoiceLanguageState(language);
+    writeVoiceLanguage(language);
+  }, []);
+
+  // The transcript REPLACES the draft rather than appending to it: it is the
+  // whole of what the user just said, and appending would silently concatenate
+  // two takes when someone re-records.
+  const voice = useVoiceRecorder({
+    conversationId,
+    language: voiceLanguage,
+    onTranscript: setDraft,
+  });
+
+  const speech = useSpeech({ language: voiceLanguage });
 
   // --- banner ------------------------------------------------------------
   const setContextBanner = useCallback(
@@ -336,6 +356,9 @@ export default function ChatPage() {
           onSelectAgent={handleSelectAgent}
           isBusy={isBusyNow}
           toast={toast}
+          voiceLanguage={voiceLanguage}
+          onVoiceLanguageChange={setVoiceLanguage}
+          voiceAvailable={voice.supported && !voice.voiceDisabled}
         />
       }
       banner={<WorkflowBanner banner={banner} />}
@@ -347,6 +370,7 @@ export default function ChatPage() {
             onSelectOption={handleSelectOption}
             onRetry={handleRetry}
             onResume={handleResume}
+            speech={speech}
           />
           <TypingIndicator visible={isBusy} />
           <ChatInput
@@ -354,6 +378,7 @@ export default function ChatPage() {
             onChange={setDraft}
             onSubmit={handleSubmit}
             disabled={isBusy}
+            voice={voice}
           />
         </>
       }

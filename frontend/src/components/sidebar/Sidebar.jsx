@@ -4,6 +4,7 @@ import { CloseIcon, PlusIcon } from '../icons';
 import AdvancedSection from './AdvancedSection';
 import BrandCard from './BrandCard';
 import ChatHistorySection from './ChatHistorySection';
+import LanguageSelect from './LanguageSelect';
 
 /**
  * The left rail.
@@ -33,6 +34,9 @@ export default function Sidebar({
   onSelectAgent,
   isBusy,
   toast,
+  voiceLanguage,
+  onVoiceLanguageChange,
+  voiceAvailable,
 }) {
   return (
     <aside className={cx('sidebar', open && 'active')} id="sidebar">
@@ -57,6 +61,17 @@ export default function Sidebar({
       */}
 
       <BrandCard />
+
+      {/*
+        Above the flex spacer, so it sits with the brand card rather than being
+        pushed to the bottom with the two collapsible panels -- it is a setting
+        the user reaches for before speaking, not an advanced option.
+      */}
+      <LanguageSelect
+        value={voiceLanguage}
+        onChange={onVoiceLanguageChange}
+        visible={voiceAvailable}
+      />
 
       <div className="chat-history-placeholder">
         <button

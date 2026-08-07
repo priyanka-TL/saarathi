@@ -162,3 +162,52 @@ export const BreadcrumbSeparatorIcon = () => (
     <polyline points="9 18 15 12 9 6" />
   </svg>
 );
+
+/* -------------------------------------------------------------------------
+ * Voice
+ * ---------------------------------------------------------------------- */
+
+/** The composer's record button, at rest. */
+export const MicIcon = () => (
+  <svg {...stroked} width="18" height="18">
+    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    <line x1="12" y1="19" x2="12" y2="23" />
+    <line x1="8" y1="23" x2="16" y2="23" />
+  </svg>
+);
+
+/**
+ * Shown while recording. A filled square, not a crossed-out mic: the button
+ * means "stop and use this", and a struck-through mic reads as "cancel".
+ */
+export const StopIcon = () => (
+  <svg {...stroked} width="18" height="18">
+    <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
+  </svg>
+);
+
+/** Read-this-out, on an agent bubble. */
+export const SpeakerIcon = () => (
+  <svg {...stroked} width="15" height="15">
+    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+  </svg>
+);
+
+/** The same speaker, muted, while a clip is playing -- click to stop. */
+export const SpeakerOffIcon = () => (
+  <svg {...stroked} width="15" height="15">
+    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+    <line x1="23" y1="9" x2="17" y2="15" />
+    <line x1="17" y1="9" x2="23" y2="15" />
+  </svg>
+);
+
+/** Indeterminate progress, for the transcribe and synthesise waits. */
+export const SpinnerIcon = () => (
+  <svg {...stroked} width="15" height="15" className="voice-spinner">
+    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+  </svg>
+);

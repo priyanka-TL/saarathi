@@ -36,6 +36,16 @@ os.environ["LOG_LEVEL"] = "ERROR"
 # its own prefixed app rather than relying on the ambient one.
 os.environ["API_PREFIX"] = ""
 
+# Same leak, higher stakes. A developer's `.env` sets VOICE_ENABLED=1 with REAL
+# Bhashini credentials, and without this override build_container would create a
+# live client for every test run -- so a bug in a fake could send a user's test
+# audio to a government API. Voice-off is also the correct default state for the
+# suite: tests/characterisation/test_voice_router.py pins the 503, and the ones
+# that need it on swap fakes onto the container themselves.
+os.environ["VOICE_ENABLED"] = "0"
+# CLOUD_STORAGE_PROVIDER is not overridden: with voice off, build_container
+# never constructs a store, so the developer's provider is never reached.
+
 # ---------------------------------------------------------------------------
 # 1b. DATABASE_URL --> A DEDICATED TEST DATABASE. NON-NEGOTIABLE.
 #

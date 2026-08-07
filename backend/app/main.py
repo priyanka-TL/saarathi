@@ -106,7 +106,11 @@ def create_app() -> FastAPI:
         # identity is resolved once at startup by the Authenticator. Enabling
         # credentials would only forbid wildcard origins for no gain.
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        # PUT is here for exactly one route: /api/voice/upload-local/{key},
+        # which the browser PUTs a recording to under CLOUD_STORAGE_PROVIDER=local.
+        # Against a real bucket that upload goes to the STORAGE origin instead,
+        # so it is the bucket's CORS rules that must allow PUT, not these.
+        allow_methods=["GET", "POST", "PATCH", "PUT", "OPTIONS"],
         allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
         # Without this the browser cannot read the header back off a response.
         expose_headers=["X-Request-ID"],

@@ -130,8 +130,8 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
 
     GET / is deliberately absent -- the React app serves the shell now.
 
-    Two groups of ADDITIONS to the Flask surface, both from making the sidebar
-    database-driven and multi-tenant:
+    Three groups of ADDITIONS to the Flask surface. The first two come from
+    making the sidebar database-driven and multi-tenant:
 
       * GET /api/ui/capabilities -- the capability document the sidebar
         renders. Under Flask this was literal markup in templates/index.html,
@@ -141,6 +141,20 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
       * /api/admin/capabilities... -- the CRUD that makes "add a capability
         without a deployment" true. Admin-gated, so a deployment with
         SAARTHI_ADMIN_ENABLED=0 answers 404 to all of them.
+
+    The third is the voice feature (speech-to-text and text-to-speech via
+    Bhashini), which Flask had no equivalent of:
+
+      * /api/voice/... -- three endpoints, gated on VOICE_ENABLED, which answer
+        503 VOICE_DISABLED when it is off. They do NOT touch the turn pipeline:
+        transcription produces text the user reviews in the composer before
+        sending it through /api/chat as normal, and synthesis consumes text
+        that pipeline already produced. /api/chat's contract is unchanged.
+
+      * PUT /api/voice/upload-local/{key:path} -- dev only. It exists so a
+        developer can run voice with CLOUD_STORAGE_PROVIDER=local and no cloud
+        account; under any other provider it 404s, because the browser uploads
+        to the storage origin instead.
 
     Every other entry below is a Flask path that must keep existing.
     """
@@ -168,6 +182,10 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
         ("PATCH", "/api/admin/capabilities/{key}"),
         ("DELETE", "/api/admin/capabilities/{key}"),
         ("PUT", "/api/admin/capabilities/{key}/agents"),
+        ("POST", "/api/voice/upload-url"),
+        ("POST", "/api/voice/transcribe"),
+        ("POST", "/api/voice/speak"),
+        ("PUT", "/api/voice/upload-local/{key:path}"),
     }
     actual = {
         (m, r.path)

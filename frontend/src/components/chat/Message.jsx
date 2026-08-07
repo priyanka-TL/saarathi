@@ -3,6 +3,7 @@ import { formatTime } from '../../utils/time';
 import { safeReportUrl } from '../../utils/url';
 import { BotIcon, UserIcon } from '../icons';
 import MessageOptions from './MessageOptions';
+import SpeakerButton from './SpeakerButton';
 
 /**
  * One transcript item.
@@ -25,7 +26,7 @@ function Meta({ timestamp, agentName, showAgent }) {
   );
 }
 
-export default function Message({ item, onSelectOption }) {
+export default function Message({ item, onSelectOption, speech }) {
   const { kind, content, agentName, timestamp, options, readOnly, selectedOptionId } = item;
 
   // Centred pill. Bare .message-content, nothing else.
@@ -93,7 +94,25 @@ export default function Message({ item, onSelectOption }) {
               )}
             </div>
           )}
-          <Meta timestamp={timestamp} agentName={agentName} showAgent />
+          <div className="message-footer">
+            <Meta timestamp={timestamp} agentName={agentName} showAgent />
+            {/*
+              Agent replies only, and fed `content` -- the RAW MARKDOWN -- not
+              `item.html`. strip_markdown_for_tts on the backend is written
+              against markdown; handing it rendered HTML would make it strip
+              tags it was never designed for and read table markup aloud.
+
+              `speech` is absent in tests and any other caller that does not
+              wire up the hook, so the button simply does not render there.
+            */}
+            {isAgent && speech && content && (
+              <SpeakerButton
+                isPlaying={speech.playingId === item.id}
+                isLoading={speech.loadingId === item.id}
+                onToggle={() => speech.toggle(item.id, content)}
+              />
+            )}
+          </div>
         </div>
         {options && options.length > 0 && (
           <MessageOptions

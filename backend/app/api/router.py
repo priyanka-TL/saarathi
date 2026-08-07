@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.routers import admin, admin_config, agents, chat, conversations, sessions, ui
+from app.routers import admin, admin_config, agents, chat, conversations, sessions, ui, voice
 
 api_router = APIRouter()
 
@@ -28,6 +28,10 @@ api_router.include_router(conversations.router)
 api_router.include_router(agents.router)
 api_router.include_router(sessions.router)
 api_router.include_router(ui.router)
+# All under /api/voice/, so it collides with nothing above and its position is
+# for readability rather than to break a tie. It still goes before `admin`,
+# like everything else.
+api_router.include_router(voice.router)
 # Before `admin`, per the ordering rule above. Its paths all live under
 # /api/admin/, so they cannot collide with admin's /api/agents/{key} wildcard
 # either way -- the position is for consistency, not to break a tie.

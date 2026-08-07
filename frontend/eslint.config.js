@@ -20,6 +20,12 @@ const browserGlobals = {
   sessionStorage: 'readonly',
   localStorage: 'readonly',
   globalThis: 'readonly',
+  // Voice. MediaRecorder and the AudioContext behind computeRms are reached
+  // through `window.` so they need no entry, but these three are referenced
+  // bare: `new Blob(...)`, `new Audio(...)`, `MediaRecorder.isTypeSupported`.
+  Blob: 'readonly',
+  Audio: 'readonly',
+  MediaRecorder: 'readonly',
 };
 
 export default [
