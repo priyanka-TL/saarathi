@@ -140,6 +140,7 @@ def build_container(settings: Settings) -> Container:
             chunk_duration_s=settings.voice_chunk_duration_s,
             tts_byte_limit=settings.voice_tts_byte_limit,
             asr_max_workers=settings.voice_asr_max_workers,
+            ffmpeg_timeout_s=settings.voice_ffmpeg_timeout_s,
         )
 
     deps = HandlerDeps(

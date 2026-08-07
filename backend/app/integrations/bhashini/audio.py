@@ -55,7 +55,7 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def convert_to_wav(audio: bytes, timeout_s: float = 30.0) -> bytes:
+def convert_to_wav(audio: bytes, timeout_s: float) -> bytes:
     """Transcode arbitrary browser audio to 16 kHz mono PCM WAV.
 
     Accepts WebM/Opus, MP4/AAC, Ogg, WAV -- anything ffmpeg can demux. The
@@ -121,7 +121,7 @@ def convert_to_wav(audio: bytes, timeout_s: float = 30.0) -> bytes:
     return wav
 
 
-def split_audio(wav_bytes: bytes, chunk_duration_s: int = 10) -> List[Tuple[int, bytes]]:
+def split_audio(wav_bytes: bytes, chunk_duration_s: int) -> List[Tuple[int, bytes]]:
     """Split a WAV into self-contained WAV chunks of at most `chunk_duration_s`.
 
     Each chunk carries its own RIFF header with the source's channel count,

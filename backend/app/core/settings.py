@@ -213,6 +213,23 @@ class Settings(BaseSettings):
     # Bounds the ASR fan-out. Mitra uses an unbounded ThreadPoolExecutor, which
     # fires ~30 concurrent calls at Dhruva for a 5-minute recording.
     voice_asr_max_workers: int = 4
+    # How long ffmpeg may take to transcode one recording to WAV. A wedged
+    # subprocess otherwise holds a request thread -- and a thread is also a DB
+    # connection for the life of the turn (THREADPOOL_SIZE <= DB_POOL_SIZE).
+    voice_ffmpeg_timeout_s: float = 30.0
+    # Lifetime of a presigned upload URL. Long enough for a slow mobile upload,
+    # short enough that a leaked URL stops being a write primitive quickly.
+    voice_upload_url_expiry_s: int = 300
+
+    # Ceiling on GET /api/conversations?limit=. Caps how much history one
+    # request can pull, independently of what a client asks for.
+    conversations_page_limit_max: int = 20
+
+    # ---- object storage tuning --------------------------------------------
+    # boto3's retry policy. "standard" retries throttling and transient 5xx
+    # with exponential backoff; the attempt count is the total, not additional.
+    cloud_storage_max_attempts: int = 3
+    cloud_storage_retry_mode: str = "standard"
 
     @field_validator("cloud_storage_bucket_type")
     @classmethod
@@ -248,5 +265,10 @@ class Settings(BaseSettings):
 try:
     settings = Settings()
 except ValidationError as e:
-    print(f"Configuration validation error:\n{e}")
+    # DELIBERATELY stderr and not app.core.logger. Logging is configured from
+    # Settings (LOG_LEVEL), so at this point there is no configured logger to
+    # write to -- reaching for one here would either emit nothing or raise a
+    # second error on top of the one the operator actually needs to read.
+    # Do not "fix" this to logger.error().
+    print(f"Configuration validation error:\n{e}", file=sys.stderr)
     sys.exit(1)

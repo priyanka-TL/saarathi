@@ -62,7 +62,10 @@ class S3ObjectStore(ObjectStore):
             "config": Config(
                 signature_version="s3v4",
                 s3={"addressing_style": "path" if endpoint else "virtual"},
-                retries={"max_attempts": 3, "mode": "standard"},
+                retries={
+                    "max_attempts": settings.cloud_storage_max_attempts,
+                    "mode": settings.cloud_storage_retry_mode,
+                },
             )
         }
 

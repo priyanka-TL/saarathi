@@ -39,12 +39,19 @@ BASE_URL = "https://dhruva.example/services/inference/pipeline"
 
 
 def _client(**overrides) -> BhashiniClient:
+    # Every tuning knob is stated explicitly: BhashiniClient takes no defaults,
+    # so that Settings stays the single declaration of each production value.
     kwargs = {
         "base_url": BASE_URL,
         "authorization": "inference-key",
         "api_key": "ulca-key",
         "user_id": "ulca-user",
+        "connect_timeout": 10.0,
         "read_timeout": 30.0,
+        "chunk_duration_s": 10,
+        "tts_byte_limit": 4800,
+        "asr_max_workers": 4,
+        "ffmpeg_timeout_s": 30.0,
     }
     kwargs.update(overrides)
     return BhashiniClient(**kwargs)

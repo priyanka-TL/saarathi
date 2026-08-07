@@ -39,11 +39,10 @@ import json
 from sqlalchemy import text
 
 from app.core.logger import get_logger
+from app.domain.scope import DEFAULT_SCOPE
 from app.models.orm import SYSTEM_ACTOR
 
 logger = get_logger("capability_seed")
-
-DEFAULT_SCOPE = "default"
 
 #: The shipped membership: capability key -> the agents beneath it, in order.
 #: `autostart` is sent with autostart:true so the server does not title the

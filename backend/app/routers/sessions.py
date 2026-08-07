@@ -22,6 +22,7 @@ from app.core.container import Container
 from app.dependencies.container import get_container
 from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
+from app.domain.agent_spec import DEFAULT_REPORT_MEDIA_TYPE
 from app.domain.core import UserContext
 from app.exceptions.envelope import error_response, mitra_error_response
 from app.integrations.mitra.exceptions import MitraError
@@ -33,6 +34,16 @@ from app.utils.responses import json_response, parse_uuid
 from app.utils.serializers import agent_key_for, serialize_session
 
 router = APIRouter(tags=["sessions"])
+
+# Seconds the client is told to wait before polling again on a 202.
+#
+# NOT Settings fields, deliberately: these go out IN THE RESPONSE BODY and the
+# frontend polls on them, so they are part of the API contract rather than an
+# operator tuning knob. The two differ because the waits differ -- a turn that
+# is still running with Mitra settles in a few seconds, where finalisation has
+# to generate a report.
+TURN_PENDING_RETRY_AFTER_S = 3
+FINALIZE_PENDING_RETRY_AFTER_S = 5
 
 
 def _not_found() -> JSONResponse:
@@ -157,7 +168,7 @@ def resume_session(
         return json_response({
             "status": "pending",
             "outcome": result.outcome.value,
-            "retry_after": 3,
+            "retry_after": TURN_PENDING_RETRY_AFTER_S,
         }, status_code=202)
 
     return json_response({
@@ -215,7 +226,9 @@ def get_report(
     orch = _orchestrator(db, container)
     agent = orch.agent_for_session(dto, user)
     media_type: Optional[str] = (
-        agent.spec.remote.report_media_type if agent is not None else "application/pdf"
+        agent.spec.remote.report_media_type
+        if agent is not None
+        else DEFAULT_REPORT_MEDIA_TYPE
     )
 
     if dto.report_url:
@@ -234,4 +247,6 @@ def get_report(
                 {"report_url": url, "media_type": media_type, "story_id": dto.result_ref}
             )
 
-    return json_response({"retry_after": 5}, status_code=202)
+    return json_response(
+        {"retry_after": FINALIZE_PENDING_RETRY_AFTER_S}, status_code=202,
+    )

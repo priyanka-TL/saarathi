@@ -11,6 +11,7 @@ from app.core.container import Container
 from app.dependencies.container import get_container
 from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
+from app.domain.scope import scope_for_user
 from app.utils.responses import json_response
 
 router = APIRouter(tags=["agents"])
@@ -49,8 +50,7 @@ def get_agents(
     # silently fell through to the default agent. The two now agree, and they
     # agree by calling the SAME AccessSpec.matches(): there must never be a
     # second access check here to drift out of step with routing.
-    tenant_id = getattr(user, "tenant_code", "") or "default"
-    organization_id = getattr(user, "active_org_id", None) or "default"
+    tenant_id, organization_id = scope_for_user(user)
 
     visible = []
     for reg in registered:

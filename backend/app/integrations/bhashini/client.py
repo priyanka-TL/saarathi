@@ -65,11 +65,19 @@ class BhashiniClient:
         authorization: str,
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,
-        connect_timeout: float = 10.0,
-        read_timeout: float = 30.0,
-        chunk_duration_s: int = 10,
-        tts_byte_limit: int = 4800,
-        asr_max_workers: int = 4,
+        # NO DEFAULTS on the tuning knobs, deliberately. Every one of these has
+        # a Settings field behind it (bhashini_*_timeout, voice_chunk_duration_s,
+        # voice_tts_byte_limit, voice_asr_max_workers) and build_container()
+        # passes all five. A default here would be a SECOND declaration of the
+        # same number, free to drift from the one operators actually tune -- and
+        # the drift would be invisible, because the injected value would keep
+        # winning in production while tests exercised the stale one.
+        connect_timeout: float,
+        read_timeout: float,
+        chunk_duration_s: int,
+        tts_byte_limit: int,
+        asr_max_workers: int,
+        ffmpeg_timeout_s: float,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._authorization = authorization
@@ -79,6 +87,7 @@ class BhashiniClient:
         self.chunk_duration_s = chunk_duration_s
         self.tts_byte_limit = tts_byte_limit
         self.asr_max_workers = max(1, asr_max_workers)
+        self.ffmpeg_timeout_s = ffmpeg_timeout_s
         self._session = requests.Session()
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
@@ -97,7 +106,7 @@ class BhashiniClient:
         """
         self._check_language(language, ASR_SERVICE_IDS)
 
-        wav = convert_to_wav(audio)
+        wav = convert_to_wav(audio, self.ffmpeg_timeout_s)
         chunks = split_audio(wav, self.chunk_duration_s)
         logger.info("asr: %d chunk(s), language=%s", len(chunks), language)
 

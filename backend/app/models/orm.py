@@ -79,6 +79,12 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 import sqlalchemy as sa
 
+#: The sentinel meaning "applies to every tenant / every organization".
+#: Declared once in app/domain/scope.py; re-exported from this module because
+#: the column defaults below read it and `from app.models.orm import
+#: DEFAULT_SCOPE` is an established import path.
+from app.domain.scope import DEFAULT_SCOPE  # noqa: F401  (re-exported)
+
 NAMING = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",
@@ -86,9 +92,6 @@ NAMING = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
-
-#: The sentinel meaning "applies to every tenant / every organization".
-DEFAULT_SCOPE = "default"
 
 #: The `created_by` / `updated_by` value for a write with no user behind it.
 SYSTEM_ACTOR = "system"

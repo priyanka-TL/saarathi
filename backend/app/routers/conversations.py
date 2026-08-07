@@ -27,6 +27,7 @@ router = APIRouter(tags=["conversations"])
 def list_conversations(
     request: Request,
     limit: str = Query("5"),
+    container: Container = Depends(get_container),
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
@@ -41,7 +42,7 @@ def list_conversations(
         parsed_limit = int(limit)
     except (TypeError, ValueError):
         return error_response("limit must be an integer", "INVALID_REQUEST", 400)
-    parsed_limit = max(1, min(parsed_limit, 20))
+    parsed_limit = max(1, min(parsed_limit, container.settings.conversations_page_limit_max))
 
     svc = ConversationService(db)
     page = svc.list_recent(user, parsed_limit)

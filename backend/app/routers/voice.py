@@ -54,6 +54,10 @@ from app.integrations.storage import (
     StorageError,
     StorageTooLargeError,
 )
+from app.integrations.bhashini.media_types import (
+    DEFAULT_CONTENT_TYPE,
+    extension_for,
+)
 from app.repositories.conversations import ConversationRepository
 from app.utils.responses import json_response, parse_uuid
 
@@ -62,19 +66,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["voice"])
 
 KEY_PREFIX = "voice"
-
-# What the browser may record in. Extensions are for the object key only --
-# ffmpeg detects the container from content, so a wrong guess is cosmetic.
-CONTENT_TYPE_EXTENSIONS = {
-    "audio/webm": "webm",
-    "audio/ogg": "ogg",
-    "audio/mp4": "mp4",
-    "audio/mpeg": "mp3",
-    "audio/wav": "wav",
-    "audio/x-wav": "wav",
-    "audio/wave": "wav",
-}
-DEFAULT_EXTENSION = "webm"
 
 
 def _voice_parts(container: Container):
@@ -154,8 +145,10 @@ def upload_url(
     if ConversationRepository(db).get_scoped(conversation_id, user) is None:
         return error_response("Conversation not found", "NOT_FOUND", 404)
 
-    content_type = str(data.get("content_type") or "audio/webm").split(";")[0].strip().lower()
-    extension = CONTENT_TYPE_EXTENSIONS.get(content_type, DEFAULT_EXTENSION)
+    content_type = str(
+        data.get("content_type") or DEFAULT_CONTENT_TYPE
+    ).split(";")[0].strip().lower()
+    extension = extension_for(content_type)
 
     # SERVER-GENERATED. A client-supplied key is an arbitrary-write primitive,
     # and embedding the conversation id is what makes the ownership check on
@@ -163,7 +156,10 @@ def upload_url(
     key = f"{KEY_PREFIX}/{conversation_id}/{uuid.uuid4().hex}.{extension}"
 
     try:
-        presigned = store.presign_put(key, content_type, expires_s=300)
+        presigned = store.presign_put(
+            key, content_type,
+            expires_s=container.settings.voice_upload_url_expiry_s,
+        )
     except StorageError as exc:
         logger.warning("voice: presign failed (%s)", type(exc).__name__)
         return error_response("Could not prepare the upload.", "STORAGE_ERROR", 502)

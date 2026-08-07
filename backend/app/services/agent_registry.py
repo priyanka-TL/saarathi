@@ -7,13 +7,15 @@ from pydantic import TypeAdapter
 
 from app.core.logger import get_logger
 from app.domain.agent_spec import AgentSpec
+from app.domain.scope import DEFAULT_SCOPE
+from app.repositories.scope_sql import (
+    scope_candidate_filter,
+    scope_precedence_order_by,
+)
 
 _agent_spec_adapter = TypeAdapter(AgentSpec)
 
 logger = get_logger("agent_registry")
-
-#: Matches migration 0006. The scope meaning "applies to every tenant".
-DEFAULT_SCOPE = "default"
 
 @dataclass
 class RegisteredAgent:
@@ -238,17 +240,15 @@ class AgentRegistry:
         resolved = agent
         try:
             row = session.execute(
-                text("""
+                text(f"""
                     SELECT c.config, c.checksum
                     FROM agent_configs c
                     WHERE c.agent_id = :agent_id
                       AND c.is_active
-                      AND c.tenant_id IN (:tenant_id, :default_scope)
-                      AND c.organization_id IN (:organization_id, :default_scope)
+                      AND {scope_candidate_filter("c")}
                       AND NOT (c.tenant_id = :default_scope
                                AND c.organization_id = :default_scope)
-                    ORDER BY CASE WHEN c.organization_id = :organization_id THEN 0 ELSE 1 END,
-                             CASE WHEN c.tenant_id = :tenant_id THEN 0 ELSE 1 END
+                    ORDER BY {scope_precedence_order_by("c")}
                     LIMIT 1
                 """),
                 {

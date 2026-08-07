@@ -43,12 +43,11 @@ from app.dependencies.container import get_container
 from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
 from app.domain.core import UserContext
+from app.domain.scope import DEFAULT_SCOPE, scope_or_default
 from app.repositories.audit import AuditLogRepository
 from app.utils.responses import json_response
 
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
-
-DEFAULT_SCOPE = "default"
 
 _VALID_STATUSES = {"active", "disabled", "coming_soon"}
 
@@ -65,7 +64,8 @@ def _admin_error(code: str, status: int, **extra: Any) -> JSONResponse:
 
 
 def _scope(tenant_id: Optional[str], organization_id: Optional[str]) -> tuple[str, str]:
-    return (tenant_id or DEFAULT_SCOPE), (organization_id or DEFAULT_SCOPE)
+    """Normalise the EXPLICIT scope query params. See domain/scope.py."""
+    return scope_or_default(tenant_id, organization_id)
 
 
 def _serialize(row) -> Dict[str, Any]:

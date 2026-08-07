@@ -7,6 +7,7 @@ from typing import Optional, List, Any
 from sqlalchemy import text as sql_text
 
 from app.agents.protocol import TurnContext, AgentSessionView, Option, SessionDelta, SessionState
+from app.domain.scope import scope_for_user
 from app.domain.sessions import AgentSessionDTO
 from app.models.orm import SYSTEM_ACTOR
 from app.repositories.audit import AuditLogRepository
@@ -253,11 +254,9 @@ class OrchestrationService:
         agent = self._registry.get_by_id(str(session_view.agent_id))
         if agent is None:
             return None
+        tenant_id, organization_id = scope_for_user(user)
         return self._registry.resolve_for_scope(
-            self._db,
-            agent,
-            getattr(user, "tenant_code", "") or "default",
-            getattr(user, "active_org_id", None) or "default",
+            self._db, agent, tenant_id, organization_id,
         )
 
     def rest_for(self, agent):
@@ -371,11 +370,9 @@ class OrchestrationService:
         #
         # A no-op for a tenant that has not customised anything, which is the
         # common case: one indexed lookup, then the unchanged agent.
+        turn_tenant_id, turn_organization_id = scope_for_user(ctx_in.user)
         agent = self._registry.resolve_for_scope(
-            self._db,
-            agent,
-            getattr(ctx_in.user, "tenant_code", "") or "default",
-            getattr(ctx_in.user, "active_org_id", None) or "default",
+            self._db, agent, turn_tenant_id, turn_organization_id,
         )
 
         # 5. enforce limits

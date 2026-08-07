@@ -44,11 +44,13 @@ from sqlalchemy import text
 
 from app.core.logger import get_logger
 from app.domain.core import UserContext
+from app.domain.scope import DEFAULT_SCOPE, scope_for_user
+from app.repositories.scope_sql import (
+    scope_candidate_filter,
+    scope_precedence_order_by,
+)
 
 logger = get_logger("capability_service")
-
-#: Matches migration 0006. The sentinel meaning "applies to everyone".
-DEFAULT_SCOPE = "default"
 
 #: Bumped only if the document's SHAPE changes in a way the frontend's
 #: normaliser would have to know about. Content changes are not a version bump.
@@ -75,17 +77,15 @@ _STATUS_OUT = {
 # disabling a capability would SEE THE DEFAULT ONE INSTEAD OF HIDING IT, which
 # is the exact opposite of what it asked for. Resolve the winner first, then
 # decide whether the winner is showable.
-_CAPABILITIES_SQL = text("""
+_CAPABILITIES_SQL = text(f"""
     SELECT * FROM (
         SELECT DISTINCT ON (c.key)
                c.id, c.key, c.name, c.description, c.icon, c.badge,
                c.status, c.display_order, c.metadata
         FROM capabilities c
-        WHERE c.tenant_id IN (:tenant_id, :default_scope)
-          AND c.organization_id IN (:organization_id, :default_scope)
+        WHERE {scope_candidate_filter("c")}
         ORDER BY c.key,
-                 CASE WHEN c.organization_id = :organization_id THEN 0 ELSE 1 END,
-                 CASE WHEN c.tenant_id = :tenant_id THEN 0 ELSE 1 END
+                 {scope_precedence_order_by("c")}
     ) resolved
     WHERE resolved.status <> 'disabled'
     ORDER BY resolved.display_order, resolved.key
@@ -95,7 +95,7 @@ _CAPABILITIES_SQL = text("""
 # its own -- it is joined against the ids the query above already resolved.
 # The agent's CONFIG, however, is scoped, and is resolved with the same
 # most-specific-wins rule via a LATERAL subquery.
-_AGENTS_SQL = text("""
+_AGENTS_SQL = text(f"""
     SELECT ca.capability_id,
            a.key                                        AS agent_key,
            COALESCE(ca.label_override, a.name)          AS label,
@@ -111,10 +111,8 @@ _AGENTS_SQL = text("""
         FROM agent_configs ac
         WHERE ac.agent_id = a.id
           AND ac.is_active
-          AND ac.tenant_id IN (:tenant_id, :default_scope)
-          AND ac.organization_id IN (:organization_id, :default_scope)
-        ORDER BY CASE WHEN ac.organization_id = :organization_id THEN 0 ELSE 1 END,
-                 CASE WHEN ac.tenant_id = :tenant_id THEN 0 ELSE 1 END
+          AND {scope_candidate_filter("ac")}
+        ORDER BY {scope_precedence_order_by("ac")}
         LIMIT 1
     ) cfg ON TRUE
     WHERE ca.capability_id = ANY(:capability_ids)
@@ -131,17 +129,8 @@ _AGENTS_SQL = text("""
 
 
 def _scope(user: Optional[UserContext]) -> Tuple[str, str]:
-    """The caller's (tenant_id, organization_id).
-
-    An anonymous caller resolves to the default scope, which is the same thing
-    an unknown tenant resolves to -- there is no tenants table to validate
-    against (tenants belong to the user service), so an unrecognised code
-    simply matches no tenant-specific row and inherits the default. Inert, not
-    an error.
-    """
-    if user is None:
-        return DEFAULT_SCOPE, DEFAULT_SCOPE
-    return (user.tenant_code or DEFAULT_SCOPE), (user.active_org_id or DEFAULT_SCOPE)
+    """The caller's (tenant_id, organization_id). See domain/scope.py."""
+    return scope_for_user(user)
 
 
 def _action_from(metadata: Optional[Dict[str, Any]], fallback: Dict[str, Any]) -> Dict[str, Any]:

@@ -60,7 +60,9 @@ below. Everything else is a config row.
 | `BHASHINI_API_KEY`, `BHASHINI_USER_ID`, `BHASHINI_AUTHORIZATION` | secrets |
 | `CLOUD_STORAGE_SECRET` | a **secret**, and under `gcp` an entire service-account JSON. Never in the database, never in a log line, never in `__repr__` |
 | `CLOUD_STORAGE_PROVIDER`, `CLOUD_STORAGE_ACCOUNTNAME`, `CLOUD_STORAGE_REGION`, `CLOUD_ENDPOINT`, `CLOUD_STORAGE_BUCKETNAME`, `CLOUD_STORAGE_BUCKET_TYPE` | needed to build a storage client at boot, before anything can be read from a database. Names follow the ELEVATE convention shared with the Node services, so one deployment's values drop into another |
-| `BHASHINI_BASE_URL`, `BHASHINI_*_TIMEOUT`, `VOICE_MAX_AUDIO_BYTES`, `VOICE_CHUNK_DURATION_S`, `VOICE_TTS_BYTE_LIMIT`, `VOICE_ASR_MAX_WORKERS` | one shared upstream, not a per-agent choice. Voice is a property of the deployment, not of which agent happens to be answering |
+| `BHASHINI_BASE_URL`, `BHASHINI_*_TIMEOUT`, `VOICE_MAX_AUDIO_BYTES`, `VOICE_CHUNK_DURATION_S`, `VOICE_TTS_BYTE_LIMIT`, `VOICE_ASR_MAX_WORKERS`, `VOICE_FFMPEG_TIMEOUT_S`, `VOICE_UPLOAD_URL_EXPIRY_S` | one shared upstream, not a per-agent choice. Voice is a property of the deployment, not of which agent happens to be answering |
+| `CLOUD_STORAGE_MAX_ATTEMPTS`, `CLOUD_STORAGE_RETRY_MODE` | boto3's retry policy, for the `aws`/`s3`/`oci`/`minio` driver. `standard` mode retries throttling and transient 5xx with exponential backoff; `max_attempts` is the TOTAL, not additional |
+| `CONVERSATIONS_PAGE_LIMIT_MAX` | ceiling on `GET /api/conversations?limit=`, applied after the client's own value. Caps how much history one request can pull |
 | `LOCAL_STORAGE_DIR` | only read by the `local` provider, which is development-only |
 
 ### Database only — no `.env` key at all

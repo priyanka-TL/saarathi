@@ -96,6 +96,7 @@ from urllib.parse import urlparse
 import requests
 from requests import Session as HTTPSession
 
+from app.domain.agent_spec import DEFAULT_REPORT_MEDIA_TYPE
 from app.integrations.mitra.exceptions import (
     MitraError,
     MitraHTTPError,
@@ -171,8 +172,12 @@ class MitraRestClient:
         origin_url: str,
         user_agent: str,
         allowed_hosts: list[str],
-        connect_timeout: float = 10.0,
-        read_timeout: float = 30.0,
+        # NO DEFAULTS, deliberately. MitraConnection (app/integrations/mitra/
+        # connection.py) owns these numbers -- Mitra's timeouts are part of the
+        # DB-backed remote spec, not .env, so the connection is the single place
+        # they are declared and MitraClientRegistry.get() always passes them.
+        connect_timeout: float,
+        read_timeout: float,
         paths: Optional[MitraPaths] = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -376,7 +381,9 @@ class MitraRestClient:
             raise MitraError("finalize: response missing 'id' (story id) key")
         return story_id, content
 
-    def get_report(self, session_id: str, media_type: str = "application/pdf") -> Optional[str]:
+    def get_report(
+        self, session_id: str, media_type: str = DEFAULT_REPORT_MEDIA_TYPE,
+    ) -> Optional[str]:
         """Fetch the generated report URL for a completed session.
 
         GET /api/get-story/?session=<id> → walks results[0].story_media[],

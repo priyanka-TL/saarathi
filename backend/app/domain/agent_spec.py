@@ -7,6 +7,14 @@ from pydantic import BaseModel, Field, ConfigDict, model_validator, PrivateAttr
 
 from app.domain.core import UserContext
 
+#: What a finalised interview report is fetched as, unless a spec overrides it.
+#: Declared here (rather than defaulted separately in RemoteSpec, in
+#: MitraRestClient.get_report and in the sessions router) because the three have
+#: to agree: the media type requested from Mitra is what the browser is then
+#: told it is downloading.
+DEFAULT_REPORT_MEDIA_TYPE = "application/pdf"
+
+
 class ModelSpec(BaseModel):
     provider:    Literal["openrouter"] = "openrouter"
     name:        str
@@ -239,7 +247,7 @@ class RemoteSpec(BaseModel):
     # as -- a mismatch yields a valid but BLANK PDF, silently.
     finalize_as_guest: bool = False
     # NOT report_path: get_report hardcodes its endpoint and never read one.
-    report_media_type: str = "application/pdf"
+    report_media_type: str = DEFAULT_REPORT_MEDIA_TYPE
 
 class RemoteFlowAgentSpec(BaseAgentSpec):
     agent_type: Literal["remote_flow"]
