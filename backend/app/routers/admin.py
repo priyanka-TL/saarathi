@@ -38,6 +38,7 @@ from app.dependencies.identity import get_current_user
 from app.domain.agent_spec import AgentSpec, canonical_json
 from app.domain.core import UserContext
 from app.repositories.audit import AuditLogRepository
+from app.exceptions.admin_envelope import admin_error
 from app.utils.responses import json_response
 
 # Every route in this router is gated. The dependency raises AdminGateError,
@@ -45,9 +46,9 @@ from app.utils.responses import json_response
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
 
 
-def _admin_error(code: str, status: int, **extra: Any) -> JSONResponse:
-    """The admin envelope: bare, no status/error_code/request_id."""
-    return json_response({"error": code, **extra}, status_code=status)
+#: The bare admin envelope. Defined once in app/exceptions/admin_envelope.py;
+#: aliased here because this module has ~20 call sites reading `_admin_error`.
+_admin_error = admin_error
 
 
 def _redact_secrets(data: Any) -> Any:

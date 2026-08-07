@@ -11,7 +11,7 @@ NOTE the admin router deliberately does NOT use this. It answers with a bare
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi.responses import JSONResponse
 
@@ -21,6 +21,23 @@ from app.integrations.mitra.exceptions import (
     MitraError,
     MitraTurnTimeout,
 )
+
+
+def error_body(message: str, code: str, request_id: Optional[str]) -> Dict[str, Any]:
+    """The standard error body as a plain dict.
+
+    Split out from `error_response` because the unhandled-exception handler
+    (app/exceptions/handlers.py) needs the same four keys but sources
+    `request_id` from the request scope rather than from the ContextVar, and
+    also has to set an X-Request-ID header. It previously rebuilt this dict by
+    hand, which is one edit away from the two shapes disagreeing.
+    """
+    return {
+        "status": "error",
+        "error": message,
+        "error_code": code,
+        "request_id": request_id,
+    }
 
 
 def error_response(message: str, code: str, status: int) -> JSONResponse:
@@ -36,12 +53,7 @@ def error_response(message: str, code: str, status: int) -> JSONResponse:
     error tuple. See app/dependencies/db.py.
     """
     return JSONResponse(
-        {
-            "status": "error",
-            "error": message,
-            "error_code": code,
-            "request_id": request_id_var.get(),
-        },
+        error_body(message, code, request_id_var.get()),
         status_code=status,
     )
 

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.protocol import SessionDelta
 from app.models.orm import SYSTEM_ACTOR, AgentSession
+from app.exceptions.domain import ConcurrentModificationError, InvalidTransitionError
 from app.domain.sessions import AgentSessionDTO
 from app.repositories.audit import AuditLogRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -43,20 +44,8 @@ ALLOWED = {
 TERMINAL = {"completed", "failed", "abandoned"}
 
 
-class InvalidTransitionError(Exception):
-    def __init__(self, session_id: uuid.UUID, current_state: str, target_state: str):
-        super().__init__(f"session {session_id}: cannot transition {current_state!r} -> {target_state!r}")
-        self.session_id = session_id
-        self.current_state = current_state
-        self.target_state = target_state
-
-
-class ConcurrentModificationError(Exception):
-    """A guarded UPDATE matched zero rows: the session's state changed between
-    the caller's read and this call."""
-    def __init__(self, session_id: uuid.UUID):
-        super().__init__(f"session {session_id} was modified concurrently")
-        self.session_id = session_id
+# Both now live in app/exceptions/domain.py; imported above and re-exported
+# here for the existing `from app.services.session_service import ...` callers.
 
 
 class SessionService:

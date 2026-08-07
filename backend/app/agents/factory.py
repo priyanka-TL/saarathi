@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Type
 
 from app.domain.agent_spec import AgentSpec
+from app.exceptions.domain import UnknownAgentType
 from app.agents.protocol import AgentHandler
 import app.agents
 
@@ -19,8 +20,7 @@ class HandlerDeps:
     mitra_sessions: Any
     settings: Any
 
-class UnknownAgentType(Exception):
-    pass
+# UnknownAgentType now lives in app/exceptions/domain.py (imported above).
 
 _HANDLERS: Dict[str, Type[AgentHandler]] = {}
 

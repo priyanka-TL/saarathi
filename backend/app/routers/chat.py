@@ -24,6 +24,7 @@ from app.dependencies.identity import get_current_user
 from app.dependencies.request_context import get_request_id
 from app.domain.core import UserContext
 from app.domain.scope import scope_for_user
+from app.exceptions.domain import SaarthiError
 from app.exceptions.envelope import error_response, mitra_error_response
 from app.integrations.mitra.exceptions import MitraError
 from app.services.conversations import ConversationService
@@ -121,10 +122,18 @@ def chat(
         return error_response(e.detail, "RATE_LIMITED", 429)
     except MitraError as e:
         return mitra_error_response(e)
+    except SaarthiError as e:
+        # Every mapped domain failure, including the LLM ones, in one clause.
+        # Each carries its own status, code and client-safe message
+        # (app/exceptions/domain.py, app/llm/exceptions.py), so a new domain
+        # exception needs no edit here.
+        #
+        # This replaces a runtime `from app.services.router_service import
+        # AgentNotFound` INSIDE the blanket except below, followed by an
+        # isinstance check -- which meant every other domain failure, an LLM
+        # rate limit included, fell through to an indistinguishable 500.
+        return error_response(e.public_message, e.error_code, e.status_code)
     except Exception as e:  # noqa: BLE001 -- mirrors the original blanket catch
-        from app.services.router_service import AgentNotFound
-        if isinstance(e, AgentNotFound):
-            return error_response("Agent not found", "AGENT_NOT_FOUND", 404)
         # exc_info so the traceback lands IN the JSON record rather than on
         # stderr where nothing can correlate it. The fields are what make this
         # answerable without a redeploy: which conversation, whose tenant, and

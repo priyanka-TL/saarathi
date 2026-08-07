@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.agents.protocol import HistoryTurn, TurnContext
 from app.domain.agent_spec import ModelSpec
+from app.exceptions.domain import AgentNotFound
 from app.core import timing
 from app.core.logger import get_logger
 from app.repositories.conversations import ConversationRepository
@@ -34,10 +35,7 @@ class RouteDecision:
     unpinned: bool = False
 
 
-class AgentNotFound(Exception):
-    def __init__(self, key: str):
-        super().__init__(f"agent not found or not selectable: {key!r}")
-        self.key = key
+# Declared in app/exceptions/domain.py; re-exported here for existing callers.
 
 
 # Stripped from both ends of a candidate command before comparing it to an exit

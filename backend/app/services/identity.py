@@ -41,11 +41,11 @@ from __future__ import annotations
 import jwt
 
 from app.core.settings import Settings
+from app.exceptions.domain import InvalidTokenError
 from app.domain.core import UserContext, OrgMembership
 
 
-class InvalidTokenError(Exception):
-    """The env token could not be decoded at all (malformed / not a JWT)."""
+# InvalidTokenError now lives in app/exceptions/domain.py (imported above).
 
 
 # ---------------------------------------------------------------------------

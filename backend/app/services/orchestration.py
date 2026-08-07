@@ -7,6 +7,7 @@ from typing import Optional, List, Any
 from sqlalchemy import text as sql_text
 
 from app.agents.protocol import TurnContext, AgentSessionView, Option, SessionDelta, SessionState
+from app.exceptions.domain import ConcurrentTurnError, TurnLimitExceeded
 from app.domain.scope import scope_for_user
 from app.domain.sessions import AgentSessionDTO
 from app.models.orm import SYSTEM_ACTOR
@@ -130,24 +131,10 @@ class TurnResult:
     turn: Any
     session: Optional[AgentSessionView]
 
-class ConcurrentTurnError(Exception):
-    """Another request is already running a turn on this conversation.
-
-    Surfaced as HTTP 409, never retried automatically: the whole point is that
-    the duplicate must not reach Mitra, where two user messages in a row merge
-    into one and destroy an answer (§1.6).
-    """
-    def __init__(self, conversation_id):
-        super().__init__(f"a turn is already in flight for conversation {conversation_id}")
-        self.conversation_id = conversation_id
-
-
-class TurnLimitExceeded(Exception):
-    """The agent's configured limits refuse this turn. Surfaced as HTTP 429."""
-    def __init__(self, reason: str, detail: str):
-        super().__init__(detail)
-        self.reason = reason
-        self.detail = detail
+# ConcurrentTurnError / TurnLimitExceeded are imported from
+# app/exceptions/domain.py at the top of this module and remain importable from
+# here -- `from app.services.orchestration import ConcurrentTurnError` is an
+# established path used by the chat router and the tests.
 
 
 class RateLimits:

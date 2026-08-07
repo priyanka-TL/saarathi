@@ -44,6 +44,7 @@ from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
 from app.domain.core import UserContext
 from app.domain.scope import DEFAULT_SCOPE, scope_or_default
+from app.exceptions.admin_envelope import admin_error
 from app.repositories.audit import AuditLogRepository
 from app.utils.responses import json_response
 
@@ -59,8 +60,9 @@ _CAPABILITY_FIELDS = {
 }
 
 
-def _admin_error(code: str, status: int, **extra: Any) -> JSONResponse:
-    return json_response({"error": code, **extra}, status_code=status)
+#: The bare admin envelope -- see app/exceptions/admin_envelope.py. Aliased
+#: rather than imported under its own name to keep the call sites below short.
+_admin_error = admin_error
 
 
 def _scope(tenant_id: Optional[str], organization_id: Optional[str]) -> tuple[str, str]:

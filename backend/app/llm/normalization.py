@@ -5,9 +5,12 @@ from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatResult
 from langchain_litellm import ChatLiteLLM
 
+from app.llm.exceptions import LlmError, translate
+
 class _NormalizedChatLiteLLM(ChatLiteLLM):
     """
-    ChatLiteLLM, with message content normalized to a plain string.
+    ChatLiteLLM, with message content normalized to a plain string, and with
+    provider exceptions translated at this boundary.
 
     Reasoning-capable models (e.g. Qwen3) return `AIMessage.content` as a
     list of content blocks (thinking/reasoning + text) instead of a plain
@@ -15,6 +18,10 @@ class _NormalizedChatLiteLLM(ChatLiteLLM):
     rendering) expects `.content` to be a string, exactly as it was with the
     previous provider. Normalizing here -- in the provider layer -- keeps
     that contract intact without touching any agent/application logic.
+
+    `_generate` is the single choke point through which every LLM call in the
+    app passes, which makes it the one place error translation has to happen for
+    it to happen everywhere. See app/llm/exceptions.py.
     """
 
     def _generate(
@@ -25,7 +32,18 @@ class _NormalizedChatLiteLLM(ChatLiteLLM):
         stream: Optional[bool] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        result = super()._generate(messages, stop=stop, run_manager=run_manager, stream=stream, **kwargs)
+        try:
+            result = super()._generate(
+                messages, stop=stop, run_manager=run_manager, stream=stream, **kwargs
+            )
+        except LlmError:
+            # Already ours (a retry wrapper re-entering, say). Do not re-wrap.
+            raise
+        except Exception as exc:
+            # `from exc` keeps the provider traceback attached for the logs
+            # while the client sees only the mapped envelope.
+            raise translate(exc, model=getattr(self, "model", None)) from exc
+
         for generation in result.generations:
             if isinstance(generation.message.content, list):
                 generation.message.content = generation.message.text
