@@ -61,8 +61,9 @@ os.environ["VOICE_ENABLED"] = "0"
 #     trick as the keys above: os.environ beats settings' .env file, and this
 #     runs before app.core.settings is first imported.
 #
-#     MUST stay above the `import app.llm` below -- that import instantiates
-#     Settings(), which snapshots the environment as it is at that moment.
+#     MUST stay above the `from app.llm.factory import LlmFactory` below --
+#     that import instantiates Settings(), which snapshots the environment as
+#     it is at that moment.
 # ---------------------------------------------------------------------------
 TEST_DB_SUFFIX = "_test"
 
@@ -127,30 +128,23 @@ if _TEST_DATABASE_URL:
     _ensure_test_database(_TEST_DATABASE_URL)
 
 # ---------------------------------------------------------------------------
-# 2. Install the stub BEFORE any app.agents.* import.
+# 2. Install the LLM stub.
 #
-#    Importing app.llm pulls in app.core.settings and app.core.logger only --- not app.agents
-#    --- so this does not prematurely bind the real factory anywhere.
+#    There is exactly ONE call site to patch: LlmFactory.get(spec)
+#    (app/llm/factory.py), which HandlerFactory.build() resolves lazily
+#    per-request. Patching the class method here -- at import time, well before
+#    any request -- is therefore safe and order-independent.
+#
+#    This used to also patch a free function `app.llm.get_llm`, which had to be
+#    imported at exactly the right moment (after the DATABASE_URL override
+#    above, before any app.agents import) because importing it instantiated
+#    Settings(). That function and its only caller (the legacy BaseAgent) are
+#    both gone, and the ordering hazard went with them.
 # ---------------------------------------------------------------------------
-import app.llm  # noqa: E402
-
 from tests.fakes import FakeDDGS, ScriptedChatModel  # noqa: E402
 
 SHARED_MODEL = ScriptedChatModel()
 
-
-def _fake_get_llm(temperature: float = 0.0) -> ScriptedChatModel:
-    return SHARED_MODEL
-
-
-app.llm.get_llm = _fake_get_llm  # type: ignore[assignment]
-
-# The SAARTHI_REGISTRY=config path resolves its LLM client via
-# LlmFactory.get(spec) (app/llm/factory.py), a different call site than the
-# free-function app.llm.get_llm patched above. It's only ever invoked lazily
-# (inside HandlerFactory.build(), itself called per-request), so patching the
-# class method here -- at import time, well before any request -- is safe and
-# has none of the fragile import-ordering constraints get_llm's patch has.
 from app.llm.factory import LlmFactory  # noqa: E402
 
 
