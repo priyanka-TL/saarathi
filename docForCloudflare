@@ -1,0 +1,102 @@
+What you're deploying
+
+Browser → saarathi-frontend.workers.dev   (React build, static)
+             │ API calls
+             ▼
+          saarathi-backend.workers.dev    (Worker → your FastAPI container)
+             │
+             ▼
+          Neon Postgres                   (external — Cloudflare has no Postgres)
+Cost: Containers need the Workers Paid plan, $5/month — the free plan can't run them. Neon has a free tier.
+
+Files I created
+File	Purpose
+backend/Dockerfile	Your app as an image. Migrates then starts, like make run
+backend/.dockerignore	Keeps .env and .venv out of the image
+backend/wrangler.jsonc	Container settings + non-secret env vars
+backend/cloudflare/index.ts	The Worker that forwards requests to the container
+backend/package.json	Deploy tooling only (wrangler). Not in the image
+frontend/wrangler.jsonc	Static-site config with SPA fallback
+I did not run any deploy commands — those touch your account, so they're yours to run.
+
+Step 1 — Cloudflare account
+Sign up at dash.cloudflare.com
+Go to Workers & Pages → subscribe to the Paid plan ($5/mo)
+Make sure Docker Desktop is running (wrangler uses it to build your image)
+Step 2 — Database on Neon
+Sign up at neon.tech, create a project (pick a region near your users)
+Copy the connection string. It looks like:
+
+postgresql://neondb_owner:npg_xxxx@ep-cool-name.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+Change postgresql:// to postgresql+psycopg:// — your app needs the driver named. Keep everything else. Save this; it's your DATABASE_URL.
+Step 3 — Log in to Cloudflare from your terminal
+
+cd ~/Desktop/POC_SARATHI/Latest_POC/saarathi-poc-new/backend
+npm install
+npx wrangler login
+A browser opens — click Allow.
+
+Step 4 — Set your secrets
+Run each one; it prompts you to paste the value (nothing is written to disk):
+
+
+npx wrangler secret put DATABASE_URL          # the postgresql+psycopg:// string from Step 2
+npx wrangler secret put OPENROUTER_API_KEY    # copy from backend/.env
+npx wrangler secret put SAARTHI_STATIC_TOKEN  # copy from backend/.env
+npx wrangler secret put MITRA_ORIGIN_URL      # copy from backend/.env
+Everything non-secret (API_PREFIX, MITRA_ENABLED, pool sizes…) is already in wrangler.jsonc, copied from your .env.
+
+Step 5 — Deploy the backend
+
+npx wrangler deploy
+First run takes 5–15 minutes — it builds the image, pushes it to Cloudflare's registry, then creates the Worker. You'll get a URL:
+
+
+https://saarathi-backend.<your-subdomain>.workers.dev
+Copy that URL. Check it's alive:
+
+
+curl https://saarathi-backend.<your-subdomain>.workers.dev/saarathi-service/healthz
+# {"status":"ok"}
+The first request wakes the container and runs your migrations against Neon, so it may take ~30s. If it fails, npx wrangler tail streams the logs live.
+
+Step 6 — Deploy the frontend
+
+cd ../frontend
+Edit public/config.js — put your backend URL in, with the prefix and /api/:
+
+
+window.__APP_CONFIG__ = {
+  API_BASE_URL: 'https://saarathi-backend.<your-subdomain>.workers.dev/saarathi-service/api/',
+};
+Then:
+
+
+npm install
+npm run build
+npx wrangler deploy
+You'll get https://saarathi-frontend.<your-subdomain>.workers.dev. Copy it.
+
+Step 7 — Let the frontend talk to the backend (CORS)
+Right now the backend rejects the frontend's origin. In backend/wrangler.jsonc, replace the placeholder:
+
+
+"FRONTEND_ORIGINS": "https://saarathi-frontend.<your-subdomain>.workers.dev",
+Then redeploy the backend (fast this time — the image is unchanged):
+
+
+cd ../backend && npx wrangler deploy
+Step 8 — Re-apply your education guardrail
+Your Neon database is brand new, so migration 0010 seeded the original "friendly General Support Assistant" prompt — your education prompt only exists in your local Postgres. Don't hand-edit the row this time (that's what caused the checksum mismatch). Instead:
+
+In wrangler.jsonc, set "SAARTHI_ADMIN_ENABLED": "1" and redeploy
+POST /saarathi-service/api/agents/general_support/config with the full spec including your education prompt — this recomputes the checksum, creates version 2, and reloads the registry
+Set it back to "0" and redeploy
+Tell me when you're at this step and I'll write the exact curl with your spec filled in.
+
+Three things that will bite you
+Mitra may reject the container. Mitra gates admission on the Origin header and possibly source IP. Your container's egress IP is Cloudflare's, not your office's — if Mitra allowlists IPs, interviews will fail while normal chat works fine. Worth checking with whoever runs Mitra before you debug it as a code problem.
+
+max_instances is 1, on purpose. Don't raise it. Two instances means two Mitra WebSockets on one interview — the exact thing your CLAUDE.md forbids.
+
+The container sleeps after 30 minutes idle. The next request cold-starts it (~20–30s) and in-memory Mitra channels are dropped. That's recoverable — re-authenticating with the same remote_session_id resumes the interview — but the first request after idle will feel slow. Lower sleepAfter to save money, raise it for responsiveness.

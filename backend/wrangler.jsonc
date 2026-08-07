@@ -1,0 +1,48 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "saarathi-backend",
+  "main": "cloudflare/index.ts",
+  "compatibility_date": "2026-06-01",
+
+  "containers": [
+    {
+      "class_name": "SaarathiBackend",
+      // Relative to THIS file, so the Docker build context is backend/.
+      "image": "./Dockerfile",
+      // ONE instance, deliberately. See cloudflare/index.ts.
+      "max_instances": 1,
+      // 1/2 vCPU, 4 GiB. `basic` (1 GiB) is too small once langchain,
+      // litellm and SQLAlchemy are all imported.
+      "instance_type": "standard-1"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "BACKEND", "class_name": "SaarathiBackend" }]
+  },
+
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SaarathiBackend"] }],
+
+  // Non-secret configuration. Secrets (DATABASE_URL, OPENROUTER_API_KEY,
+  // SAARTHI_STATIC_TOKEN, MITRA_ORIGIN_URL) go in via `wrangler secret put`
+  // and must NOT be added here -- this file is committed.
+  "vars": {
+    "API_PREFIX": "/saarathi-service",
+    "DB_POOL_SIZE": "16",
+    "DB_MAX_OVERFLOW": "8",
+    "THREADPOOL_SIZE": "16",
+    "OPENROUTER_MODEL": "qwen/qwen3.7-flash",
+    "LLM_TIMEOUT": "30",
+    "LLM_MAX_RETRIES": "3",
+    "FRONTEND_ORIGINS": "https://saarathi-frontend.workers.dev",
+    "AUTH_CHECK": "true",
+    "JWT_IDENTIFIER_FIELD": "id",
+    "JWT_EMAIL_SUFFIX": "@shikshalokam.org",
+    "SAARTHI_ADMIN_ENABLED": "0",
+    "MITRA_ENABLED": "1",
+    "MITRA_MAX_OPEN_CHANNELS": "200",
+    "MITRA_IDLE_CLOSE_S": "1200"
+  },
+
+  "observability": { "enabled": true }
+}

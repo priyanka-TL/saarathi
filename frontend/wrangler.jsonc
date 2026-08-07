@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "saarathi-frontend",
+  "compatibility_date": "2026-06-01",
+  "assets": {
+    "directory": "./dist",
+    // React Router 7 owns the routing: any unknown path must serve index.html
+    // rather than 404, or a refresh on /chat/<id> breaks.
+    "not_found_handling": "single-page-application"
+  },
+  "observability": { "enabled": true }
+}

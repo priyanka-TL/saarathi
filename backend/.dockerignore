@@ -1,0 +1,23 @@
+# SECRETS -- must never enter the image. Configuration arrives as env vars.
+.env
+.env.local
+.env.*
+
+# Local virtualenv: Linux wheels get installed inside the image instead.
+.venv
+
+# Deploy tooling, not application code.
+cloudflare
+node_modules
+wrangler.jsonc
+package.json
+package-lock.json
+
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.import_linter_cache
+tests
+docs
+.DS_Store
