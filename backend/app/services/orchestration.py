@@ -8,6 +8,7 @@ from sqlalchemy import text as sql_text
 
 from app.agents.protocol import TurnContext, AgentSessionView, Option, SessionDelta, SessionState
 from app.exceptions.domain import ConcurrentTurnError, TurnLimitExceeded
+from app.domain.agent_spec import DEFAULT_REPORT_MEDIA_TYPE
 from app.domain.scope import scope_for_user
 from app.domain.sessions import AgentSessionDTO
 from app.models.orm import SYSTEM_ACTOR
@@ -130,6 +131,24 @@ class TurnResult:
     decision: RouteDecision
     turn: Any
     session: Optional[AgentSessionView]
+
+
+@dataclass(frozen=True)
+class SessionReport:
+    """The outcome of asking for a session's finalised report.
+
+    `report_url is None` means "not ready, poll again" -- which covers both an
+    interview that has not completed and a Mitra that was briefly unreachable.
+    `media_type` is populated either way, because the client is told what it
+    will be downloading before the URL exists.
+    """
+    report_url: Optional[str]
+    media_type: str
+    story_id: Optional[str]
+
+    @property
+    def ready(self) -> bool:
+        return self.report_url is not None
 
 # ConcurrentTurnError / TurnLimitExceeded are imported from
 # app/exceptions/domain.py at the top of this module and remain importable from
@@ -262,6 +281,48 @@ class OrchestrationService:
         from app.integrations.mitra.connection import resolve_connection
 
         return self._mitra_clients.get(resolve_connection(self._settings, remote))
+
+    def report_for(self, dto, user) -> "SessionReport":
+        """The finalised interview report for a session, if it is ready yet.
+
+        Three cases, and only the first two produce a URL:
+
+        1. the session already carries a `report_url` -- serve it, no network;
+        2. the interview is COMPLETED and Mitra has the document -- fetch the
+           URL and serve that;
+        3. anything else -- `report_url` is None and the client should poll.
+
+        The agent is SCOPE-RESOLVED, like every other read of an agent off a
+        session. `get_by_id` alone answers from the default-scope snapshot, so a
+        tenant that had customised `report_media_type` -- or that points at its
+        own Mitra -- would have had its report fetched with the default scope's
+        settings.
+
+        A MitraError is swallowed into case 3 rather than propagating, which is
+        deliberate and unlike every other session route: a report that is not
+        ready yet and a Mitra that is briefly unreachable are the same thing
+        from the client's point of view, and both are fixed by polling again.
+        """
+        agent = self.agent_for_session(dto, user)
+        media_type = (
+            agent.spec.remote.report_media_type
+            if agent is not None
+            else DEFAULT_REPORT_MEDIA_TYPE
+        )
+
+        if dto.report_url:
+            return SessionReport(dto.report_url, media_type, dto.result_ref)
+
+        rest = self.rest_for(agent)
+        if dto.state == "completed" and rest is not None and dto.remote_session_id:
+            try:
+                url = rest.get_report(dto.remote_session_id, media_type=media_type)
+            except MitraError:
+                url = None
+            if url:
+                return SessionReport(url, media_type, dto.result_ref)
+
+        return SessionReport(None, media_type, dto.result_ref)
 
     def handle_turn(self, ctx_in: TurnInput) -> TurnResult:
         # 1. get_or_create conv

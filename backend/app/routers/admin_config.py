@@ -44,7 +44,7 @@ from app.dependencies.container import get_container
 from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
 from app.domain.core import UserContext
-from app.domain.scope import DEFAULT_SCOPE, scope_or_default
+from app.domain.scope import scope_or_default
 from app.exceptions.admin_envelope import admin_error
 from app.repositories.agents import AgentRepository
 from app.repositories.audit import AuditLogRepository

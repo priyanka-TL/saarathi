@@ -19,8 +19,7 @@ or datetime is a 500, not a coercion. The routers `str()` every UUID and
 """
 from __future__ import annotations
 
-import uuid
-from typing import Any, Optional
+from typing import Any
 
 from fastapi.responses import JSONResponse
 
@@ -29,20 +28,8 @@ def json_response(content: Any, status_code: int = 200) -> JSONResponse:
     return JSONResponse(content=content, status_code=status_code)
 
 
-def parse_uuid(raw: Any) -> Optional[uuid.UUID]:
-    """Lenient UUID parse, returning None instead of raising.
-
-    Path parameters are declared `str` and parsed with this rather than typed
-    as `uuid.UUID`, because FastAPI would answer a malformed segment with a 422
-    and its own `{"detail": [...]}` body. Flask's `<uuid:...>` converter simply
-    failed to match, so the URL did not exist and the answer was a 404 -- and
-    the frontend treats 404 on a conversation as "forget this conversation"
-    (see loadConversationHistory). Returning None lets each route answer with
-    its own 404 envelope.
-    """
-    if raw is None:
-        return None
-    try:
-        return uuid.UUID(str(raw))
-    except (ValueError, AttributeError, TypeError):
-        return None
+#: Re-exported so the existing `from app.utils.responses import json_response,
+#: parse_uuid` call sites keep working. It is DECLARED in utils/identifiers.py,
+#: which imports no web framework -- this module does, and a service that needed
+#: parse_uuid was therefore dragging FastAPI into the framework-agnostic core.
+from app.utils.identifiers import parse_uuid  # noqa: E402,F401  (re-exported)

@@ -202,6 +202,33 @@ class SessionService:
         )
         return updated
 
+    def abandon_and_close(
+        self,
+        conversation_id: uuid.UUID,
+        reason: str,
+        actor: str,
+        on_abandoned: Optional[Callable[[uuid.UUID], None]] = None,
+    ) -> Optional[AgentSessionDTO]:
+        """`abandon`, plus whatever has to be torn down alongside it.
+
+        The pairing matters and is easy to half-do: abandoning the session
+        without closing its Mitra socket orphans the channel, and the pool then
+        hands the next agent a channel still authenticated against the old
+        remote session.
+
+        `on_abandoned` fires ONLY when a session was actually abandoned. Calling
+        it unconditionally would close a live channel belonging to a session
+        this call did not touch.
+
+        :param on_abandoned: same shape as `open_for`'s `on_displace`, and for
+            the same reason -- it keeps this service free of any knowledge of
+            Mitra, whose channel pool lives on the container.
+        """
+        updated = self.abandon(conversation_id, reason=reason, actor=actor)
+        if updated is not None and on_abandoned is not None:
+            on_abandoned(conversation_id)
+        return updated
+
     def sweep_abandoned(self, older_than: datetime) -> List[AgentSessionDTO]:
         """For the periodic job. Bulk-abandons every non-terminal session idle
         since before `older_than`, writing one audit row per swept session.

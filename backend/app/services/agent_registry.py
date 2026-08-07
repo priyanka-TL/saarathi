@@ -7,7 +7,7 @@ from pydantic import TypeAdapter
 
 from app.core.logger import get_logger
 from app.domain.agent_spec import AgentSpec
-from app.domain.scope import DEFAULT_SCOPE
+from app.domain.scope import DEFAULT_SCOPE, scope_for_user
 from app.repositories.scope_sql import (
     scope_candidate_filter,
     scope_precedence_order_by,
@@ -175,7 +175,37 @@ class AgentRegistry:
 
     def routable(self) -> List[RegisteredAgent]:
         return [a for a in self._snapshot.values() if getattr(a.spec.routing, 'router_selectable', True)]
-        
+
+    def routable_for_user(self, session, user) -> List[RegisteredAgent]:
+        """Every routable agent this caller may actually select, scope-resolved.
+
+        Two steps that must stay together:
+
+        1. RESOLVE each agent for the caller's tenant/organization. The snapshot
+           holds the default scope, so a tenant that customised an agent would
+           otherwise be shown -- and access-checked against -- someone else's
+           configuration.
+        2. FILTER by the resolved spec's own AccessSpec, using the SAME
+           `AccessSpec.matches()` RouterService._visible calls.
+
+        Step 2 calling the same matcher as routing is the point. Listing an
+        agent the router would then refuse means the sidebar advertises
+        something that silently falls through to the default agent when clicked;
+        a second, separate access check here would be free to drift into exactly
+        that state.
+
+        Sorted by `sort_order`, which is the order the sidebar renders.
+        """
+        resolved = (
+            self.resolve_for_scope(session, agent, *scope_for_user(user))
+            for agent in self.routable()
+        )
+        return sorted(
+            (a for a in resolved if a.spec.access.matches(user)),
+            key=lambda a: a.spec.sort_order,
+        )
+
+
     _KEY_STRIP_CHARS = "'\" .,!?;:"
 
     def get_by_key_exact(self, key: Optional[str]) -> Optional[RegisteredAgent]:
