@@ -15,8 +15,16 @@ TWO THINGS THAT LOOK LIKE BUGS AND ARE NOT
    `agent_registry.reload(db)`, because the reload must observe the row it just
    wrote. The dependency's later commit is then a harmless no-op.
 
-Raw `sqlalchemy.text()` is used rather than repositories because `agents` and
-`agent_configs` have no ORM model -- see app/models/orm.py.
+Raw `sqlalchemy.text()` is still how `agents` and `agent_configs` are queried --
+they have no ORM model, see app/models/orm.py -- but that SQL now lives in
+`app/repositories/agents.py` rather than in this module. The statements moved
+verbatim; what changed is only where they live. In particular the
+deactivate-before-insert ordering that `uq_agent_configs_one_active` requires is
+now inside `AgentConfigRepository`, expressed once, instead of being spelled out
+at each of the two call sites that activate a version.
+
+This module routes, validates, authorises and shapes responses. It owns the
+transaction boundary (point 2 above) but issues no statements of its own.
 """
 from __future__ import annotations
 
@@ -26,7 +34,6 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.container import Container
@@ -37,7 +44,9 @@ from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
 from app.domain.agent_spec import AgentSpec, canonical_json
 from app.domain.core import UserContext
+from app.repositories.agents import AgentConfigRepository, AgentRepository
 from app.repositories.audit import AuditLogRepository
+from app.services.agent_config_validation import redact_secrets, remote_config_problem
 from app.exceptions.admin_envelope import admin_error
 from app.utils.responses import json_response
 
@@ -49,18 +58,6 @@ router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
 #: The bare admin envelope. Defined once in app/exceptions/admin_envelope.py;
 #: aliased here because this module has ~20 call sites reading `_admin_error`.
 _admin_error = admin_error
-
-
-def _redact_secrets(data: Any) -> Any:
-    """Any string still carrying a `${...}` placeholder is an unresolved env
-    reference and may name a credential. Blank the whole value."""
-    if isinstance(data, dict):
-        return {k: _redact_secrets(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [_redact_secrets(i) for i in data]
-    elif isinstance(data, str) and "${" in data:
-        return "<REDACTED>"
-    return data
 
 
 # --------------------------------------------------------------------------
@@ -92,19 +89,11 @@ def list_config_versions(
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     """Bare JSON array, newest version first."""
-    agent_row = db.execute(text("SELECT id FROM agents WHERE key = :key"), {"key": key}).fetchone()
+    agent_row = AgentRepository(db).find_id_by_key(key)
     if not agent_row:
         return _admin_error("AGENT_NOT_FOUND", 404)
 
-    rows = db.execute(
-        text("""
-            SELECT version, checksum, is_active, created_at
-            FROM agent_configs
-            WHERE agent_id = :agent_id
-            ORDER BY version DESC
-        """),
-        {"agent_id": agent_row.id},
-    ).fetchall()
+    rows = AgentConfigRepository(db).list_versions(agent_row.id)
 
     versions = [
         {
@@ -126,7 +115,7 @@ def activate_config_version(
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    agent_row = db.execute(text("SELECT id FROM agents WHERE key = :key"), {"key": key}).fetchone()
+    agent_row = AgentRepository(db).find_id_by_key(key)
     if not agent_row:
         return _admin_error("AGENT_NOT_FOUND", 404)
 
@@ -137,28 +126,14 @@ def activate_config_version(
     except (TypeError, ValueError):
         return _admin_error("INVALID_REQUEST", 400, msg="Version not found")
 
-    exists = db.execute(
-        text("SELECT 1 FROM agent_configs WHERE agent_id = :agent_id AND version = :version"),
-        {"agent_id": agent_row.id, "version": version_int},
-    ).scalar()
-
+    configs = AgentConfigRepository(db)
     # 400, not 404 -- the agent exists, the requested version does not.
-    if not exists:
+    if not configs.version_exists(agent_row.id, version_int):
         return _admin_error("INVALID_REQUEST", 400, msg="Version not found")
 
-    db.execute(
-        text("UPDATE agent_configs SET is_active = FALSE, "
-             "updated_by = :actor, updated_at = now() WHERE agent_id = :agent_id"),
-        {"agent_id": agent_row.id, "actor": user.user_id},
-    )
-    db.execute(
-        text(
-            "UPDATE agent_configs SET is_active = TRUE, activated_at = now(), "
-            "updated_by = :actor, updated_at = now() "
-            "WHERE agent_id = :agent_id AND version = :version"
-        ),
-        {"agent_id": agent_row.id, "version": version_int, "actor": user.user_id},
-    )
+    # Deactivate-then-activate ordering lives in the repository, because
+    # uq_agent_configs_one_active is a per-statement partial unique index.
+    configs.activate_version(agent_row.id, version_int, actor=user.user_id)
 
     AuditLogRepository(db).insert(
         action="config_activate",
@@ -174,40 +149,6 @@ def activate_config_version(
     return json_response({"version": version_int, "registry_version": new_version})
 
 
-def _remote_config_problem(spec, settings) -> Optional[tuple[list, str]]:
-    """Reject a remote_flow config that would fail SILENTLY at interview time.
-
-    THIS ROUTE IS THE ONLY GATE. There is no YAML and no startup sync any more,
-    so a config reaches Mitra exactly as it was written here. `bot_route` and
-    `company` are non-empty by schema; what the schema cannot check is
-    `finalize_path`, because the endpoints are configurable and the domain layer
-    cannot import Settings to express them as a Literal.
-
-    Getting it wrong is not a loud failure: anything unrecognised falls through
-    to the v1 branch and finalises with the wrong body shape, which Mitra
-    ACCEPTS -- returning a story, a story_media row, a 200 from get-story and a
-    downloadable, completely blank PDF, with nothing logged anywhere.
-
-    Returns (path, msg) for the error envelope, or None when the config is fine.
-    """
-    from app.integrations.mitra.connection import resolve_connection
-
-    remote = spec.remote
-    # Against the endpoints THIS spec resolves to -- it may carry its own
-    # remote.connection.paths, and checking against the global pair would both
-    # reject correct configs and accept wrong ones.
-    paths = resolve_connection(settings, remote).paths
-    if not paths.is_known_finalize(remote.finalize_path):
-        return (
-            ["remote", "finalize_path"],
-            f"finalize_path {remote.finalize_path!r} matches neither the resolved "
-            f"v1 endpoint ({paths.finalize_v1!r}) nor the resolved v2 endpoint "
-            f"({paths.finalize_v2!r})",
-        )
-
-    return None
-
-
 @router.post("/api/agents/{key}/config", response_model=None)
 def create_config_version(
     key: str,
@@ -216,9 +157,7 @@ def create_config_version(
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    agent_row = db.execute(
-        text("SELECT id, agent_type FROM agents WHERE key = :key"), {"key": key}
-    ).fetchone()
+    agent_row = AgentRepository(db).find_id_and_type_by_key(key)
     if not agent_row:
         return _admin_error("AGENT_NOT_FOUND", 404)
 
@@ -246,42 +185,18 @@ def create_config_version(
             return _admin_error("CONFIG_INVALID", 422, path=["tools"], msg=str(e))
 
     if spec.agent_type == "remote_flow":
-        problem = _remote_config_problem(spec, container.settings)
+        problem = remote_config_problem(spec, container.settings)
         if problem is not None:
             path, msg = problem
             return _admin_error("CONFIG_INVALID", 422, path=path, msg=msg)
 
     canonical, checksum = canonical_json(spec)
 
-    # Deactivate BEFORE inserting: uq_agent_configs_one_active is a per-statement
-    # partial unique index with no DEFERRABLE, so insert-then-deactivate raises
-    # a UniqueViolation.
-    db.execute(
-        text("UPDATE agent_configs SET is_active = FALSE, "
-             "updated_by = :actor, updated_at = now() WHERE agent_id = :agent_id"),
-        {"agent_id": agent_row.id, "actor": user.user_id},
+    # The deactivate-before-insert ordering that uq_agent_configs_one_active
+    # requires is the repository's job -- see AgentConfigRepository.
+    new_version, row = AgentConfigRepository(db).create_active_version(
+        agent_row.id, canonical, checksum, actor=user.user_id,
     )
-
-    new_version = db.execute(
-        text("SELECT COALESCE(MAX(version), 0) + 1 FROM agent_configs WHERE agent_id = :agent_id"),
-        {"agent_id": agent_row.id},
-    ).scalar()
-
-    row = db.execute(
-        text("""
-            INSERT INTO agent_configs (agent_id, version, config, checksum, is_active,
-                                       activated_at, created_by, updated_by)
-            VALUES (:agent_id, :version, :config, :checksum, TRUE, now(), :actor, :actor)
-            RETURNING created_at
-        """),
-        {
-            "agent_id": agent_row.id,
-            "version": new_version,
-            "config": canonical,  # a JSON string -- psycopg can't adapt a raw dict to jsonb here
-            "checksum": checksum,
-            "actor": user.user_id,
-        },
-    ).fetchone()
 
     AuditLogRepository(db).insert(
         action="config_create",
@@ -304,16 +219,7 @@ def create_config_version(
 
 @router.get("/api/agents/{key}", response_model=None)
 def get_agent_detail(key: str, db: Session = Depends(get_db)) -> JSONResponse:
-    row = db.execute(
-        text("""
-            SELECT a.id, a.name, a.description, a.agent_type, a.status,
-                   c.config, c.version, c.created_at
-            FROM agents a
-            LEFT JOIN agent_configs c ON a.id = c.agent_id AND c.is_active = TRUE
-            WHERE a.key = :key
-        """),
-        {"key": key},
-    ).fetchone()
+    row = AgentRepository(db).find_detail_with_active_config(key)
 
     if not row:
         return _admin_error("AGENT_NOT_FOUND", 404)
@@ -329,7 +235,7 @@ def get_agent_detail(key: str, db: Session = Depends(get_db)) -> JSONResponse:
         "status": row.status,
         "active_version": row.version,
         "activated_at": row.created_at.isoformat() if row.created_at else None,
-        "config": _redact_secrets(config),
+        "config": redact_secrets(config),
     })
 
 
@@ -341,7 +247,8 @@ def update_agent_status(
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
-    agent_row = db.execute(text("SELECT id FROM agents WHERE key = :key"), {"key": key}).fetchone()
+    agents = AgentRepository(db)
+    agent_row = agents.find_id_by_key(key)
     if not agent_row:
         return _admin_error("AGENT_NOT_FOUND", 404)
 
@@ -349,11 +256,7 @@ def update_agent_status(
     if status not in ("enabled", "disabled"):
         return _admin_error("INVALID_REQUEST", 400)
 
-    db.execute(
-        text("UPDATE agents SET status = :status, "
-             "updated_by = :actor, updated_at = now() WHERE id = :id"),
-        {"status": status, "id": agent_row.id, "actor": user.user_id},
-    )
+    agents.set_status(agent_row.id, status, actor=user.user_id)
 
     AuditLogRepository(db).insert(
         action="agent_enable" if status == "enabled" else "agent_disable",

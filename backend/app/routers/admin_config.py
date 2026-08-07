@@ -16,10 +16,12 @@ CONVENTIONS INHERITED FROM app/routers/admin.py, deliberately:
    request, so each mutation commits explicitly; the dependency's later commit
    is then a harmless no-op.
 
-3. **Raw `text()` rather than the ORM**, matching admin.py. The ORM models
-   exist (migration 0006 needed them for the FK), but staying on raw SQL keeps
-   this file consistent with the rest of the admin surface and keeps the
-   scope-precedence queries readable as SQL.
+3. **Raw `text()` rather than the ORM.** The ORM models exist (migration 0006
+   needed them for the FK), but the admin surface stays on raw SQL. That SQL now
+   lives in `app/repositories/capabilities.py` and `app/repositories/agents.py`
+   rather than in this file -- moved verbatim, still `text()`, still not
+   committing. This module routes, validates and shapes responses; it no longer
+   contains a statement.
 
 SCOPE IS EXPLICIT ON EVERY ROUTE, never inferred from the calling admin's own
 token. An admin editing another tenant's configuration is the normal case, and
@@ -28,12 +30,11 @@ express -- and would make a mistake look like success.
 """
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.container import Container
@@ -45,7 +46,9 @@ from app.dependencies.identity import get_current_user
 from app.domain.core import UserContext
 from app.domain.scope import DEFAULT_SCOPE, scope_or_default
 from app.exceptions.admin_envelope import admin_error
+from app.repositories.agents import AgentRepository
 from app.repositories.audit import AuditLogRepository
+from app.repositories.capabilities import CapabilityRepository
 from app.utils.responses import json_response
 
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
@@ -105,16 +108,7 @@ def list_capabilities(
     make a disabled capability look deleted.
     """
     tenant, organization = _scope(tenant_id, organization_id)
-    rows = db.execute(
-        text("""
-            SELECT id, tenant_id, organization_id, key, name, description, icon, badge,
-                   status, display_order, metadata
-            FROM capabilities
-            WHERE tenant_id = :tenant AND organization_id = :organization
-            ORDER BY display_order, key
-        """),
-        {"tenant": tenant, "organization": organization},
-    ).fetchall()
+    rows = CapabilityRepository(db).list_in_scope(tenant, organization)
 
     return json_response({"capabilities": [_serialize(r) for r in rows]})
 
@@ -150,41 +144,29 @@ def create_capability(
 
     tenant, organization = _scope(body.get("tenant_id"), body.get("organization_id"))
 
-    exists = db.execute(
-        text("""
-            SELECT 1 FROM capabilities
-            WHERE key = :key AND tenant_id = :tenant AND organization_id = :organization
-        """),
-        {"key": key, "tenant": tenant, "organization": organization},
-    ).fetchone()
-    if exists:
+    capabilities = CapabilityRepository(db)
+    if capabilities.exists(key, tenant, organization):
         return _admin_error("CAPABILITY_EXISTS", 409)
 
     try:
-        row = db.execute(
-            text("""
-                INSERT INTO capabilities (tenant_id, organization_id, key, name, description,
-                                          icon, badge, status, display_order, metadata,
-                                          created_by, updated_by)
-                VALUES (:tenant, :organization, :key, :name, :description, :icon, :badge,
-                        CAST(:status AS capability_status_enum), :display_order,
-                        CAST(:metadata AS jsonb), :actor, :actor)
-                RETURNING id, tenant_id, organization_id, key, name, description, icon,
-                          badge, status, display_order, metadata
-            """),
-            {
-                "tenant": tenant, "organization": organization, "key": key, "name": name,
-                "description": body.get("description"), "icon": body.get("icon"),
-                "badge": body.get("badge"), "status": status,
-                "display_order": body.get("display_order", 100),
-                "metadata": json.dumps(body.get("metadata") or {}),
-                "actor": user.user_id,
-            },
-        ).fetchone()
-    except Exception as exc:  # noqa: BLE001
+        row = capabilities.insert(
+            key=key, name=name, tenant=tenant, organization=organization,
+            actor=user.user_id,
+            description=body.get("description"), icon=body.get("icon"),
+            badge=body.get("badge"), status=status,
+            display_order=body.get("display_order", 100),
+            metadata=body.get("metadata"),
+        )
+    except IntegrityError:
         db.rollback()
-        # ck_capabilities_key_slug is the likely cause; surfacing the DB text
-        # would leak the constraint name into an API response.
+        # ck_capabilities_key_slug is the only integrity rule this INSERT can
+        # break that is the CALLER's fault -- the scope collision was already
+        # ruled out by exists() above. Surfacing the DB text would leak the
+        # constraint name into an API response.
+        #
+        # Narrowed from `except Exception`, which reported ANY database failure
+        # -- a dropped connection, a permissions error -- as a 422 complaining
+        # about the key format.
         return _admin_error("CAPABILITY_INVALID", 422, path=["key"],
                             msg="key must match ^[a-z][a-z0-9_]{1,62}$")
 
@@ -227,47 +209,22 @@ def update_capability(
                             msg=f"status must be one of {sorted(_VALID_STATUSES)}")
 
     tenant, organization = _scope(tenant_id, organization_id)
-    before = db.execute(
-        text("""
-            SELECT id, tenant_id, organization_id, key, name, description, icon, badge,
-                   status, display_order, metadata
-            FROM capabilities
-            WHERE key = :key AND tenant_id = :tenant AND organization_id = :organization
-        """),
-        {"key": key, "tenant": tenant, "organization": organization},
-    ).fetchone()
+    capabilities = CapabilityRepository(db)
+    before = capabilities.find_by_key(key, tenant, organization)
     if not before:
         return _admin_error("CAPABILITY_NOT_FOUND", 404)
 
-    # `actor` is bound unconditionally: the UPDATE below always sets updated_by,
-    # whether or not the caller asked to change any of _CAPABILITY_FIELDS.
-    sets, params = [], {"id": before.id, "actor": user.user_id}
-    for field in _CAPABILITY_FIELDS:
-        if field not in body:
-            continue
-        if field == "status":
-            sets.append("status = CAST(:status AS capability_status_enum)")
-            params["status"] = body["status"]
-        elif field == "metadata":
-            sets.append("metadata = CAST(:metadata AS jsonb)")
-            params["metadata"] = json.dumps(body["metadata"] or {})
-        else:
-            sets.append(f"{field} = :{field}")
-            params[field] = body[field]
+    # Only the allowed fields reach the repository. The check above already
+    # rejected anything outside _CAPABILITY_FIELDS, and update_fields
+    # interpolates these keys into its SET list -- so this intersection is what
+    # keeps that safe, not a second guard down there.
+    changes = {f: body[f] for f in _CAPABILITY_FIELDS if f in body}
 
-    if not sets:
+    row = capabilities.update_fields(before.id, changes, actor=user.user_id)
+    if row is None:
+        # Nothing to set: answer with the unchanged row rather than issue an
+        # UPDATE whose only effect would be to bump updated_at.
         return json_response(_serialize(before))
-
-    row = db.execute(
-        text(f"""
-            UPDATE capabilities SET {", ".join(sets)},
-                                    updated_by = :actor, updated_at = now()
-            WHERE id = :id
-            RETURNING id, tenant_id, organization_id, key, name, description, icon,
-                      badge, status, display_order, metadata
-        """),
-        params,
-    ).fetchone()
 
     AuditLogRepository(db).insert(
         action="capability_update", entity_type="capability", entity_id=row.id,
@@ -298,19 +255,12 @@ def delete_capability(
     are untouched.
     """
     tenant, organization = _scope(tenant_id, organization_id)
-    before = db.execute(
-        text("""
-            SELECT id, tenant_id, organization_id, key, name, description, icon, badge,
-                   status, display_order, metadata
-            FROM capabilities
-            WHERE key = :key AND tenant_id = :tenant AND organization_id = :organization
-        """),
-        {"key": key, "tenant": tenant, "organization": organization},
-    ).fetchone()
+    capabilities = CapabilityRepository(db)
+    before = capabilities.find_by_key(key, tenant, organization)
     if not before:
         return _admin_error("CAPABILITY_NOT_FOUND", 404)
 
-    db.execute(text("DELETE FROM capabilities WHERE id = :id"), {"id": before.id})
+    capabilities.delete(before.id)
     AuditLogRepository(db).insert(
         action="capability_delete", entity_type="capability", entity_id=before.id,
         actor=user.user_id, before=_serialize(before),
@@ -351,56 +301,31 @@ def set_capability_agents(
                             msg="agents must be a list")
 
     tenant, organization = _scope(tenant_id, organization_id)
-    capability = db.execute(
-        text("""
-            SELECT id FROM capabilities
-            WHERE key = :key AND tenant_id = :tenant AND organization_id = :organization
-        """),
-        {"key": key, "tenant": tenant, "organization": organization},
-    ).fetchone()
+    capabilities = CapabilityRepository(db)
+    capability = capabilities.find_id_by_key(key, tenant, organization)
     if not capability:
         return _admin_error("CAPABILITY_NOT_FOUND", 404)
 
     members = body["agents"]
+
+    # RESOLVE AND VALIDATE EVERYTHING BEFORE WRITING ANYTHING. The repository's
+    # replace_members deletes the existing rows first, so a key that turned out
+    # to be unknown halfway through would leave the capability with a truncated
+    # membership and still answer 422.
+    agents = AgentRepository(db)
     resolved = []
     for index, member in enumerate(members):
         if not isinstance(member, dict) or not member.get("agent_key"):
             return _admin_error("MEMBERSHIP_INVALID", 422,
                                 path=["agents", index, "agent_key"], msg="agent_key is required")
-        agent = db.execute(
-            text("SELECT id FROM agents WHERE key = :key"), {"key": member["agent_key"]}
-        ).fetchone()
+        agent = agents.find_id_by_key(member["agent_key"])
         if not agent:
             return _admin_error("AGENT_NOT_FOUND", 422,
                                 path=["agents", index, "agent_key"],
                                 msg=f"unknown agent {member['agent_key']!r}")
         resolved.append((agent.id, member, index))
 
-    db.execute(
-        text("DELETE FROM capability_agents WHERE capability_id = :id"),
-        {"id": capability.id},
-    )
-    for agent_id, member, index in resolved:
-        db.execute(
-            text("""
-                INSERT INTO capability_agents (capability_id, agent_id, display_order,
-                                               label_override, is_visible, metadata,
-                                               created_by, updated_by)
-                VALUES (:capability_id, :agent_id, :display_order, :label, :is_visible,
-                        CAST(:metadata AS jsonb), :actor, :actor)
-            """),
-            {
-                "capability_id": capability.id,
-                "agent_id": agent_id,
-                # Falls back to position, so a caller that sends an ordered
-                # list without explicit orders still gets that order.
-                "display_order": member.get("display_order", (index + 1) * 10),
-                "label": member.get("label_override"),
-                "is_visible": member.get("is_visible", True),
-                "metadata": json.dumps(member.get("metadata") or {}),
-                "actor": user.user_id,
-            },
-        )
+    capabilities.replace_members(capability.id, resolved, actor=user.user_id)
 
     AuditLogRepository(db).insert(
         action="capability_agent_set", entity_type="capability", entity_id=capability.id,
