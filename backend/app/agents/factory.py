@@ -28,6 +28,11 @@ class HandlerDeps:
     mitra_clients: Any
     mitra_sessions: Any
     settings: Any
+    # Saathi's equivalents. None when SAATHI_ENABLED=0, which is what
+    # SaathiFlowAgentHandler refuses to be constructed without. Defaulted so
+    # every existing HandlerDeps(...) call site keeps working unchanged.
+    saathi_tokens: Any = None
+    saathi_sessions: Any = None
 
 # UnknownAgentType now lives in app/exceptions/domain.py (imported above).
 

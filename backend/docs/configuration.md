@@ -62,6 +62,13 @@ below. Everything else is a config row.
 | `CLOUD_STORAGE_PROVIDER`, `CLOUD_STORAGE_ACCOUNTNAME`, `CLOUD_STORAGE_REGION`, `CLOUD_ENDPOINT`, `CLOUD_STORAGE_BUCKETNAME`, `CLOUD_STORAGE_BUCKET_TYPE` | needed to build a storage client at boot, before anything can be read from a database. Names follow the ELEVATE convention shared with the Node services, so one deployment's values drop into another |
 | `BHASHINI_BASE_URL`, `BHASHINI_*_TIMEOUT`, `VOICE_MAX_AUDIO_BYTES`, `VOICE_CHUNK_DURATION_S`, `VOICE_TTS_BYTE_LIMIT`, `VOICE_ASR_MAX_WORKERS`, `VOICE_FFMPEG_TIMEOUT_S`, `VOICE_UPLOAD_URL_EXPIRY_S` | one shared upstream, not a per-agent choice. Voice is a property of the deployment, not of which agent happens to be answering |
 | `CLOUD_STORAGE_MAX_ATTEMPTS`, `CLOUD_STORAGE_RETRY_MODE` | boto3's retry policy, for the `aws`/`s3`/`oci`/`minio` driver. `standard` mode retries throttling and transient 5xx with exponential backoff; `max_attempts` is the TOTAL, not additional |
+| `SAATHI_ENABLED` | 0 hides every `saathi_flow` agent, the same shape `MITRA_ENABLED` uses. Read at container build time |
+| `SAATHI_ORIGIN_URL` | a **credential** — Saathi gates the WebSocket on Origin (Django Channels' `AllowedHostsOriginValidator`), exactly as Mitra does |
+| `SAATHI_LOGIN_MECHANISM` | `password` (default) or `token`. See below — this is the one Saathi setting worth reading twice |
+| `SAATHI_EMAIL`, `SAATHI_PASSWORD` | **credentials**, read when the mechanism is `password` |
+| `SAATHI_ACCESS_TOKEN` | a **credential**, read when the mechanism is `token` |
+| `SAATHI_TENANT_CODE` | sent as `x-tenant-code` on login. Without it ELEVATE answers 406 "Tenant domain not found", which reads like an outage rather than a config error |
+| `ELEVATE_BASE_URL` | the ELEVATE identity service, **not** the Saathi host. Only the `password` mechanism needs it |
 | `CONVERSATIONS_PAGE_LIMIT_MAX` | ceiling on `GET /api/conversations?limit=`, applied after the client's own value. Caps how much history one request can pull |
 | `LOCAL_STORAGE_DIR` | only read by the `local` provider, which is development-only |
 

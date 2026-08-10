@@ -233,8 +233,15 @@ class RemoteSpec(BaseModel):
     `origin_env` is the ONE remaining environment indirection, and only because
     the Origin header is a credential. See docs/agent-configuration.md.
     """
-    provider:  Literal["mitra"]
-    flow_name: Literal["guest-mi-story", "guest-discussion"]
+    # Which adapter serves this agent. Saathi runs the SAME Django application as
+    # Mitra (project `shikshalokam_mohini`, the same ws/common/ consumer and the
+    # same REST surface) but authenticates per-user and produces no story, which
+    # is why it is a separate provider rather than another flow_name.
+    provider:  Literal["mitra", "saathi"]
+    # Not a Literal any more: the set of flows is Mitra-side configuration
+    # (`/api/flow-connection-info/`), so enumerating it here meant a new flow
+    # could not be configured without a code change. The provider validates it.
+    flow_name: str = Field(min_length=1)
     # min_length=1, not Optional: an empty value does not fail loudly at Mitra,
     # it silently resolves the wrong CompanyBot or splits a user's profile.
     bot_route: str = Field(min_length=1)
@@ -250,9 +257,22 @@ class RemoteSpec(BaseModel):
     handshake: MitraHandshakeSpec = Field(default_factory=MitraHandshakeSpec)
     turn:      MitraTurnSpec      = Field(default_factory=MitraTurnSpec)
     completion_poll_every_turn: bool = True
+
+    # Whether this flow ends by producing a story/report at all.
+    #
+    # FALSE IS NOT A DEGRADED MODE, it is a different kind of flow. Mitra's
+    # interviews finalise into a PDF; Saathi's assistant is a conversation and
+    # its own `/api/flow-connection-info/` reports `create_story: "none"`.
+    # Calling finalize() on such a flow raises (no story id in the response) and
+    # leaves the session `failed`, so this flag is what keeps a terminal turn
+    # from being reported as an error. See app/services/turn_finalization.py.
+    produces_artifact: bool = True
+
     # v1 vs v2 is a behavioural choice, not a version preference; a value
     # matching neither resolved endpoint is rejected at config-write time.
-    finalize_path:     str = DEFAULT_FINALIZE_V2_PATH
+    # Optional because a provider with produces_artifact=False never finalises
+    # and so has no endpoint to name.
+    finalize_path:     Optional[str] = DEFAULT_FINALIZE_V2_PATH
     # Finalize without a user token. MUST match what the WebSocket authenticated
     # as -- a mismatch yields a valid but BLANK PDF, silently.
     finalize_as_guest: bool = False
@@ -263,9 +283,27 @@ class RemoteFlowAgentSpec(BaseAgentSpec):
     agent_type: Literal["remote_flow"]
     remote: RemoteSpec
 
+
+class SaathiFlowAgentSpec(BaseAgentSpec):
+    """A Saathi-backed agent.
+
+    A SEPARATE agent_type rather than another `remote_flow` provider, because
+    the two are gated independently: `SAATHI_ENABLED` and `MITRA_ENABLED` are
+    different deployment switches, and the registry hides an agent by its type.
+    Folding them together would mean enabling Mitra to get Saathi.
+
+    The `remote` block is the same model -- Saathi runs the same Django
+    application -- with `provider: "saathi"` and `produces_artifact: False`.
+    """
+    agent_type: Literal["saathi_flow"]
+    remote: RemoteSpec
+
 # Use Annotated and Union for the discriminated union
 from typing_extensions import Annotated
-AgentSpec = Annotated[Union[LlmAgentSpec, RemoteFlowAgentSpec], Field(discriminator="agent_type")]
+AgentSpec = Annotated[
+    Union[LlmAgentSpec, RemoteFlowAgentSpec, SaathiFlowAgentSpec],
+    Field(discriminator="agent_type"),
+]
 
 def canonical_json(spec: Any) -> tuple[str, str]:
     """Deterministic JSON for a spec, plus its SHA256.

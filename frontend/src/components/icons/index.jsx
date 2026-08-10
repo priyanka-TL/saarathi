@@ -156,6 +156,17 @@ export const AgentIcon = () => (
   </svg>
 );
 
+/**
+ * The Saathi capability's mark: a large four-pointed sparkle with a small one
+ * trailing it. Stroked like the rest, so it follows the theme colour.
+ */
+export const SparkleIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <path d="M11 3 L13 9 L19 11 L13 13 L11 19 L9 13 L3 11 L9 9 Z" />
+    <path d="M18.5 3.5 L19.4 5.6 L21.5 6.5 L19.4 7.4 L18.5 9.5 L17.6 7.4 L15.5 6.5 L17.6 5.6 Z" />
+  </svg>
+);
+
 /** The separator between workflow breadcrumb chips. */
 export const BreadcrumbSeparatorIcon = () => (
   <svg {...stroked} width="14" height="14">

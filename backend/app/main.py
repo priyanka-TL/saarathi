@@ -128,13 +128,13 @@ if __name__ == "__main__":
 
     # Host, port and workers come from Settings; `make run` goes through here
     # so there is only one source for them.
-    assert_single_worker(settings.mitra_enabled, settings.workers)
+    assert_single_worker(settings.mitra_enabled, settings.workers, settings.saathi_enabled)
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
         # Raises under MITRA_ENABLED=1: the reloader's child would double-boot
         # the WebSocket pool.
-        reload=resolve_reloader(settings.mitra_enabled),
+        reload=resolve_reloader(settings.mitra_enabled, settings.saathi_enabled),
         workers=settings.workers,
     )

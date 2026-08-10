@@ -112,6 +112,40 @@ class Settings(BaseSettings):
     mitra_max_open_channels: int = 200
     mitra_idle_close_s: float = 1200.0
 
+    # ---- saathi ----
+    # Saathi runs the same Django application as Mitra, so its endpoint and
+    # timeouts live in `remote.connection` on the agent config exactly as
+    # Mitra's do. What lives here is only what cannot: credentials, and the
+    # deployment-wide enable switch.
+    #
+    # 0 disables every saathi_flow agent, the same shape mitra_enabled uses.
+    saathi_enabled: int = 0
+    # A CREDENTIAL -- Saathi gates the WebSocket on Origin via Django Channels'
+    # AllowedHostsOriginValidator, exactly as Mitra does.
+    saathi_origin_url: str = "https://qa.saathi.shikshalokam.org"
+
+    # HOW THE ACCESS TOKEN IS OBTAINED. Unlike Mitra, Saathi authenticates
+    # per-user: the WebSocket carries a real ELEVATE JWT and the server derives
+    # the profile from it, so there is always a token to source from somewhere.
+    #
+    #   "password" -- log in with saathi_email/saathi_password and re-mint on a
+    #                 401. The only option that survives a session ending.
+    #   "token"    -- use saathi_access_token verbatim. Simple, but cannot
+    #                 recover: ELEVATE tracks the JWT's session_id server-side
+    #                 and can invalidate it long before the token's own `exp`.
+    saathi_login_mechanism: Literal["password", "token"] = "password"
+    # A CREDENTIAL. Read when saathi_login_mechanism="token".
+    saathi_access_token: Optional[str] = None
+    # CREDENTIALS. Read when saathi_login_mechanism="password".
+    saathi_email: Optional[str] = None
+    saathi_password: Optional[str] = None
+    # ELEVATE resolves the tenant from this header; without it login answers
+    # 406 "Tenant domain not found" rather than a credential error.
+    saathi_tenant_code: str = "saathi"
+    # The ELEVATE identity service login/read lives here, NOT on the Saathi
+    # host. Only the "password" mechanism needs it.
+    elevate_base_url: str = "https://qa.elevate-apis.shikshalokam.org"
+
     # ---- cloud storage (provider-agnostic) ----
     # Switching provider is a .env change, not a code change. Names follow the
     # ELEVATE convention shared with the Node services, so ACCOUNTNAME/SECRET

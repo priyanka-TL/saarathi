@@ -56,6 +56,26 @@ def remote_config_problem(spec, settings) -> Optional[Tuple[list, str]]:
     from app.integrations.mitra.connection import resolve_connection
 
     remote = spec.remote
+
+    # A flow that produces no artifact never calls finalize, so it has no
+    # endpoint to validate. Checking anyway would reject Saathi, whose own
+    # /api/flow-connection-info/ reports create_story: "none".
+    if not getattr(remote, "produces_artifact", True):
+        if remote.finalize_path:
+            return (
+                ["remote", "finalize_path"],
+                "finalize_path must be null when produces_artifact is false -- "
+                "a flow that creates no story never finalises, and naming an "
+                "endpoint here would imply otherwise",
+            )
+        return None
+
+    if not remote.finalize_path:
+        return (
+            ["remote", "finalize_path"],
+            "finalize_path is required when produces_artifact is true",
+        )
+
     # Against the endpoints THIS spec resolves to -- it may carry its own
     # remote.connection.paths, and checking against the global pair would both
     # reject correct configs and accept wrong ones.

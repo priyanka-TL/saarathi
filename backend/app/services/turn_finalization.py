@@ -238,6 +238,41 @@ class TurnFinalizer:
         if self._mitra_sessions is not None:
             self._mitra_sessions.close(claimed.conversation_id)
 
+        # 3b. THE NO-ARTIFACT PATH.
+        #
+        # A flow that creates no story has nothing to submit: Saathi's own
+        # /api/flow-connection-info/ reports create_story: "none", and calling
+        # finalize() on it raises (the response carries no story id), which the
+        # except below turns into a FAILED session. A perfectly normal
+        # conversation would end up looking like an outage.
+        #
+        # result_ref is the REMOTE SESSION ID rather than a story id, and that
+        # is honest rather than a placeholder: the transcript is retrievable
+        # from Saathi with exactly this value (/api/companychat/?session=...),
+        # so it really is the reference to what this session produced. It also
+        # satisfies ck_agent_sessions_completed_has_result without weakening
+        # that constraint for every other provider.
+        #
+        # The claim above still ran, so two concurrent terminal turns cannot
+        # both write the follow-up message.
+        if not getattr(agent.spec.remote, "produces_artifact", True):
+            completed = self._sessions.apply(
+                claimed,
+                SessionDelta(
+                    state=SessionState.completed,
+                    result_ref=claimed.remote_session_id,
+                ),
+            )
+            logger.info(
+                "session completed with no artifact",
+                extra={
+                    "session_id": str(claimed.id),
+                    "agent_key": getattr(agent, "key", None),
+                    "provider": getattr(agent.spec.remote, "provider", None),
+                },
+            )
+            return Finalization(session=completed, claimed=True)
+
         # 4. finalize() with the user's token.
         #    THROUGH THIS AGENT'S OWN CLIENT: `agent` is scope-resolved by the
         #    caller, so for a tenant that points at its own Mitra this is that

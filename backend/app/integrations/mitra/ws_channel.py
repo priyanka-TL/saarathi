@@ -53,7 +53,21 @@ class MitraChannel:
         sess,           # app.agents.protocol.AgentSessionView
         conn,           # app.integrations.mitra.connection.MitraConnection
         ws_factory: Callable[[], "websocket.WebSocket"] = websocket.WebSocket,
+        access_token: Optional[str] = None,
     ):
+        """
+        :param access_token: sent in the authenticate frame.
+
+            DEFAULTS TO None, WHICH IS MITRA'S BEHAVIOUR AND MUST STAY SO. Mitra
+            authenticates the socket as a guest and derives nothing from a token;
+            `finalize_as_guest` exists precisely to match that, and sending one
+            there renders a blank PDF.
+
+            Saathi is the opposite: its consumer calls fetch_elevate_user() on
+            this value and CLOSES the connection when it is missing or rejected,
+            deriving the profile from the token rather than from `profileid`.
+            The parameter exists for that, and for nothing else.
+        """
         self._q: "queue.Queue[Frame]" = queue.Queue(maxsize=512)
         self._pending: Optional[Frame] = None  # settling pushback slot, §7.3
         self._closed = threading.Event()
@@ -65,6 +79,7 @@ class MitraChannel:
         # been reconfigured is treated as dead and reconnected, which is what
         # makes a config change take effect without a restart.
         self.conn_checksum: str = conn.checksum
+        self._access_token = access_token
 
         self._ws = ws_factory()
         self._ws.connect(
@@ -143,7 +158,8 @@ class MitraChannel:
             "profileid": sess.remote_profile_id,
             "projectid": "",
             "taskid": None,
-            "access_token": None,
+            # None for Mitra (a guest socket), the real ELEVATE JWT for Saathi.
+            "access_token": self._access_token,
             "route": sess.language,
             "bot_route": sess.remote_bot_route,
             "flow_name": spec.flow_name,

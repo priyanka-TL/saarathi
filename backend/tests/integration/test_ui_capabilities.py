@@ -152,6 +152,16 @@ def _by_id(document, key):
 
 
 def test_serves_the_seeded_catalogue(client):
+    """The default-scope catalogue, in display order.
+
+    A PIN, not a golden fixture: seeding a new capability is expected to fail
+    this once, and the list is then updated deliberately.
+
+    `saathi_assistant` is ABSENT here because the suite runs with
+    SAATHI_ENABLED unset: its only agent is filtered out by the provider gate,
+    and an active card with no agents is hidden rather than rendered as a dead
+    end. test_an_active_card_with_no_agents_is_hidden covers that directly.
+    """
     body = _doc(client)
     assert body["version"] == 1
     assert _ids(body) == ["listening_at_scale", "sg_commons"]
@@ -206,9 +216,15 @@ def test_membership_can_only_name_real_agents(client, interview_agents_enabled):
 
 def test_a_tenant_with_no_rows_inherits_the_default_catalogue():
     """Onboarding a tenant costs zero writes -- the headline property of the
-    default-scope model."""
+    default-scope model.
+
+    Includes `saathi_assistant`, unlike the client-based test above:
+    `_document_for` calls resolve_for_user directly, whose provider gates
+    DEFAULT to enabled, where the HTTP route passes the real settings (and the
+    suite runs with SAATHI_ENABLED unset).
+    """
     newcomer = _document_for(f"t_{uuid.uuid4().hex[:8]}")
-    assert _ids(newcomer) == ["listening_at_scale", "sg_commons"]
+    assert _ids(newcomer) == ["listening_at_scale", "saathi_assistant", "sg_commons"]
 
 
 def test_a_tenant_row_shadows_the_default_for_that_tenant_only(scoped):
@@ -308,3 +324,115 @@ def test_the_route_needs_no_credential(anonymous_client):
     response = anonymous_client.get("/api/ui/capabilities")
     assert response.status_code == 200
     assert response.json()["capabilities"]
+
+
+# ---------------------------------------------------------------------------
+# Empty cards
+# ---------------------------------------------------------------------------
+
+
+def test_an_active_card_with_no_agents_is_hidden():
+    """A card whose agents were filtered out advertises a dead end.
+
+    The provider gate drops an agent when its provider is disabled, for a
+    reason the user cannot see. Leaving the card behind renders a heading and a
+    description with nothing to click -- the same mistake as listing an agent
+    the router would refuse.
+
+    Reproduced with SAATHI_ENABLED off, which is the case that surfaced it.
+    """
+    session = SessionLocal()
+    try:
+        shown = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
+        hidden = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=False)
+    finally:
+        session.close()
+
+    assert "saathi_assistant" in [c["id"] for c in shown["capabilities"]]
+    assert "saathi_assistant" not in [c["id"] for c in hidden["capabilities"]]
+
+
+def test_a_coming_soon_card_with_no_agents_still_shows():
+    """SG Commons Portal has no agents BY DESIGN and says so with a badge, so
+    it explains itself rather than dead-ending. The exemption is what keeps the
+    rule above from hiding it."""
+    session = SessionLocal()
+    try:
+        doc = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
+    finally:
+        session.close()
+
+    sg = next(c for c in doc["capabilities"] if c["id"] == "sg_commons")
+    assert sg["agents"] == []
+    assert sg["status"] == "coming_soon"
+
+
+def test_disabling_mitra_hides_the_interview_card_too():
+    """The rule is not Saathi-specific: listening_at_scale had the same latent
+    dead end whenever MITRA_ENABLED was off."""
+    session = SessionLocal()
+    try:
+        doc = resolve_for_user(session, None, mitra_enabled=False, saathi_enabled=True)
+    finally:
+        session.close()
+
+    assert "listening_at_scale" not in [c["id"] for c in doc["capabilities"]]
+
+
+# ---------------------------------------------------------------------------
+# Self-launching cards
+# ---------------------------------------------------------------------------
+
+
+def test_a_self_launching_card_carries_an_agent_key_and_no_nested_agents():
+    """The Saathi card IS the control, so it needs no button beside it.
+
+    `agentKey` on the CARD is what makes it routable: the frontend normalises
+    `start_agent` without one to an inert `none`, which is why the card was
+    dead and its nested button did the routing. With the key present, a nested
+    button would be a second control showing the same name twice.
+    """
+    session = SessionLocal()
+    try:
+        doc = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
+    finally:
+        session.close()
+
+    card = next(c for c in doc["capabilities"] if c["id"] == "saathi_assistant")
+
+    assert card["action"] == {"type": "start_agent", "agentKey": "saathi"}
+    assert card["agents"] == []
+
+
+def test_suppressing_the_nested_agent_does_not_disable_the_provider_gate():
+    """THE SUBTLE ONE.
+
+    The membership row is never rendered, but it is NOT dead data: the gate
+    reads it to tell "no agents configured" (legitimate, shown) from "every
+    agent filtered out" (a dead end, hidden). Deleting the row as unused would
+    make the card render, and fail on click, whenever SAATHI_ENABLED=0.
+    """
+    session = SessionLocal()
+    try:
+        on = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
+        off = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=False)
+    finally:
+        session.close()
+
+    assert "saathi_assistant" in [c["id"] for c in on["capabilities"]]
+    assert "saathi_assistant" not in [c["id"] for c in off["capabilities"]]
+
+
+def test_a_grouping_card_keeps_its_nested_agents():
+    """Listening at Scale is display-only, so its buttons ARE the controls.
+    The suppression must apply only to cards that route themselves."""
+    session = SessionLocal()
+    try:
+        doc = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
+    finally:
+        session.close()
+
+    card = next(c for c in doc["capabilities"] if c["id"] == "listening_at_scale")
+
+    assert card["action"]["type"] == "display_card"
+    assert [a["id"] for a in card["agents"]] == ["record_stories", "capture_discussion"]

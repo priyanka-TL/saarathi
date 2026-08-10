@@ -36,6 +36,8 @@ class Container:
     authenticator: Any  # app.services.identity.Authenticator
     mitra_clients: Optional[Any] = None    # MitraClientRegistry | None (mitra_enabled gated)
     mitra_sessions: Optional[Any] = None   # MitraSessionManager | None (mitra_enabled gated)
+    saathi_tokens: Optional[Any] = None    # TokenProvider | None (saathi_enabled gated)
+    saathi_sessions: Optional[Any] = None  # SaathiSessionManager | None (saathi_enabled gated)
     bhashini: Optional[Any] = None         # BhashiniClient | None (voice_enabled gated)
     object_store: Optional[Any] = None     # ObjectStore | None (voice_enabled gated)
 
@@ -64,6 +66,25 @@ def build_container(settings: Settings) -> Container:
         from app.integrations.mitra.session_manager import MitraSessionManager
         mitra_clients = MitraClientRegistry()
         mitra_sessions = MitraSessionManager(settings)
+
+    # Saathi: same shape as Mitra above, its own switch. The token provider is
+    # built HERE rather than lazily, so a deployment whose credentials are wrong
+    # fails at boot with a clear message instead of rendering a sidebar button
+    # that errors on click. Under the "password" mechanism nothing is minted
+    # yet -- the first request does that -- so a boot does not depend on ELEVATE
+    # being reachable.
+    saathi_tokens = None
+    saathi_sessions = None
+    if settings.saathi_enabled:
+        from app.integrations.saathi.auth import build_token_provider
+        from app.integrations.saathi.session_manager import SaathiSessionManager
+
+        saathi_tokens = build_token_provider(settings)
+        saathi_sessions = SaathiSessionManager(settings, saathi_tokens)
+        logger.info(
+            "saathi enabled",
+            extra={"mechanism": saathi_tokens.mechanism, "origin": settings.saathi_origin_url},
+        )
 
     # BOTH OR NEITHER: voice needs somewhere to put the recording AND something
     # to transcribe it, so a half-configured deployment must fail at boot rather
@@ -124,13 +145,16 @@ def build_container(settings: Settings) -> Container:
         mitra_clients=mitra_clients,
         mitra_sessions=mitra_sessions,
         settings=settings,
+        saathi_tokens=saathi_tokens,
+        saathi_sessions=saathi_sessions,
     )
     handler_factory = HandlerFactory(deps)
     agent_registry = AgentRegistry(
         ttl_s=settings.registry_ttl_s,
-        # Hides remote_flow agents when Mitra is off. A runtime filter, not the
-        # status write ConfigSyncService used to perform -- see AgentRegistry.
+        # Hides a disabled provider's agents. A runtime filter, not the status
+        # write ConfigSyncService used to perform -- see AgentRegistry.
         mitra_enabled=bool(settings.mitra_enabled),
+        saathi_enabled=bool(settings.saathi_enabled),
     )
 
     from app.services.identity import Authenticator
@@ -147,6 +171,8 @@ def build_container(settings: Settings) -> Container:
         authenticator=authenticator,
         mitra_clients=mitra_clients,
         mitra_sessions=mitra_sessions,
+        saathi_tokens=saathi_tokens,
+        saathi_sessions=saathi_sessions,
         bhashini=bhashini,
         object_store=object_store,
     )

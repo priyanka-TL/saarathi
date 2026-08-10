@@ -67,27 +67,21 @@ export default function Sidebar({
         pushed to the bottom with the two collapsible panels -- it is a setting
         the user reaches for before speaking, not an advanced option.
       */}
-      <LanguageSelect
-        value={voiceLanguage}
-        onChange={onVoiceLanguageChange}
-        visible={voiceAvailable}
-      />
-
       <div className="chat-history-placeholder">
         <button
           type="button"
           id="new-chat-btn"
           className="agent-item"
-          // Inline style preserved verbatim: this is a <button> wearing an
-          // <li>'s class, so it inherits .agent-item's card/border/radius and
-          // overrides only layout.
+          // Still wearing .agent-item for its box model; #new-chat-btn in
+          // style.css restyles it as the rail's PRIMARY action.
+          //
+          // The presentational half of this inline block moved to that rule.
+          // It had to: an inline `color` outranks any stylesheet, so the text
+          // stayed dark on the new filled background. What remains is layout
+          // that belongs on the element rather than in a themeable rule.
           style={{
             width: '100%',
             textAlign: 'left',
-            fontSize: '0.9rem',
-            fontWeight: 500,
-            color: 'var(--text-primary)',
-            marginBottom: '12px',
             display: 'flex',
             alignItems: 'center',
             gap: '8px',
@@ -97,6 +91,22 @@ export default function Sidebar({
           <PlusIcon />
           New Chat
         </button>
+
+        {/*
+          BELOW New Chat, and inside the spacer, on purpose.
+
+          The rail's primary action should lead; voice language is a
+          preference someone sets once. It cannot be a sibling BETWEEN the
+          spacer and Chat History -- chatHistory.test.jsx pins that chain
+          because .chat-history-placeholder { flex: 1 0 auto } is what keeps
+          Advanced at the bottom -- so it nests here instead, which leaves that
+          chain intact.
+        */}
+        <LanguageSelect
+          value={voiceLanguage}
+          onChange={onVoiceLanguageChange}
+          visible={voiceAvailable}
+        />
       </div>
 
       <ChatHistorySection

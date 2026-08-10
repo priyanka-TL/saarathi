@@ -161,6 +161,12 @@ def _normalise_options(extra_content: object) -> list[ParsedOption]:
 
     Shape 3 — RAG sources: ``{sources: list[dict]}``
       Each source has url/title/text; surface as tappable citations.
+
+    Shape 4 — Saathi quick replies: ``{quick_reply_chips: list[str]}``
+      Plain STRINGS, not dicts, so the Shape 1 loop cannot serve them. Verified
+      against live Saathi traffic: a turn carrying four chips parsed to zero
+      options before this shape existed, and the buttons vanished with nothing
+      logged. Mitra never sends this key, so adding it changes nothing there.
     """
     if not isinstance(extra_content, dict):
         return []
@@ -181,6 +187,16 @@ def _normalise_options(extra_content: object) -> list[ParsedOption]:
                 opt_value = _coerce_str(item.get("value") or item.get("label"), opt_id)
                 result.append(ParsedOption(id=opt_id, label=opt_label, value=opt_value))
             return result
+
+    # Shape 4 — Saathi quick replies: bare strings, id == label == value
+    if "quick_reply_chips" in extra_content:
+        raw_chips = extra_content["quick_reply_chips"]
+        if isinstance(raw_chips, list):
+            return [
+                ParsedOption(id=text, label=text, value=text)
+                for text in (_coerce_str(c, "") for c in raw_chips)
+                if text
+            ]
 
     # Shape 2 — story validation (machine signal, no UI choices)
     if "problem_statement" in extra_content:

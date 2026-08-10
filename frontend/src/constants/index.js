@@ -33,18 +33,49 @@ export const RESUME_DEFAULT_RETRY_S = 3;
 
 // --- agents --------------------------------------------------------------
 /*
- * Agents hidden from the manual agent list in the Advanced panel.
+ * Agents hidden from the manual agent list in the Advanced panel REGARDLESS of
+ * the capability document.
  *
- * With the three current YAML agents this means #agent-list renders EMPTY --
- * record_stories and capture_discussion are reached through the capability
- * buttons instead, and general_support is the router's default. That is
- * correct, current behaviour. Do not "fix" the empty list.
+ * Only the router's default belongs here. It is reachable from no card -- it is
+ * where an unrouted message lands -- so nothing can derive it.
+ *
+ * EVERY OTHER HIDDEN AGENT IS DERIVED, by hiddenAgentKeys() below. This used to
+ * be a hardcoded list of three keys, which meant seeding a new capability-backed
+ * agent silently listed it TWICE: once as its card, once here. Nothing failed;
+ * the duplicate just appeared. Deriving removes that whole class of bug.
+ *
+ * With the current catalogue #agent-list renders EMPTY. That is correct, current
+ * behaviour. Do not "fix" the empty list.
  */
-export const SIDEBAR_HIDDEN_KEYS = new Set([
-  'record_stories',
-  'capture_discussion',
-  'general_support',
-]);
+export const SIDEBAR_HIDDEN_KEYS = new Set(['general_support']);
+
+/**
+ * The agent keys already reachable from a capability card.
+ *
+ * TWO SOURCES, and both are needed:
+ *   - a card's OWN action.agentKey -- a self-launching card (Saathi) has no
+ *     nested buttons at all, so its agent appears nowhere else;
+ *   - each nested agent's action.agentKey -- a grouping card (Listening at
+ *     Scale) is display-only and carries no key of its own.
+ *
+ * Takes the NORMALISED capability list, so an action that could not route has
+ * already become `none` and contributes nothing.
+ *
+ * @param {Array} capabilities normalised capability documents
+ * @returns {Set<string>} keys to omit from the manual agent list
+ */
+export function hiddenAgentKeys(capabilities) {
+  const keys = new Set(SIDEBAR_HIDDEN_KEYS);
+  for (const capability of capabilities ?? []) {
+    const own = capability?.action?.agentKey;
+    if (own) keys.add(own);
+    for (const agent of capability?.agents ?? []) {
+      const nested = agent?.action?.agentKey;
+      if (nested) keys.add(nested);
+    }
+  }
+  return keys;
+}
 
 // The synthetic first entry from GET /api/agents has no `key`; it means
 // "let the server route me".

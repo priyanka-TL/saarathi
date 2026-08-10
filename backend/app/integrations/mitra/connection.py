@@ -164,6 +164,12 @@ def _resolve_origin(settings, remote_spec) -> str:
         value = os.getenv(env_name)
         if value:
             return value
+
+    # Per provider: Saathi is a different deployment behind the same Django
+    # AllowedHostsOriginValidator, so it gates on its OWN origin. Falling back
+    # to Mitra's would be a 403 that reads like an outage.
+    if getattr(remote_spec, "provider", "mitra") == "saathi":
+        return getattr(settings, "saathi_origin_url", "") or settings.mitra_origin_url
     return settings.mitra_origin_url
 
 

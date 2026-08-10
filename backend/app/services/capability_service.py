@@ -64,7 +64,18 @@ _AGENTS_SQL = text(f"""
            a.icon                                       AS icon,
            ca.display_order                             AS display_order,
            ca.metadata                                  AS metadata,
-           cfg.config                                   AS config
+           cfg.config                                   AS config,
+           -- Gate 5, as a FLAG rather than a filter. Selecting gated rows and
+           -- dropping them in Python is what lets the caller tell "this card
+           -- has no agents configured" (legitimate -- SG Commons, or a tenant's
+           -- own new card) from "this card's agents were all filtered out"
+           -- (a dead end, hidden below).
+           --
+           -- COMPARED AS TEXT, not as the enum: a bare literal is cast to
+           -- agent_type_enum and raises InvalidTextRepresentation for a label
+           -- the enum does not carry yet, so this would break on a database
+           -- whose migrations lag the code.
+           a.agent_type::text                           AS agent_type
     FROM capability_agents ca
     JOIN agents a ON a.id = ca.agent_id
     JOIN LATERAL (
@@ -79,9 +90,7 @@ _AGENTS_SQL = text(f"""
     WHERE ca.capability_id = ANY(:capability_ids)
       AND ca.is_visible
       AND a.status = 'enabled'
-      -- Gate 5: with Mitra off, a remote_flow agent has nothing to serve it,
-      -- so advertising it renders a button that raises at click time.
-      AND (:mitra_enabled OR a.agent_type <> 'remote_flow')
+
     ORDER BY ca.display_order, a.key
 """)
 
@@ -97,6 +106,21 @@ def _action_from(metadata: Optional[Dict[str, Any]], fallback: Dict[str, Any]) -
     than producing a capability nothing can do."""
     action = (metadata or {}).get("action")
     return action if isinstance(action, dict) and action.get("type") else fallback
+
+
+def _launches_an_agent(action: Dict[str, Any]) -> bool:
+    """Whether a CARD's own action starts an agent.
+
+    Requires a non-empty `agentKey`, matching the frontend: `start_agent`
+    without one is normalised to an inert `none` there, because a card that
+    routed to `undefined` would reset the conversation and pin nothing. A card
+    that cannot actually route must keep its nested buttons.
+    """
+    return (
+        action.get("type") == "start_agent"
+        and isinstance(action.get("agentKey"), str)
+        and bool(action["agentKey"].strip())
+    )
 
 
 def _access_permits(config: Dict[str, Any], user: Optional[UserContext]) -> bool:
@@ -116,7 +140,8 @@ def _access_permits(config: Dict[str, Any], user: Optional[UserContext]) -> bool
 
 
 def resolve_for_user(session, user: Optional[UserContext],
-                     mitra_enabled: bool = True) -> Dict[str, Any]:
+                     mitra_enabled: bool = True,
+                     saathi_enabled: bool = True) -> Dict[str, Any]:
     """The capability document for this caller's tenant and organization."""
     tenant_id, organization_id = _scope(user)
     params = {
@@ -133,11 +158,24 @@ def resolve_for_user(session, user: Optional[UserContext],
         _AGENTS_SQL,
         {**params,
          "capability_ids": [r.id for r in capability_rows],
-         "mitra_enabled": mitra_enabled},
+         "mitra_enabled": mitra_enabled,
+         "saathi_enabled": saathi_enabled},
     ).fetchall()
 
+    #: agent_type -> whether that provider is enabled in this deployment.
+    provider_enabled = {"remote_flow": mitra_enabled, "saathi_flow": saathi_enabled}
+
     by_capability: Dict[Any, List[Dict[str, Any]]] = {}
+    #: Capabilities that HAVE membership, whatever survives filtering below.
+    #: The distinction between "no agents configured" and "every agent filtered
+    #: out" is what decides whether a card is legitimate or a dead end.
+    configured: set = set()
+
     for row in agent_rows:
+        configured.add(row.capability_id)
+        # Gate 5: the provider is switched off for this deployment.
+        if not provider_enabled.get(row.agent_type, True):
+            continue
         if not _access_permits(row.config or {}, user):
             continue
         action = _action_from(row.metadata, {"type": "start_agent"})
@@ -156,6 +194,39 @@ def resolve_for_user(session, user: Optional[UserContext],
 
     capabilities = []
     for row in capability_rows:
+        agents = by_capability.get(row.id, [])
+
+        # A CARD WHOSE AGENTS WERE ALL FILTERED OUT IS A DEAD END, so hide it.
+        #
+        # Only when the card HAS membership. Two situations look identical in
+        # the output and are not:
+        #
+        #   no membership at all -- legitimate. SG Commons Portal ships that
+        #     way, and a tenant may add a card before wiring agents to it.
+        #     Shown, and the frontend omits the actions block.
+        #   membership, none surviving -- the provider is disabled or the
+        #     caller lacks access, for a reason the user cannot see. The card
+        #     would render a heading with nothing to click, which is the same
+        #     mistake as listing an agent the router would refuse.
+        if not agents and row.id in configured:
+            continue
+
+        card_action = _action_from(row.metadata, {"type": "display_card"})
+
+        # A CARD THAT LAUNCHES AN AGENT ITSELF NEEDS NO NESTED BUTTONS.
+        #
+        # `Listening at Scale` groups two agents and is display-only, so its
+        # buttons are the controls. A card whose OWN action is start_agent is
+        # already the control -- rendering a button beside it shows the same
+        # name twice and gives two ways to do one thing.
+        #
+        # The membership rows are NOT dead: they are what the gate above reads
+        # to tell "no agents configured" from "every agent filtered out", which
+        # is what hides this card when its provider is switched off. Suppress
+        # them here, AFTER that decision, never by deleting the rows.
+        if _launches_an_agent(card_action):
+            agents = []
+
         capabilities.append({
             "id": row.key,
             "title": row.name,
@@ -165,11 +236,8 @@ def resolve_for_user(session, user: Optional[UserContext],
             "status": _STATUS_OUT.get(row.status, "enabled"),
             "order": row.display_order,
             "visible": True,
-            "action": _action_from(row.metadata, {"type": "display_card"}),
-            # An empty list is legitimate -- SG Commons Portal has no agents --
-            # and the frontend omits the actions block entirely rather than
-            # rendering an empty one.
-            "agents": by_capability.get(row.id, []),
+            "action": card_action,
+            "agents": agents,
         })
 
     return {"version": DOCUMENT_VERSION, "capabilities": capabilities}

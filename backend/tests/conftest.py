@@ -43,6 +43,21 @@ os.environ["API_PREFIX"] = ""
 # suite: tests/characterisation/test_voice_router.py pins the 503, and the ones
 # that need it on swap fakes onto the container themselves.
 os.environ["VOICE_ENABLED"] = "0"
+
+# The same leak a third time. A developer's `.env` sets SAATHI_ENABLED=1 with a
+# real ELEVATE token, and without this the Saathi agent joins the registry --
+# which changes `GET /api/agents` and fails
+# tests/characterisation/fixtures/api_agents.json, a fixture that is NEVER
+# edited to make a test pass. Observed, not hypothetical: enabling Saathi in
+# .env turned three characterisation tests red without touching a line of
+# application code.
+#
+# Off is also the correct default for the suite. Saathi's own tests construct
+# what they need directly (tests/unit/test_saathi_auth.py) or pass the gate
+# explicitly (test_ui_capabilities.py), so none of them depend on the ambient
+# flag -- and with it off, no test can open a socket to a live deployment.
+os.environ["SAATHI_ENABLED"] = "0"
+
 # CLOUD_STORAGE_PROVIDER is not overridden: with voice off, build_container
 # never constructs a store, so the developer's provider is never reached.
 
