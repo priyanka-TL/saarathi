@@ -190,3 +190,53 @@ def test_the_agent_type_discriminator_picks_the_remote_model():
 
     spec = TypeAdapter(AgentSpec).validate_python(agent_spec_dict("saathi", "saathi"))
     assert isinstance(spec, RemoteFlowAgentSpec)
+
+
+# ---------------------------------------------------------------------------
+# Which agents may give up a pinned session
+# ---------------------------------------------------------------------------
+
+def test_yielding_is_off_by_default():
+    """The safety property. An agent that has never heard of the flag keeps the
+    absolute pin, so adding it could not change any existing behaviour."""
+    from app.domain.agent_spec import RoutingSpec
+
+    assert RoutingSpec().yields_to_keyword is False
+
+
+def test_only_the_assistant_yields_never_an_interview():
+    """Read from the migrations, so this is what the DATABASE holds.
+
+    An interview must never yield: a user answering "I want to tell my story
+    about attendance" is talking TO it, and re-routing them would destroy the
+    run. The assistant must, or its session -- which never completes -- pins the
+    conversation for good.
+    """
+    import copy
+    import importlib.util
+    from pathlib import Path
+
+    versions = Path(__file__).parents[2] / "migrations" / "versions"
+
+    def _load(name, path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    seed = _load("_seed_0010", versions / "0010_seed_default_data.py")
+    saathi_seed = _load("_saathi_0012", versions / "0012_seed_saathi_agent.py")
+
+    interviews = {
+        a["key"]: a for a in seed.seed_agents()
+        if a.get("agent_type") in ("remote_flow", "saathi_flow")
+    }
+    for key, agent in interviews.items():
+        assert agent.get("routing", {}).get("yields_to_keyword", False) is False, key
+
+    # 0016 is what turns it on for the assistant; the seed itself does not.
+    assistant = copy.deepcopy(saathi_seed.seed_spec())
+    assert assistant.get("routing", {}).get("yields_to_keyword", False) is False
+
+    generalize = _load("_yield_0016", versions / "0016_saathi_yields_pin.py")
+    assert generalize.PROVIDER == "saathi", "only the assistant is switched on"

@@ -747,3 +747,62 @@ def test_recent_chat_on_an_empty_session_makes_no_second_call():
 
     assert _client().recent_chat("sess-1", "380") == []
     assert len(resp_lib.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# is_session_completed reads the TRUE last row, not the last of page one
+# ---------------------------------------------------------------------------
+
+
+@resp_lib.activate
+def test_is_session_completed_reads_past_the_first_page():
+    """THE LATENT BUG THIS FIXES. A bare GET returns the first page, so
+    `results[-1]` was the last row of page ONE. Past the page size the status
+    read was an old row's, and a long interview could never be seen to complete:
+    no PDF, session stuck open, nothing logged."""
+    # 250 rows exist; page one ends on an IN_PROGRESS row, the real last row is
+    # COMPLETED. The old code read page one and answered False forever.
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 250, "results": [{"id": 1, "status": "IN_PROGRESS"}]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "1"})],
+    )
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 250, "results": [{"id": 250, "status": "COMPLETED"}]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "1", "offset": "249"})],
+    )
+
+    assert _client().is_session_completed("s1") is True
+
+
+@resp_lib.activate
+def test_is_session_completed_is_false_when_the_true_last_row_is_not_complete():
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 3, "results": [{"id": 1, "status": "COMPLETED"}]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "1"})],
+    )
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 3, "results": [{"id": 3, "status": "IN_PROGRESS"}]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "1", "offset": "2"})],
+    )
+
+    assert _client().is_session_completed("s1") is False
+
+
+@resp_lib.activate
+def test_is_session_completed_short_circuits_on_an_empty_transcript():
+    """count == 0 must not issue a second request with offset -1."""
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 0, "results": []}, status=200,
+    )
+
+    assert _client().is_session_completed("s1") is False
+    assert len(resp_lib.calls) == 1

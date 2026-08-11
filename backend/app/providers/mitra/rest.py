@@ -64,12 +64,31 @@ class MitraRestClient:
     def is_session_completed(self, session_id: str) -> bool:
         """Whether the last CompanyChat row reports COMPLETED.
 
-        The per-turn ``finish_reason`` on the WebSocket is NOT a completion
-        signal -- it fires at the end of every bot turn. Only this REST poll is
-        authoritative.
+        The per-turn `finish_reason` on the WebSocket is NOT this signal -- it
+        fires at the end of every bot turn. Only this poll is authoritative.
+
+        PAGINATED, for the same reason `recent_chat` below is. A bare GET
+        returns the FIRST page, so `results[-1]` is the last row of page one --
+        not the last row of the conversation. Past the page size the status
+        being read is an OLD row's, and the session can never be seen to
+        complete: no artifact, the session stuck open, nothing logged. Masked
+        today only because a flow finishes well inside one page.
+
+        Two requests, like `recent_chat`: one to learn `count`, one to fetch the
+        true tail.
         """
-        data = self._http.request("GET", self.paths.chat, params={"session": session_id})
-        results = data.get("results", [])
+        head = self._http.request(
+            "GET", self.paths.chat, params={"session": session_id, "limit": 1},
+        )
+        count = int(head.get("count") or 0)
+        if count == 0:
+            return False
+
+        tail = self._http.request(
+            "GET", self.paths.chat,
+            params={"session": session_id, "limit": 1, "offset": count - 1},
+        )
+        results = tail.get("results", [])
         if not results:
             return False
         return results[-1].get("status") == "COMPLETED"

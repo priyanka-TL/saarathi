@@ -72,6 +72,24 @@ class RoutingSpec(BaseModel):
     pin_session:          bool  = False
     exit_keywords:        List[str] = Field(default_factory=lambda: ["/exit", "cancel", "stop"])
     confidence_threshold: float = Field(0.5, ge=0.0, le=1.0)
+
+    #: May this agent's OPEN SESSION be displaced mid-conversation when the user
+    #: plainly wants a different agent?
+    #:
+    #: FALSE IS THE SAFE DEFAULT AND MUST STAY SO. A pinned session is what
+    #: stops a half-finished interview being hijacked: a user answering "I want
+    #: to tell my story about attendance" is talking TO the interview, not
+    #: asking to leave it, and re-routing them would destroy the run.
+    #:
+    #: TRUE is for an agent whose conversation has no end. An open-ended
+    #: assistant never reports completion, so its session never becomes
+    #: terminal and Gate 2 would otherwise pin the conversation to it forever --
+    #: which is exactly what happened to `saathi`. Such an agent yields instead:
+    #: it keeps the turn unless the router has positive evidence for a different
+    #: agent, and the FLOOR is staying pinned, never the default agent.
+    #:
+    #: See RouterService.select Gate 2.
+    yields_to_keyword:    bool = False
     router_selectable:    bool  = True
     direct_selectable:    bool  = True
 

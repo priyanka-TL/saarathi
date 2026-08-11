@@ -35,7 +35,12 @@ logger = get_logger("router_service")
 @dataclass(frozen=True)
 class RouteDecision:
     agent: RegisteredAgent
-    reason: Literal["explicit", "pinned", "keyword", "llm", "default", "exit_to_default"]
+    reason: Literal[
+        "explicit", "pinned", "keyword", "llm", "default", "exit_to_default",
+        # A pinned session that GAVE THE TURN UP. Distinct from "keyword"/"llm"
+        # so the turn log shows a displacement rather than an ordinary route.
+        "keyword_yield", "llm_yield",
+    ]
     confidence: float
     router_latency_ms: int
     unpinned: bool = False
@@ -100,6 +105,10 @@ class RouterService:
         if pin:
             if self._is_exit(ctx.text, pin.spec.routing.exit_keywords):
                 return self._exit_to_default(conv)
+            if pin.spec.routing.yields_to_keyword:
+                yielded = self._yield_from_pin(ctx, pin, t0)
+                if yielded is not None:
+                    return yielded
             return RouteDecision(pin, "pinned", 1.0, 0)  # <- ZERO LLM calls
 
         # GATE 3 -- deterministic keyword pre-route
@@ -151,6 +160,108 @@ class RouterService:
         """
         self._session_service.abandon(conv.id, reason="user_exit")
         return RouteDecision(self._registry.default(), "exit_to_default", 1.0, 0, unpinned=True)
+
+    def _yield_from_pin(
+        self, ctx: TurnContext, pin: RegisteredAgent, t0,
+    ) -> Optional[RouteDecision]:
+        """Give the turn up when the user plainly wants a DIFFERENT agent.
+
+        Only reached for an agent whose config sets `routing.yields_to_keyword`
+        -- see RoutingSpec for why that defaults to False and must stay so. An
+        interview never gets here, and a user answering it is never re-routed.
+
+        WHY THIS EXISTS. An open-ended assistant has no completion signal, so
+        its session never becomes terminal and Gate 2 would pin the conversation
+        to it for good. Observed live: one `saathi` session sat `awaiting_user`
+        for twelve turns and swallowed every later request, including an
+        explicit ask for a different agent.
+
+        THE FLOOR IS THE PINNED AGENT, NOT THE DEFAULT, and that is the whole
+        care in this method. Gates 3-5 fall through to `registry.default()` when
+        nothing is confident; reusing them verbatim here would drop an ordinary,
+        slightly-ambiguous assistant turn onto General Support -- a worse bug
+        than the one being fixed. Returning None means "stay pinned".
+
+        TWO STEPS, cheap first:
+
+          1. keyword, deterministic and free -- the same substring match Gate 3
+             uses, over the same visibility-filtered candidates;
+          2. the classifier, only when no keyword matched. Needed because the
+             match is a plain substring test: the sentence that prompted this
+             work, "I wanted to capture a story", matches NONE of
+             record_stories' keywords ("capture story" is not in "capture a
+             story"), so a keyword-only rule would not have fixed it.
+
+        The pinned agent is excluded from the candidates throughout, so its own
+        keywords cannot "switch" the conversation to itself and log a spurious
+        yield.
+
+        The session is deliberately NOT abandoned here. Returning a different
+        agent is enough: `SessionService.open_for` already abandons the old
+        session with reason="agent_switch" AND fires `on_displace`, which closes
+        the orphaned WebSocket. Abandoning here would skip that and leak the
+        socket until the idle reaper noticed.
+        """
+        # THE DEFAULT AGENT IS NOT A YIELD TARGET, and excluding it matters.
+        # Observed while testing this: an ordinary follow-up mid-assistant --
+        # "tell me more about that plan" -- classified to general_support ABOVE
+        # its confidence threshold and would have been bounced out of the
+        # conversation it belonged to. The floor below only guards against an
+        # UNSURE classifier, not a confidently wrong one.
+        #
+        # A yield means "the user wants THAT agent". Wanting out of this one is
+        # a different intent, and `_exit_to_default` already serves it. Staying
+        # put costs nothing when the assistant could have answered anyway.
+        candidates = [
+            a for a in self._visible(ctx.user)
+            if a.key != pin.key and not a.is_default
+        ]
+        if not candidates:
+            return None
+
+        # 1. Deterministic, zero LLM calls.
+        hits = [(a.spec.routing.priority, a) for a in candidates
+                if self._kw_match(ctx.text, a.spec.routing.keywords)]
+        if hits:
+            winner = max(hits, key=itemgetter(0))[1]
+            logger.info(
+                "pin yielded on a keyword",
+                extra={"from_agent": pin.key, "to_agent": winner.key},
+            )
+            return RouteDecision(winner, "keyword_yield", 1.0, 0, unpinned=True)
+
+        # 2. The classifier. Same invocation Gate 4 makes, but a miss means
+        #    STAY PINNED rather than fall through to the default agent.
+        try:
+            raw = self._invoke_router(ctx, candidates)
+            parsed = json_repair.loads(raw)
+            key = parsed.get("agent_key") if isinstance(parsed, dict) else None
+            conf = float(parsed.get("confidence", 0)) if isinstance(parsed, dict) else 0.0
+            a = self._registry.get_by_key_exact(key)
+            # MEMBERSHIP IN `candidates`, not merely a registry hit. The
+            # registry is global; `candidates` is what THIS caller may see. A
+            # key the classifier returned for an agent outside that set --
+            # hallucinated, stale, or belonging to another tenant -- must not
+            # become a route, and `get_by_key_exact` alone would let it.
+            if (a is not None
+                    and any(c.key == a.key for c in candidates)
+                    and a.spec.routing.router_selectable
+                    and conf >= a.spec.routing.confidence_threshold):
+                logger.info(
+                    "pin yielded on the classifier",
+                    extra={"from_agent": pin.key, "to_agent": a.key, "confidence": conf},
+                )
+                return RouteDecision(a, "llm_yield", conf, _ms(t0), unpinned=True)
+        except Exception as e:  # noqa: BLE001
+            # Staying pinned is the safe outcome, so a router failure here is
+            # strictly less serious than at Gate 4 -- the turn still gets the
+            # agent the user was already talking to.
+            logger.warning(
+                "pin yield check failed, staying pinned: %s", e,
+                extra={"agent_key": pin.key, "latency_ms": _ms(t0)},
+            )
+
+        return None
 
     def _pin_for(self, conv) -> Optional[RegisteredAgent]:
         """The agent currently driving this conversation, or None.
