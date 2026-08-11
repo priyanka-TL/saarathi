@@ -97,6 +97,20 @@ export default function Message({ item, onSelectOption, speech }) {
               )}
             </div>
           )}
+          {/*
+            INSIDE .message-content, between the text and the meta row -- the
+            same place the Mitra report link sits, so a document reads as part
+            of the reply rather than as a separate control below it.
+
+            It cannot go inside .message-text for an agent bubble: that div is
+            dangerouslySetInnerHTML, so React children cannot be appended to it.
+            Directly after it is the same thing visually and is as close as the
+            two can be brought.
+
+            Being inside .message-content is why the CSS has to be qualified --
+            see the specificity note in style.css.
+          */}
+          <MessageAttachments attachments={attachments} />
           <div className="message-footer">
             <Meta timestamp={timestamp} agentName={agentName} showAgent />
             {/*
@@ -117,12 +131,6 @@ export default function Message({ item, onSelectOption, speech }) {
             )}
           </div>
         </div>
-        {/*
-          Outside the isAgent branch, exactly like the option group below, so a
-          replayed agent bubble renders its documents too. Downloads ignore
-          readOnly on purpose -- see MessageAttachments.
-        */}
-        <MessageAttachments attachments={attachments} />
         {options && options.length > 0 && (
           <MessageOptions
             options={options}

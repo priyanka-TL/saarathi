@@ -38,7 +38,7 @@ describe('MessageAttachments', () => {
 
     const rendered = links();
     expect(rendered).toHaveLength(2);
-    expect(rendered.map((a) => a.textContent)).toEqual(['⬇ PDF', '⬇ DOCX']);
+    expect(rendered.map((a) => a.textContent)).toEqual(['Download: PDF', 'Download: DOCX']);
     expect(rendered[0]).toHaveAttribute('href', PDF.url);
     expect(rendered[1]).toHaveAttribute('href', DOCX.url);
   });
@@ -47,7 +47,7 @@ describe('MessageAttachments', () => {
     render(<MessageAttachments attachments={[PDF]} />);
 
     expect(links()).toHaveLength(1);
-    expect(links()[0].textContent).toBe('⬇ PDF');
+    expect(links()[0].textContent).toBe('Download: PDF');
   });
 
   it('renders nothing at all when there are no attachments', () => {
@@ -69,13 +69,17 @@ describe('MessageAttachments', () => {
 
     const rendered = links();
     expect(rendered).toHaveLength(1);
-    expect(rendered[0].textContent).toBe('⬇ DOCX');
+    expect(rendered[0].textContent).toBe('Download: DOCX');
   });
 
   it('shows no filename in the label, but uses it as the download hint', () => {
     render(<MessageAttachments attachments={[PDF]} />);
 
     const link = links()[0];
+    // Both halves of the label rule, pinned together because they pull in
+    // opposite directions: the "Download:" prefix was asked for, the document
+    // slug was explicitly not wanted, and neither is obvious from the other.
+    expect(link.textContent).toBe('Download: PDF');
     expect(link.textContent).not.toContain('MIP_student-focus-primary-grades');
     // Extension appended, so the saved file is not extensionless.
     expect(link).toHaveAttribute('download', 'MIP_student-focus-primary-grades.pdf');
@@ -125,6 +129,32 @@ describe('attachments on a message', () => {
 
     // ...while the option beside it IS inert, which is the contrast.
     expect(screen.getByRole('button', { name: 'Yes' })).toBeDisabled();
+  });
+
+  it('sits INSIDE the bubble, not below it', () => {
+    // Requested explicitly: follow the Mitra report link and keep the download
+    // as part of the reply rather than a separate control underneath. The
+    // option group stays outside .message-content, which is the contrast --
+    // and being inside is also why the CSS has to be qualified, so a regression
+    // here would silently break hover rather than move a box.
+    const item = makeItem('agent', {
+      content: 'Your plan is ready to download.',
+      html: '<p>Your plan is ready to download.</p>',
+      agentName: 'Saathi',
+      attachments: [PDF],
+      options: [{ id: '1', label: 'Yes', value: 'yes' }],
+    });
+
+    const { container } = render(<Message item={item} onSelectOption={vi.fn()} />);
+
+    const bubble = container.querySelector('.message-content');
+    expect(bubble.querySelector('.message-attachments')).not.toBeNull();
+    // ...and it precedes the meta row, so the timestamp stays last.
+    const kids = [...bubble.children].map((el) => el.className);
+    expect(kids.indexOf('message-attachments')).toBeLessThan(kids.indexOf('message-footer'));
+    // The option group is NOT inside the bubble.
+    expect(bubble.querySelector('.message-options')).toBeNull();
+    expect(container.querySelector('.message-options')).not.toBeNull();
   });
 
   it('leaves an ordinary message untouched', () => {

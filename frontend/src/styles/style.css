@@ -1368,6 +1368,16 @@ body {
    .message-content qualifier is absent: these are not inside .message-content,
    so they never hit the generic `.message-content a:hover` trap that rule guards
    against. */
+/* Per-turn document downloads, rendered INSIDE .message-content between the
+   reply text and the meta row -- the same place the report link below sits, so
+   a document reads as part of the reply rather than as a separate control.
+
+   EVERY SELECTOR IS QUALIFIED WITH .message-content, for the reason spelled out
+   above the .report-link rules: the generic `.message-content a:hover` is
+   (0,3,0), so a bare `.attachment-link:hover` at (0,2,0) LOSES and hover would
+   repaint the label var(--primary-color) on top of a var(--primary-color) fill
+   -- a button that goes blank on hover. Matching the qualifier wins on source
+   order without reaching for !important. */
 .message-attachments {
     display: flex;
     flex-wrap: wrap;
@@ -1375,8 +1385,8 @@ body {
     margin-top: 10px;
 }
 
-a.attachment-link,
-a.attachment-link:visited {
+.message-content a.attachment-link,
+.message-content a.attachment-link:visited {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -1397,13 +1407,21 @@ a.attachment-link:visited {
     transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
-a.attachment-link:hover,
-a.attachment-link:focus-visible {
+.message-content a.attachment-link:hover,
+.message-content a.attachment-link:focus-visible {
     /* Already filled, so hover DARKENS rather than fills. */
     background: var(--primary-hover);
     border-color: var(--primary-hover);
     color: #fff;
     text-decoration: none;
+}
+
+[data-theme="dark"] .message-content a.attachment-link:hover,
+[data-theme="dark"] .message-content a.attachment-link:focus-visible {
+    /* Dark theme has its own `.message-content a:hover` override, same trap. */
+    background: var(--primary-hover);
+    border-color: var(--primary-hover);
+    color: #fff;
 }
 
 .message-content a.report-link,
