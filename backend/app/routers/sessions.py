@@ -22,9 +22,9 @@ from app.dependencies.db import get_db
 from app.dependencies.identity import get_current_user
 from app.dependencies.orchestrator import get_orchestrator
 from app.domain.core import UserContext
-from app.exceptions.envelope import error_response, mitra_error_response
-from app.integrations.mitra.exceptions import MitraError
-from app.integrations.mitra.turn_recovery import TurnOutcome
+from app.exceptions.envelope import error_response, upstream_error_response
+from app.providers.errors import ProviderError
+from app.providers.recovery import TurnOutcome
 from app.repositories.conversations import ConversationRepository
 from app.services.orchestration import OrchestrationService
 from app.services.session_service import SessionService
@@ -38,7 +38,7 @@ router = APIRouter(tags=["sessions"])
 # NOT Settings fields, deliberately: these go out IN THE RESPONSE BODY and the
 # frontend polls on them, so they are part of the API contract rather than an
 # operator tuning knob. The two differ because the waits differ -- a turn that
-# is still running with Mitra settles in a few seconds, where finalisation has
+# is still running upstream settles in a few seconds, where finalisation has
 # to generate a report.
 TURN_PENDING_RETRY_AFTER_S = 3
 FINALIZE_PENDING_RETRY_AFTER_S = 5
@@ -99,8 +99,8 @@ def finalize_session(
 
     try:
         result = orch.finalize_now(sid, user)
-    except MitraError as e:
-        return mitra_error_response(e)
+    except ProviderError as e:
+        return upstream_error_response(e)
 
     if result is None:
         return _not_found()
@@ -118,15 +118,15 @@ def resume_session(
     """Recover a turn Saarthi stopped listening for -- WITHOUT re-sending it.
 
     This is what the UI's Retry button must call during a remote_flow
-    interview. Re-POSTing /api/chat with the same text is unsafe: Mitra had
+    interview. Re-POSTing /api/chat with the same text is unsafe: the platform had
     already answered and moved on, so the answer landed against the NEXT
-    question (§1.6 answer destruction). This route is read-only against Mitra.
+    question (answer destruction). This route is read-only against the platform.
 
     Three outcomes, mirroring turn_recovery.TurnOutcome, with THREE DIFFERENT
     key sets -- which is why this route cannot have a response_model:
-      200 {response, ...}    Mitra had answered; the reply is now stored.
-      202 {retry_after}      Mitra is still generating; poll again.
-      200 {can_resend: true} Mitra never received it; re-sending IS safe.
+      200 {response, ...}    the platform had answered; the reply is now stored.
+      202 {retry_after}      the platform is still generating; poll again.
+      200 {can_resend: true} the platform never received it; re-sending IS safe.
     """
     sid, _dto, miss = _resolve(session_id, db, user)
     if miss is not None:
@@ -134,8 +134,8 @@ def resume_session(
 
     try:
         result = orch.resume_turn(sid, user)
-    except MitraError as e:
-        return mitra_error_response(e)
+    except ProviderError as e:
+        return upstream_error_response(e)
 
     if result is None:
         return _not_found()
@@ -182,11 +182,7 @@ def abandon_session(
         dto.conversation_id,
         reason="user_requested",
         actor=user.user_id,
-        on_abandoned=(
-            container.mitra_sessions.close
-            if container.mitra_sessions is not None
-            else None
-        ),
+        on_abandoned=container.providers.close_conversation,
     )
 
     # Idempotent: if there was no open session to abandon (already terminal),
@@ -206,7 +202,7 @@ def get_report(
     """Serves a report URL, never a file.
 
     The 202 body carries no envelope at all -- just {"retry_after": 5} -- which
-    is what the client polls on. Note MitraError is swallowed into that 202
+    is what the client polls on. Note ProviderError is swallowed into that 202
     here, unlike every other session route.
     """
     _sid, dto, miss = _resolve(session_id, db, user)

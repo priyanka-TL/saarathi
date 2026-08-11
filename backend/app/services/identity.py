@@ -100,7 +100,8 @@ def default_context(settings: Settings) -> UserContext:
     modes or auth-off runs create a second Mitra profile for the same person.
 
     token is None -- there is no token in this mode. A non-guest remote_flow
-    agent therefore cannot finalize against Mitra with auth off; MITRA_ENABLED
+    agent therefore cannot finalize against a remote platform with auth off; the
+    provider allowlist
     is 0 by default, so nothing reaches that path.
     """
     return UserContext(

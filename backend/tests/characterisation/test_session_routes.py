@@ -16,17 +16,12 @@ from sqlalchemy import text
 from app.agents.protocol import SessionDelta, SessionState
 from app.database.engine import SessionLocal
 from app.domain.agent_spec import (
-    MitraConnectionSpec,
     RemoteFlowAgentSpec,
     RemoteSpec,
     RoutingSpec,
 )
 
-#: Required on every RemoteSpec now -- the MITRA_* environment floor is gone.
-_CONNECTION = MitraConnectionSpec(
-    base_url="https://mitra.example.com",
-    ws_url="wss://mitra.example.com/ws/common/",
-)
+from tests.provider_factories import remote_spec
 from app.domain.core import UserContext
 from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -34,7 +29,20 @@ from app.services.session_service import SessionService
 from tests.characterisation.conftest import chat
 
 
-class _FakeMitraRest:
+class _FakeProvider:
+    """One fake where there were two, because the core sees one seam.
+
+    It used to take a fake REST client AND a fake channel pool, each shaped
+    against a different real class; a route that closed a channel and a route
+    that fetched a report reached them by different paths. Both go through the
+    provider now.
+    """
+
+    name = "mitra"
+    stateful_transport = True
+    supports_recovery = True
+    produces_artifacts = True
+
     def __init__(self):
         self.finalize_calls = []
         self.get_report_calls = []
@@ -44,34 +52,38 @@ class _FakeMitraRest:
         # leak recorded calls between tests.
         self.chat_rows = []
         self.recent_chat_calls = []
+        self.close_calls = []
 
-    def finalize(
-        self, session_id, profile_id, flow, language, token,
-        path="/api/end-story/v2/", as_guest=False,
-    ):
-        self.finalize_calls.append((session_id, profile_id, flow, language, token))
-        return self.story_id, "narrative content"
+    def finalize(self, remote, session_view, user):
+        from app.providers.protocol import FinalizeResult
 
-    def get_report(self, session_id, media_type="application/pdf"):
-        self.get_report_calls.append((session_id, media_type))
+        self.finalize_calls.append((
+            session_view.remote_session_id, session_view.remote_profile_id,
+            remote.flow_name, session_view.language, getattr(user, "token", None),
+        ))
+        return FinalizeResult(result_ref=self.story_id, artifact_url=self.report_url)
+
+    def fetch_artifact(self, remote, session_view):
+        self.get_report_calls.append(
+            (session_view.remote_session_id, remote.report_media_type)
+        )
         return self.report_url
 
     # -- lost-turn recovery -------------------------------------------------
-    # chat_rows is what Mitra's CompanyChat "already contains"; recording the
-    # calls is how the tests assert that recovery is READ-ONLY.
-    def recent_chat(self, session_id, profile_id, tail=10):
-        self.recent_chat_calls.append((session_id, profile_id, tail))
-        return list(self.chat_rows)
+    # chat_rows is what the platform's transcript "already contains"; recording
+    # the calls is how the tests assert that recovery is READ-ONLY.
+    def reconcile(self, remote, session_view, sent_text):
+        from app.providers.recovery import reconcile
 
-    def is_session_completed(self, session_id):
+        self.recent_chat_calls.append(
+            (session_view.remote_session_id, session_view.remote_profile_id, 10)
+        )
+        return reconcile(list(self.chat_rows), sent_text)
+
+    def is_complete(self, remote, session_view):
         return False
 
-
-class _FakeMitraSessions:
-    def __init__(self):
-        self.close_calls = []
-
-    def close(self, conversation_id):
+    def close_channel(self, conversation_id):
         self.close_calls.append(conversation_id)
 
 
@@ -87,33 +99,34 @@ def _stub_agent(agent_id: uuid.UUID) -> _RegisteredAgentStub:
         key="record_stories", name="Record Stories", description="test",
         agent_type="remote_flow",
         routing=RoutingSpec(pin_session=True, exit_keywords=["/exit"]),
-        remote=RemoteSpec(
-            provider="mitra", flow_name="guest-mi-story",
+        remote=remote_spec(
+            flow_name="guest-mi-story",
             bot_route="/test-bot-route", company="test-company",
-            connection=_CONNECTION,
             report_media_type="application/pdf",
         ),
     )
     return _RegisteredAgentStub(id=str(agent_id), key="record_stories", spec=spec)
 
 
-class _FakeMitraClients:
-    """Stands in for MitraClientRegistry, handing back one fake client whatever
-    the connection.
+class _FakeProviders:
+    """Stands in for ProviderRegistry, handing back one fake provider whatever
+    the spec.
 
-    The registry is the ONLY way a client reaches the routes now -- there is no
-    container.mitra_rest any more, because a default-scope client cannot be
-    built without an agent spec to build it from. Leaving the real registry in
-    place would have it construct a REAL MitraRestClient from the resolved
-    connection, which reaches the network; pytest-socket turns that into a 500
-    rather than a refusal anyone can read.
+    The registry is the ONLY way a provider reaches the routes. Leaving the real
+    one in place would have it build a REAL client from the resolved connection,
+    which reaches the network; pytest-socket turns that into a 500 rather than a
+    refusal anyone can read.
     """
 
-    def __init__(self, client):
-        self._client = client
+    def __init__(self, provider):
+        self._provider = provider
+        self.enabled = frozenset({"mitra", "saathi"})
 
-    def get(self, conn):
-        return self._client
+    def get(self, remote):
+        return self._provider
+
+    def close_conversation(self, conversation_id):
+        self._provider.close_channel(conversation_id)
 
 
 @pytest.fixture()
@@ -121,13 +134,13 @@ def fake_mitra(flask_app, monkeypatch):
     """Container is a frozen dataclass -- object.__setattr__ bypasses that to
     swap in fakes for the duration of one test, restored afterward."""
     container = flask_app.state.container
-    orig_sessions, orig_clients = container.mitra_sessions, container.mitra_clients
-    rest, sessions = _FakeMitraRest(), _FakeMitraSessions()
-    object.__setattr__(container, "mitra_sessions", sessions)
-    object.__setattr__(container, "mitra_clients", _FakeMitraClients(rest))
-    yield rest, sessions
-    object.__setattr__(container, "mitra_sessions", orig_sessions)
-    object.__setattr__(container, "mitra_clients", orig_clients)
+    orig = container.providers
+    provider = _FakeProvider()
+    object.__setattr__(container, "providers", _FakeProviders(provider))
+    # Both halves of the old pair are the same object now, so the tests below
+    # keep their two-name unpacking without pretending there are two fakes.
+    yield provider, provider
+    object.__setattr__(container, "providers", orig)
 
 
 @pytest.fixture()
@@ -431,7 +444,7 @@ def test_report_200_with_freshly_fetched_url(client, stub_registry, fake_mitra, 
 # ---------------------------------------------------------------------------
 
 def _resume_setup(client, stub_registry, fake_mitra, script, rows):
-    from app.integrations.mitra.turn_recovery import ChatRow  # noqa: F401
+    from app.providers.recovery import ChatRow  # noqa: F401
 
     rest, _sessions = fake_mitra
     conv_id = _own_conversation_id(client, script)
@@ -448,7 +461,7 @@ def _resume_setup(client, stub_registry, fake_mitra, script, rows):
 def test_resume_recovers_a_reply_mitra_had_already_sent(client, stub_registry, fake_mitra, script):
     """THE regression test: the reply exists upstream, so hand it back rather
     than re-sending the user's answer into the next question."""
-    from app.integrations.mitra.turn_recovery import ChatRow
+    from app.providers.recovery import ChatRow
 
     conv_id, session, rest = _resume_setup(client, stub_registry, fake_mitra, script, rows=[
         # _own_conversation_id sends "hello" as the last user message.
@@ -468,7 +481,7 @@ def test_resume_recovers_a_reply_mitra_had_already_sent(client, stub_registry, f
 
 def test_resume_persists_the_recovered_reply_into_the_transcript(client, stub_registry, fake_mitra, script):
     """Otherwise the recovered turn vanishes on the next page reload."""
-    from app.integrations.mitra.turn_recovery import ChatRow
+    from app.providers.recovery import ChatRow
 
     conv_id, session, _ = _resume_setup(client, stub_registry, fake_mitra, script, rows=[
         ChatRow(id=1, from_user=True, message="hello"),
@@ -484,7 +497,7 @@ def test_resume_persists_the_recovered_reply_into_the_transcript(client, stub_re
 
 def test_resume_reports_pending_while_mitra_is_still_generating(client, stub_registry, fake_mitra, script):
     """202, so the client polls. It must NOT be told re-sending is safe."""
-    from app.integrations.mitra.turn_recovery import ChatRow
+    from app.providers.recovery import ChatRow
 
     _conv, session, _ = _resume_setup(client, stub_registry, fake_mitra, script, rows=[
         ChatRow(id=1, from_user=True, message="hello"),
@@ -501,7 +514,7 @@ def test_resume_reports_pending_while_mitra_is_still_generating(client, stub_reg
 
 def test_resume_allows_a_resend_only_when_mitra_never_got_the_message(client, stub_registry, fake_mitra, script):
     """The one safe case -- and the one the old button assumed always held."""
-    from app.integrations.mitra.turn_recovery import ChatRow
+    from app.providers.recovery import ChatRow
 
     _conv, session, _ = _resume_setup(client, stub_registry, fake_mitra, script, rows=[
         ChatRow(id=1, from_user=True, message="a completely different earlier answer"),
@@ -519,7 +532,7 @@ def test_resume_allows_a_resend_only_when_mitra_never_got_the_message(client, st
 def test_resume_404s_for_another_tenants_session(client, stub_registry, fake_mitra, script):
     """Same scoping as every other session route -- a recovered reply is
     conversation content and must not leak across tenants."""
-    from app.integrations.mitra.turn_recovery import ChatRow
+    from app.providers.recovery import ChatRow
 
     rest, _ = fake_mitra
     other_conv = _other_tenant_conversation_id()

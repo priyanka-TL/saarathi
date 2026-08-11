@@ -139,10 +139,28 @@ def _access_permits(config: Dict[str, Any], user: Optional[UserContext]) -> bool
     return access.matches(user)
 
 
+def _provider_of(config: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The provider a config row names, or None for a non-delegated agent.
+
+    Read straight off the JSONB rather than through the spec model: this runs
+    for every card on every sidebar load, and an unparseable config must hide
+    one agent, not raise.
+    """
+    remote = (config or {}).get("remote")
+    if not isinstance(remote, dict):
+        return None
+    provider = remote.get("provider")
+    return provider if isinstance(provider, str) else None
+
+
 def resolve_for_user(session, user: Optional[UserContext],
-                     mitra_enabled: bool = True,
-                     saathi_enabled: bool = True) -> Dict[str, Any]:
-    """The capability document for this caller's tenant and organization."""
+                     enabled_providers: Optional[frozenset] = None) -> Dict[str, Any]:
+    """The capability document for this caller's tenant and organization.
+
+    `enabled_providers` is None for a caller with no deployment opinion (tests,
+    and anything that wants the unfiltered catalogue); an empty frozenset really
+    does hide every delegated agent.
+    """
     tenant_id, organization_id = _scope(user)
     params = {
         "tenant_id": tenant_id,
@@ -154,16 +172,13 @@ def resolve_for_user(session, user: Optional[UserContext],
     if not capability_rows:
         return {"version": DOCUMENT_VERSION, "capabilities": []}
 
+    # The two enable flags used to be bound here and were dead: the SQL stopped
+    # referencing them when this gate moved into Python, and nothing removed
+    # them.
     agent_rows = session.execute(
         _AGENTS_SQL,
-        {**params,
-         "capability_ids": [r.id for r in capability_rows],
-         "mitra_enabled": mitra_enabled,
-         "saathi_enabled": saathi_enabled},
+        {**params, "capability_ids": [r.id for r in capability_rows]},
     ).fetchall()
-
-    #: agent_type -> whether that provider is enabled in this deployment.
-    provider_enabled = {"remote_flow": mitra_enabled, "saathi_flow": saathi_enabled}
 
     by_capability: Dict[Any, List[Dict[str, Any]]] = {}
     #: Capabilities that HAVE membership, whatever survives filtering below.
@@ -173,9 +188,14 @@ def resolve_for_user(session, user: Optional[UserContext],
 
     for row in agent_rows:
         configured.add(row.capability_id)
-        # Gate 5: the provider is switched off for this deployment.
-        if not provider_enabled.get(row.agent_type, True):
-            continue
+        # Gate 5: the provider this agent names is switched off for this
+        # deployment. Keyed on the provider rather than on the agent type, so a
+        # new platform is a new value in the set and not a new key in a dict
+        # that has to be edited here.
+        provider = _provider_of(row.config)
+        if provider is not None and enabled_providers is not None:
+            if provider not in enabled_providers:
+                continue
         if not _access_permits(row.config or {}, user):
             continue
         action = _action_from(row.metadata, {"type": "start_agent"})

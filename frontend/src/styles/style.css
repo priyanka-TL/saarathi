@@ -1360,6 +1360,52 @@ body {
    on top of the var(--primary-color) background set here — purple on purple,
    i.e. a button that went blank on hover. Matching the qualifier wins on
    source order without resorting to !important. */
+/* Per-turn document downloads. Same pill as the report link below, but laid
+   out as a ROW of them (a turn can offer PDF and DOCX) and living in
+   .message-body next to the option group rather than inside .message-text --
+   so it renders under an agent bubble, whose body is innerHTML we must not
+   append to. The .report-link selectors are matched here too, which is why the
+   .message-content qualifier is absent: these are not inside .message-content,
+   so they never hit the generic `.message-content a:hover` trap that rule guards
+   against. */
+.message-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+a.attachment-link,
+a.attachment-link:visited {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: 1px solid var(--primary-color);
+    border-radius: 999px;
+    /* FILLED, not an outline. var(--primary-color) is #4e2277 in the light
+       theme and #a276d6 in the dark one -- kept as the variable rather than
+       hardcoded so the button follows the theme, which is what every other
+       filled button in this stylesheet does. */
+    background: var(--primary-color);
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    text-decoration: none;
+    max-width: 100%;
+    word-break: break-word;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+a.attachment-link:hover,
+a.attachment-link:focus-visible {
+    /* Already filled, so hover DARKENS rather than fills. */
+    background: var(--primary-hover);
+    border-color: var(--primary-hover);
+    color: #fff;
+    text-decoration: none;
+}
+
 .message-content a.report-link,
 .message-content a.report-link:visited {
     /* `flex`, not `inline-flex`: this is appended after the confirmation text

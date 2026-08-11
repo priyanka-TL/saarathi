@@ -30,6 +30,7 @@ class MessageRepository:
         route_confidence: Optional[float] = None,
         options: Optional[List[Dict[str, Any]]] = None,
         selected_option_id: Optional[str] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None,
         prompt_tokens: Optional[int] = None,
         completion_tokens: Optional[int] = None,
@@ -61,6 +62,7 @@ class MessageRepository:
             route_confidence=route_confidence,
             options=options,
             selected_option_id=selected_option_id,
+            attachments=attachments,
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -102,7 +104,7 @@ class MessageRepository:
     def last_user_content(self, conversation_id: uuid.UUID) -> Optional[str]:
         """Text of the most recent user message, or None.
 
-        Turn recovery needs to ask Mitra "what became of THIS message", and the
+        Turn recovery needs to ask the provider "what became of THIS message", and the
         conversation transcript is the only record of what was sent -- the turn
         that timed out never got far enough to store anything else.
         """

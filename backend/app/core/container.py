@@ -17,6 +17,7 @@ from app.core.settings import Settings
 from app.tools.registry import ToolRegistry
 from app.llm.factory import LlmFactory
 from app.agents.factory import HandlerFactory, HandlerDeps
+from app.providers.registry import stateful_enabled_names
 from app.services.agent_registry import AgentRegistry
 
 logger = get_logger(__name__)
@@ -34,10 +35,10 @@ class Container:
     handler_factory: HandlerFactory
     agent_registry: AgentRegistry
     authenticator: Any  # app.services.identity.Authenticator
-    mitra_clients: Optional[Any] = None    # MitraClientRegistry | None (mitra_enabled gated)
-    mitra_sessions: Optional[Any] = None   # MitraSessionManager | None (mitra_enabled gated)
-    saathi_tokens: Optional[Any] = None    # TokenProvider | None (saathi_enabled gated)
-    saathi_sessions: Optional[Any] = None  # SaathiSessionManager | None (saathi_enabled gated)
+    # ONE SLOT FOR EVERY REMOTE PROVIDER. This was four named vendor slots
+    # (clients and channel pools, twice), which meant onboarding a platform
+    # edited the composition root, the DI struct and every construction site.
+    providers: Any = None                  # app.providers.registry.ProviderRegistry
     bhashini: Optional[Any] = None         # BhashiniClient | None (voice_enabled gated)
     object_store: Optional[Any] = None     # ObjectStore | None (voice_enabled gated)
 
@@ -55,36 +56,25 @@ def build_container(settings: Settings) -> Container:
 
     llm_factory = LlmFactory()
 
-    # A REGISTRY, not a client: base URL, timeouts and the Origin credential
-    # all resolve per agent and per tenant, so one shared client would serve
-    # every scope the FIRST scope's endpoint. Nothing can be built before an
-    # agent spec is in hand, which is why there is no default-scope client.
-    mitra_clients = None
-    mitra_sessions = None
-    if settings.mitra_enabled:
-        from app.integrations.mitra.connection import MitraClientRegistry
-        from app.integrations.mitra.session_manager import MitraSessionManager
-        mitra_clients = MitraClientRegistry()
-        mitra_sessions = MitraSessionManager(settings)
+    # A REGISTRY, not a client: base URL, timeouts, endpoint paths and the
+    # credentials all resolve per agent and per tenant, so one shared client
+    # would serve every scope the FIRST scope's endpoint. Nothing can be built
+    # before an agent spec is in hand, which is why there is no default-scope
+    # client and no per-provider block here.
+    #
+    # ONE LINE, AND IT DOES NOT GROW. Providers self-register from their own
+    # packages and PROVIDERS_ENABLED decides which of them this deployment
+    # hands out, so onboarding a platform never edits the composition root.
+    from app.providers.registry import ProviderRegistry
 
-    # Saathi: same shape as Mitra above, its own switch. The token provider is
-    # built HERE rather than lazily, so a deployment whose credentials are wrong
-    # fails at boot with a clear message instead of rendering a sidebar button
-    # that errors on click. Under the "password" mechanism nothing is minted
-    # yet -- the first request does that -- so a boot does not depend on ELEVATE
-    # being reachable.
-    saathi_tokens = None
-    saathi_sessions = None
-    if settings.saathi_enabled:
-        from app.integrations.saathi.auth import build_token_provider
-        from app.integrations.saathi.session_manager import SaathiSessionManager
-
-        saathi_tokens = build_token_provider(settings)
-        saathi_sessions = SaathiSessionManager(settings, saathi_tokens)
-        logger.info(
-            "saathi enabled",
-            extra={"mechanism": saathi_tokens.mechanism, "origin": settings.saathi_origin_url},
-        )
+    providers = ProviderRegistry(settings)
+    logger.info(
+        "remote providers ready",
+        extra={
+            "enabled": sorted(providers.enabled) or None,
+            "stateful": stateful_enabled_names(settings) or None,
+        },
+    )
 
     # BOTH OR NEITHER: voice needs somewhere to put the recording AND something
     # to transcribe it, so a half-configured deployment must fail at boot rather
@@ -142,19 +132,15 @@ def build_container(settings: Settings) -> Container:
     deps = HandlerDeps(
         llm_factory=llm_factory,
         tool_registry=tool_registry,
-        mitra_clients=mitra_clients,
-        mitra_sessions=mitra_sessions,
+        providers=providers,
         settings=settings,
-        saathi_tokens=saathi_tokens,
-        saathi_sessions=saathi_sessions,
     )
     handler_factory = HandlerFactory(deps)
     agent_registry = AgentRegistry(
         ttl_s=settings.registry_ttl_s,
         # Hides a disabled provider's agents. A runtime filter, not the status
         # write ConfigSyncService used to perform -- see AgentRegistry.
-        mitra_enabled=bool(settings.mitra_enabled),
-        saathi_enabled=bool(settings.saathi_enabled),
+        enabled_providers=providers.enabled,
     )
 
     from app.services.identity import Authenticator
@@ -169,10 +155,7 @@ def build_container(settings: Settings) -> Container:
         handler_factory=handler_factory,
         agent_registry=agent_registry,
         authenticator=authenticator,
-        mitra_clients=mitra_clients,
-        mitra_sessions=mitra_sessions,
-        saathi_tokens=saathi_tokens,
-        saathi_sessions=saathi_sessions,
+        providers=providers,
         bhashini=bhashini,
         object_store=object_store,
     )

@@ -44,19 +44,39 @@ os.environ["API_PREFIX"] = ""
 # that need it on swap fakes onto the container themselves.
 os.environ["VOICE_ENABLED"] = "0"
 
-# The same leak a third time. A developer's `.env` sets SAATHI_ENABLED=1 with a
-# real ELEVATE token, and without this the Saathi agent joins the registry --
-# which changes `GET /api/agents` and fails
-# tests/characterisation/fixtures/api_agents.json, a fixture that is NEVER
-# edited to make a test pass. Observed, not hypothetical: enabling Saathi in
-# .env turned three characterisation tests red without touching a line of
-# application code.
+# The same leak a third time, and now in ONE key rather than one per platform.
 #
-# Off is also the correct default for the suite. Saathi's own tests construct
-# what they need directly (tests/unit/test_saathi_auth.py) or pass the gate
-# explicitly (test_ui_capabilities.py), so none of them depend on the ambient
-# flag -- and with it off, no test can open a socket to a live deployment.
-os.environ["SAATHI_ENABLED"] = "0"
+# `mitra` alone, deliberately, because that is exactly what the pinned
+# characterisation fixtures were captured against: api_agents.json lists Record
+# Stories and Capture Discussions but not the Saathi assistant. Enabling a
+# second provider here would change `GET /api/agents` and fail a fixture that is
+# NEVER edited to make a test pass. Observed, not hypothetical: turning the
+# second platform on in .env once turned three characterisation tests red
+# without touching a line of application code.
+#
+# A test that needs a different set builds its own registry or passes
+# `enabled_providers` explicitly, so nothing depends on the ambient value -- and
+# with the rest off, no test can open a socket to a live deployment.
+os.environ["PROVIDERS_ENABLED"] = "mitra"
+
+# CREDENTIALS THE SEEDED CONFIGS NAME. `remote.auth.credential_env` holds the
+# NAME of a variable, not a value, so a config row is useless without the
+# environment behind it -- and resolving a provider raises ProviderConfigError
+# when the named variable is unset. These are junk values: the suite runs with
+# `--disable-socket`, so nothing can be reached with them, and setting them here
+# rather than relying on a developer's .env is what keeps the suite runnable on
+# a clean checkout.
+os.environ.setdefault("MITRA_ORIGIN_URL", "https://mitra.test.invalid")
+os.environ.setdefault("SAATHI_ORIGIN_URL", "https://saathi.test.invalid")
+
+# The variables tests/provider_factories.py names. Same reasoning; kept distinct
+# from the two above so a factory-built spec can never accidentally resolve the
+# same credential a seeded config does.
+os.environ.setdefault("TEST_MITRA_ORIGIN_URL", "https://mitra.factory.invalid")
+os.environ.setdefault("TEST_SAATHI_ORIGIN_URL", "https://saathi.factory.invalid")
+os.environ.setdefault("TEST_SAATHI_EMAIL", "tester@example.invalid")
+os.environ.setdefault("TEST_SAATHI_PASSWORD", "not-a-real-password")
+os.environ.setdefault("TEST_SAATHI_ACCESS_TOKEN", "not-a-real-token")
 
 # CLOUD_STORAGE_PROVIDER is not overridden: with voice off, build_container
 # never constructs a store, so the developer's provider is never reached.

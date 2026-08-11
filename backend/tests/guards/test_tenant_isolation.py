@@ -166,8 +166,6 @@ def test_handler_factory_hands_the_two_tenants_different_handlers(
         factory = HandlerFactory(HandlerDeps(
             llm_factory=container.llm_factory,
             tool_registry=container.tool_registry,
-            mitra_clients=None,
-            mitra_sessions=None,
             settings=container.settings,
         ))
 
@@ -217,8 +215,6 @@ def test_identical_configs_still_share_one_handler(api_app, agent_with_scoped_co
         factory = HandlerFactory(HandlerDeps(
             llm_factory=container.llm_factory,
             tool_registry=container.tool_registry,
-            mitra_clients=None,
-            mitra_sessions=None,
             settings=container.settings,
         ))
         assert factory.build(alpha.spec, alpha.checksum) is factory.build(beta.spec, beta.checksum)

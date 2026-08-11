@@ -1,7 +1,8 @@
 import { COPY } from '../../constants';
 import { formatTime } from '../../utils/time';
-import { safeReportUrl } from '../../utils/url';
+import { safeHttpsUrl } from '../../utils/url';
 import { BotIcon, UserIcon } from '../icons';
+import MessageAttachments from './MessageAttachments';
 import MessageOptions from './MessageOptions';
 import SpeakerButton from './SpeakerButton';
 
@@ -27,7 +28,9 @@ function Meta({ timestamp, agentName, showAgent }) {
 }
 
 export default function Message({ item, onSelectOption, speech }) {
-  const { kind, content, agentName, timestamp, options, readOnly, selectedOptionId } = item;
+  const {
+    kind, content, agentName, timestamp, options, readOnly, selectedOptionId, attachments,
+  } = item;
 
   // Centred pill. Bare .message-content, nothing else.
   if (kind === 'context-switch') {
@@ -67,7 +70,7 @@ export default function Message({ item, onSelectOption, speech }) {
   // 'session-complete' carries a report link appended INSIDE .message-text,
   // which is what the original's _appendReportAction did -- not into
   // .message-content, which also holds the meta row.
-  const reportUrl = kind === 'session-complete' ? safeReportUrl(item.reportUrl) : null;
+  const reportUrl = kind === 'session-complete' ? safeHttpsUrl(item.reportUrl) : null;
 
   return (
     <div className={`message ${isAgent ? 'agent' : 'system'}`}>
@@ -114,6 +117,12 @@ export default function Message({ item, onSelectOption, speech }) {
             )}
           </div>
         </div>
+        {/*
+          Outside the isAgent branch, exactly like the option group below, so a
+          replayed agent bubble renders its documents too. Downloads ignore
+          readOnly on purpose -- see MessageAttachments.
+        */}
+        <MessageAttachments attachments={attachments} />
         {options && options.length > 0 && (
           <MessageOptions
             options={options}

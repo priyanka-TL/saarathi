@@ -35,6 +35,10 @@ def assert_matches_shape(body: dict, golden_shape: dict) -> None:
     # this file (all agent_type: llm -- pin_session is false, so
     # SessionService.open_for never creates a session for them).
     assert body["options"] == []
+    # Pinned as an EMPTY LIST, not as absent: the key is part of the contract
+    # for every agent, and an LLM agent producing no documents must still send
+    # it so a client never has to distinguish "no files" from "old server".
+    assert body["attachments"] == []
     assert body["session"] is None
 
     flow = body["flow"]

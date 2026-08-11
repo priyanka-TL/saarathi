@@ -120,6 +120,14 @@ export const COPY = {
   sessionFollowUp: 'Is there anything else I can help you with today?',
   // U+2B07 DOWNWARDS BLACK ARROW followed by TWO spaces.
   downloadReport: '⬇  Download PDF report',
+  // Prefix for a per-turn document pill; the file TYPE is appended by
+  // MessageAttachments ("Download: PDF", "Download: DOCX"). No arrow glyph:
+  // the word says it, where downloadReport above still leads with ⬇ because
+  // that button is a byte-verbatim port and is not ours to restyle.
+  //
+  // The FILE NAME is deliberately not part of this label -- see
+  // MessageAttachments, where it is used as the saved-file hint instead.
+  downloadPrefix: 'Download: ',
 
   // Errors and recovery.
   networkError: 'Network error. Please try again.',

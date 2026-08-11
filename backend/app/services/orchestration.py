@@ -43,8 +43,8 @@ from app.services.turn_finalization import (
     TurnFinalizer,
 )
 from app.agents.factory import HandlerFactory
-from app.integrations.mitra.exceptions import MitraError, MitraTurnTimeout
-from app.integrations.mitra.turn_recovery import Reconciliation, TurnOutcome
+from app.providers.errors import ProviderError, ProviderTurnTimeout
+from app.providers.recovery import Reconciliation, TurnOutcome
 from app.core.logger import get_logger
 
 logger = get_logger("orchestration")
@@ -137,7 +137,7 @@ class SessionReport:
     """The outcome of asking for a session's finalised report.
 
     `report_url is None` means "not ready, poll again" -- which covers both an
-    interview that has not completed and a Mitra that was briefly unreachable.
+    interview that has not completed and a provider that was briefly unreachable.
     `media_type` is populated either way, because the client is told what it
     will be downloading before the URL exists.
     """
@@ -163,25 +163,19 @@ class OrchestrationService:
         handler_factory: HandlerFactory,
         llm_factory: Any,
         router_service: Optional[RouterService] = None,
-        mitra_rest: Optional[Any] = None,
-        mitra_sessions: Optional[Any] = None,
-        mitra_clients: Optional[Any] = None,
+        providers: Optional[Any] = None,
         settings: Optional[Any] = None,
     ):
         self._db = session
         self._registry = registry
         self._handlers = handler_factory
         self._llm_factory = llm_factory
-        # mitra_clients is a MitraClientRegistry and is what production passes:
-        # the finalisation paths must reach Mitra through the SAME endpoint the
-        # turn used, and that endpoint is per agent and per tenant. mitra_rest
-        # is the fallback for a caller that has no registry -- a single client
-        # that knows one endpoint, which is why nothing in production builds one
-        # any more (there is no MITRA_BASE_URL to build it from). See rest_for().
-        self._mitra_rest = mitra_rest
-        self._mitra_clients = mitra_clients
+        # A ProviderRegistry. The finalisation paths must reach the remote
+        # platform through the SAME connection the turn used, and that
+        # connection is per agent and per tenant -- so what is held here is the
+        # thing that can resolve one, never a resolved client. See provider_for().
+        self._providers = providers
         self._settings = settings
-        self._mitra_sessions = mitra_sessions
 
         self._conversations = ConversationRepository(session)
         self._messages = MessageRepository(session)
@@ -206,10 +200,7 @@ class OrchestrationService:
             messages=self._messages,
             conversations=self._conversations,
             audit=self._audit,
-            mitra_sessions=mitra_sessions,
-            mitra_clients=mitra_clients,
-            mitra_rest=mitra_rest,
-            rest_for=self.rest_for,
+            provider_for=self.provider_for,
         )
 
     # ------------------------------------------------------------------
@@ -221,7 +212,7 @@ class OrchestrationService:
     # has always corrected for that with resolve_for_scope(); resume, finalize
     # and the report route did not, so a tenant's own finalize_path,
     # report_media_type and (since remote.company / remote.bot_route moved into
-    # the spec) its Mitra company were silently ignored on exactly the paths
+    # the spec) its remote company were silently ignored on exactly the paths
     # that submit the story and fetch the PDF.
     #
     # Every path that reads an agent off a SESSION must go through here.
@@ -236,22 +227,29 @@ class OrchestrationService:
             self._db, agent, tenant_id, organization_id,
         )
 
-    def rest_for(self, agent):
-        """The Mitra REST client for this (already scope-resolved) agent.
+    def provider_for(self, agent):
+        """The provider for this (already scope-resolved) agent, or None.
 
-        A client carries a base URL, timeouts and the Origin credential, so the
-        one that finalises a story must be the one built from the same
-        connection the interview ran over. Falls back to the injected single
-        client when no registry is available.
+        A provider carries a base URL, timeouts, endpoint paths and credentials,
+        so the one that finalises a session must be the one built from the same
+        connection the conversation ran over.
+
+        THIS USED TO IGNORE THE AGENT'S PROVIDER ENTIRELY. It always built one
+        named platform's REST client, so an agent on the other platform was
+        handed the wrong client -- safe only by accident, because both callers
+        happened to be gated before they could reach it.
+
+        Returns None rather than raising for an agent with no `remote` block (an
+        `llm` agent) or when no registry was supplied: every caller here treats
+        "no provider" as "nothing to do", which is what keeps finalisation and
+        recovery from having to know what kind of agent they were handed.
         """
-        if self._mitra_clients is None or agent is None:
-            return self._mitra_rest
+        if self._providers is None or agent is None:
+            return None
         remote = getattr(agent.spec, "remote", None)
         if remote is None:
-            return self._mitra_rest
-        from app.integrations.mitra.connection import resolve_connection
-
-        return self._mitra_clients.get(resolve_connection(self._settings, remote))
+            return None
+        return self._providers.get(remote)
 
     def report_for(self, dto, user) -> "SessionReport":
         """The finalised interview report for a session, if it is ready yet.
@@ -259,36 +257,39 @@ class OrchestrationService:
         Three cases, and only the first two produce a URL:
 
         1. the session already carries a `report_url` -- serve it, no network;
-        2. the interview is COMPLETED and Mitra has the document -- fetch the
+        2. the interview is COMPLETED and the provider has the document -- fetch the
            URL and serve that;
         3. anything else -- `report_url` is None and the client should poll.
 
         The agent is SCOPE-RESOLVED, like every other read of an agent off a
         session. `get_by_id` alone answers from the default-scope snapshot, so a
         tenant that had customised `report_media_type` -- or that points at its
-        own Mitra -- would have had its report fetched with the default scope's
+        own deployment -- would have had its report fetched with the default scope's
         settings.
 
-        A MitraError is swallowed into case 3 rather than propagating, which is
-        deliberate and unlike every other session route: a report that is not
-        ready yet and a Mitra that is briefly unreachable are the same thing
+        A ProviderError is swallowed into case 3 rather than propagating, which
+        is deliberate and unlike every other session route: a report that is not
+        ready yet and a provider that is briefly unreachable are the same thing
         from the client's point of view, and both are fixed by polling again.
         """
         agent = self.agent_for_session(dto, user)
+        remote = getattr(agent.spec, "remote", None) if agent is not None else None
         media_type = (
-            agent.spec.remote.report_media_type
-            if agent is not None
+            remote.report_media_type if remote is not None
             else DEFAULT_REPORT_MEDIA_TYPE
         )
 
         if dto.report_url:
             return SessionReport(dto.report_url, media_type, dto.result_ref)
 
-        rest = self.rest_for(agent)
-        if dto.state == "completed" and rest is not None and dto.remote_session_id:
+        if dto.state == "completed" and remote is not None and dto.remote_session_id:
             try:
-                url = rest.get_report(dto.remote_session_id, media_type=media_type)
-            except MitraError:
+                provider = self.provider_for(agent)
+                url = (
+                    provider.fetch_artifact(remote, _to_session_view(dto))
+                    if provider is not None else None
+                )
+            except ProviderError:
                 url = None
             if url:
                 return SessionReport(url, media_type, dto.result_ref)
@@ -343,7 +344,7 @@ class OrchestrationService:
 
         # 1b. CLAIM THE TURN, covering the handler call too. Step 2's row lock
         # is released by the commit at step 8, BEFORE the handler runs, so two
-        # concurrent posts would both reach Mitra -- §1.6 answer destruction.
+        # concurrent posts would both reach the platform -- answer destruction.
         # Claimed before the user message is written, so a refused turn leaves
         # nothing behind.
         if not self._try_lock_conversation(conv.id):
@@ -426,7 +427,7 @@ class OrchestrationService:
         #    conversation", so Gate 2 finds it next turn with no LLM call.
         #
         #    on_displace fires when the open session belongs to a DIFFERENT
-        #    agent: it is abandoned, and its Mitra socket must go with it or the
+        #    agent: it is abandoned, and its socket must go with it or the
         #    pool hands the new agent a channel still authenticated against the
         #    old remote session. That is how one conversation spans agents.
         session_view = self._sessions.open_for(
@@ -452,9 +453,9 @@ class OrchestrationService:
 
         try:
             turn = handler.handle(ctx)
-        except MitraTurnTimeout as exc:
+        except ProviderTurnTimeout as exc:
             # A timeout does NOT mean the turn failed -- it means we stopped
-            # listening. Ask Mitra what actually happened before surfacing an
+            # listening. Ask the provider what actually happened before surfacing an
             # error, because nothing else will: the late frame is discarded by
             # _drain_stale() on the next turn, so an unrecovered reply desyncs
             # the interview even if the user does nothing at all.
@@ -472,6 +473,10 @@ class OrchestrationService:
 
         # 11. persist the agent message
         options_dict = [o.__dict__ for o in turn.options] if turn.options else None
+        # Stored so the documents come back when the conversation is reopened
+        # from the sidebar or the page is reloaded -- GET .../messages replays
+        # from the row, and anything not on it is unreachable afterwards.
+        attachments_dict = [a.__dict__ for a in turn.attachments] if turn.attachments else None
         
         msg = self._messages.insert(
             conv.id, 
@@ -483,6 +488,7 @@ class OrchestrationService:
             route_reason=decision.reason,
             route_confidence=decision.confidence,
             options=options_dict, 
+            attachments=attachments_dict,
             model=turn.model,
             prompt_tokens=turn.prompt_tokens,
             completion_tokens=turn.completion_tokens,
@@ -499,7 +505,7 @@ class OrchestrationService:
         #      the follow-up outranks the agent's closing line by seq. And
         #      _finalize itself cannot simply move down to join it -- step 11
         #      holds the conversation row lock (next_seq_for_update) until the
-        #      commit at step 13, and finalisation is a Mitra round trip.
+        #      commit at step 13, and finalisation is a remote round trip.
         if (
             finalization is not None
             and finalization.claimed
@@ -576,21 +582,23 @@ class OrchestrationService:
         self._turn_lock.release(conversation_id)
 
     def _close_remote_channel(self, conversation_id: uuid.UUID) -> None:
-        """Drop this conversation's pooled Mitra socket. Best-effort: the DB
-        change that prompted it is already committed-or-committing, and a
-        socket that fails to close is reaped by MitraSessionManager anyway."""
-        if self._mitra_sessions is None:
+        """Drop this conversation's pooled transport, in EVERY provider's pool.
+
+        Best-effort: the DB change that prompted it is already
+        committed-or-committing, and a socket that fails to close is reaped
+        anyway. The registry swallows per-pool failures for the same reason.
+
+        ACROSS ALL PROVIDERS, not one named platform's pool. This fires when a
+        conversation switches agents, and the agent it switches AWAY from may
+        belong to either platform -- so closing only one pool left the other's
+        socket alive and still authenticated against the abandoned session.
+        """
+        if self._providers is None:
             return
-        try:
-            self._mitra_sessions.close(conversation_id)
-        except Exception as e:
-            logger.warning(
-                "failed to close Mitra channel: %s", e,
-                extra={"conversation_id": str(conversation_id)},
-            )
+        self._providers.close_conversation(conversation_id)
 
     # ------------------------------------------------------------------
-    # Lost-turn recovery (see src/integrations/mitra/turn_recovery.py)
+    # Lost-turn recovery (see app/providers/recovery.py)
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
@@ -624,8 +632,8 @@ class OrchestrationService:
         """Public entry point for POST /api/sessions/{id}/resume.
 
         The manual counterpart to _recover_timed_out_turn, for when automatic
-        recovery came back PENDING (Mitra was still generating) and the client
-        is polling. Read-only against Mitra: it never re-sends the user's turn.
+        recovery came back PENDING (the platform was still generating) and the
+        client is polling. Read-only: it never re-sends the user's turn.
         Returns None if no such session exists so the route can 404.
         """
         session_view = self._sessions.get(session_id)

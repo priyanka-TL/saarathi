@@ -68,8 +68,7 @@ def test_prompt_with_braces_does_not_raise():
     llm = FakeLLM([AIMessage(content="Hello!")])
     deps = HandlerDeps(
         llm_factory=FakeLlmFactory(llm),
-        tool_registry=FakeToolRegistry([]),
-        mitra_clients=None, mitra_sessions=None, settings=None
+        tool_registry=FakeToolRegistry([]), settings=None
     )
     handler = LlmAgentHandler(spec, deps)
     
@@ -94,8 +93,7 @@ def test_unknown_tool_name_produces_error_toolmessage():
     llm = FakeLLM([msg1, msg2])
     deps = HandlerDeps(
         llm_factory=FakeLlmFactory(llm),
-        tool_registry=FakeToolRegistry([FakeTool()]),
-        mitra_clients=None, mitra_sessions=None, settings=None
+        tool_registry=FakeToolRegistry([FakeTool()]), settings=None
     )
     handler = LlmAgentHandler(spec, deps)
     
@@ -132,8 +130,7 @@ def test_tool_loop_bound_is_respected_and_raw_fallback_used():
     llm = FakeLLM([call1, call2, call3, final_call])
     deps = HandlerDeps(
         llm_factory=FakeLlmFactory(llm),
-        tool_registry=FakeToolRegistry([FakeTool()]),
-        mitra_clients=None, mitra_sessions=None, settings=None
+        tool_registry=FakeToolRegistry([FakeTool()]), settings=None
     )
     handler = LlmAgentHandler(spec, deps)
     
@@ -160,8 +157,7 @@ def test_tool_exceptions_propagate():
     llm = FakeLLM([AIMessage(content="", tool_calls=[{"name": "fake_tool", "args": {}, "id": "c1"}])])
     deps = HandlerDeps(
         llm_factory=FakeLlmFactory(llm),
-        tool_registry=FakeToolRegistry([CrashingTool()]),
-        mitra_clients=None, mitra_sessions=None, settings=None
+        tool_registry=FakeToolRegistry([CrashingTool()]), settings=None
     )
     handler = LlmAgentHandler(spec, deps)
     

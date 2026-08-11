@@ -395,20 +395,28 @@ than an error. `MitraPathsSpec` restates `MitraPaths`' defaults rather than
 importing them, because the domain layer is import-pure by contract
 (`.importlinter`); `tests/unit/test_settings_config.py` pins the two together.
 
-Only **five** Mitra keys are env-only, each for a structural reason:
+Only **four** provider keys are env-only, each for a structural reason — and
+note that none of them names a platform, so onboarding one adds no key:
 
 | Key | Why it cannot be a config row |
 |---|---|
-| `MITRA_ENABLED` | Read at container build, before any config is loaded — a boot-order cycle. |
-| `MITRA_ORIGIN_URL` | A credential. A scope needing its own names a *variable* via `origin_env`. |
-| `MITRA_HOST_CEILING` | The operator's backstop *on* config. A control config could widen is not a control. |
-| `MITRA_MAX_OPEN_CHANNELS`, `MITRA_IDLE_CLOSE_S` | Bounds on one process-wide pool shared by every agent. |
+| `PROVIDERS_ENABLED` | Read at container build, before any config is loaded — a boot-order cycle. |
+| `PROVIDER_HOST_CEILING` | The operator's backstop *on* config. A control config could widen is not a control. |
+| `PROVIDER_MAX_OPEN_CHANNELS`, `PROVIDER_IDLE_CLOSE_S` | Bounds on one pool per provider, shared by every agent using it. |
+
+Credentials are the fifth case and work differently: they stay in `.env` but are
+**named** by the config row (`remote.auth.credential_env` and the other `*_env`
+fields) rather than declared as `Settings` fields. That is what lets endpoint,
+company and tenant be per-tenant configuration while the secrets stay
+deployment-level — and why a new platform adds variables to `.env` but no field
+to `app/core/settings.py`.
 
 There are likewise no `MITRA_COMPANY` / `MITRA_STORY_BOT_ROUTE` /
-`MITRA_DISCUSSION_BOT_ROUTE` variables (removed in 0007). The reasoning is the
-same throughout: as environment values these were process-global, which meant one
-deployment could serve exactly one Mitra company, on one Mitra instance, with one
-set of bot routes.
+`MITRA_DISCUSSION_BOT_ROUTE` variables (removed in 0007), and no `SAATHI_*`
+endpoint or tenant settings (removed in 0013). The reasoning is the same
+throughout: as environment values these were process-global, which meant one
+deployment could serve exactly one company, on one instance, with one set of bot
+routes — and, for a per-user platform, exactly one identity.
 
 ### v1 vs v2 finalize
 
@@ -426,8 +434,8 @@ finalising as an authenticated user is the mismatch, not either half.
   not re-profiled.
 - **`bot_route` is re-resolved every turn** and sent in the authenticate frame,
   so changing it mid-interview repoints the bot.
-- **`WORKERS` must stay 1 while `MITRA_ENABLED=1`.** The channel pool is in
-  process memory.
-- **`connection.allowed_hosts` is an SSRF control.** Widening it through the
-  admin API widens what the client will fetch. Set `MITRA_HOST_CEILING` in any
+- **`WORKERS` must stay 1 while any enabled provider is stateful.** The channel
+  pool is in process memory.
+- **`remote.allowed_hosts` is an SSRF control.** Widening it through the admin
+  API widens what the client will fetch. Set `PROVIDER_HOST_CEILING` in any
   deployment where config writers are not fully trusted.

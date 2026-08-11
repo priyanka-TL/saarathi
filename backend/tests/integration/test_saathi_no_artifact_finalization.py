@@ -22,11 +22,11 @@ from sqlalchemy import text
 from app.agents.protocol import SessionDelta, SessionState
 from app.database.engine import SessionLocal
 from app.domain.agent_spec import (
-    MitraConnectionSpec,
+    RemoteFlowAgentSpec,
     RemoteSpec,
     RoutingSpec,
-    SaathiFlowAgentSpec,
 )
+from tests.provider_factories import FakeProvider, FakeProviderRegistry, remote_dict
 from app.domain.core import UserContext
 from app.repositories.audit import AuditLogRepository
 from app.repositories.conversations import ConversationRepository
@@ -35,16 +35,12 @@ from app.repositories.sessions import AgentSessionRepository
 from app.services.session_service import SessionService
 from app.services.turn_finalization import TurnFinalizer
 
-_CONNECTION = MitraConnectionSpec(
-    base_url="https://qa.saathi.example.org",
-    ws_url="wss://qa.saathi.example.org/ws/common/",
-)
 
 
 @dataclass
 class _Agent:
     id: uuid.UUID
-    spec: SaathiFlowAgentSpec
+    spec: RemoteFlowAgentSpec
     checksum: str = "test-checksum"
 
     @property
@@ -53,21 +49,18 @@ class _Agent:
 
 
 def _saathi_agent(agent_id: uuid.UUID) -> _Agent:
-    remote = RemoteSpec(
-        provider="saathi",
-        flow_name="saathi",
-        bot_route="/saathi-bot",
-        company="shikshalokamstaging",
-        connection=_CONNECTION,
-        # The two fields that define this path.
-        produces_artifact=False,
-        finalize_path=None,
-    )
-    spec = SaathiFlowAgentSpec(
+    # `produces_artifact=False` is the ONE field that defines this path now.
+    # `finalize_path` went with it into the provider's own options block, which
+    # the saathi provider has no field for at all -- so a no-artifact flow can
+    # no longer name an endpoint even by mistake.
+    remote = RemoteSpec(**remote_dict("saathi"))
+    spec = RemoteFlowAgentSpec(
         key="saathi",
         name="Saathi",
         description="test",
-        agent_type="saathi_flow",
+        # THE COLLAPSE: this used to be its own agent_type. Enablement is per
+        # provider now, so a second delegated type had nothing left to express.
+        agent_type="remote_flow",
         routing=RoutingSpec(pin_session=True),
         remote=remote,
     )
@@ -77,7 +70,7 @@ def _saathi_agent(agent_id: uuid.UUID) -> _Agent:
 def _insert_agent_row(session, key: str) -> uuid.UUID:
     row = session.execute(text("""
         INSERT INTO agents (key, name, description, agent_type)
-        VALUES (:key, :key, 'test agent', 'saathi_flow') RETURNING id
+        VALUES (:key, :key, 'test agent', 'remote_flow') RETURNING id
     """), {"key": key}).fetchone()
     return row[0]
 
@@ -105,26 +98,36 @@ def _session_awaiting_user(session, conv_id, agent_id):
     return svc.apply(in_progress, SessionDelta(state=SessionState.awaiting_user, step=3))
 
 
-def _finalizer(session, *, rest_for=None):
-    """A TurnFinalizer whose REST client explodes if anything reaches it.
+class _ExplodingProvider(FakeProvider):
+    """A provider that fails the test if finalisation reaches it.
 
     That is the assertion, not a convenience: a no-artifact flow must not call
-    finalize() or get_report() at all.
+    finalize() or fetch the artifact at all. The real saathi provider raises
+    here too -- `BaseWsFlowProvider.finalize` refuses rather than no-opping,
+    precisely so this cannot pass silently.
     """
-    def _boom(agent):
+
+    produces_artifacts = False
+
+    def finalize(self, remote, session_view, user):
         raise AssertionError(
-            "a produces_artifact=False flow must never reach the REST client"
+            "a produces_artifact=False flow must never reach provider.finalize()"
         )
 
+    def fetch_artifact(self, remote, session_view):
+        raise AssertionError(
+            "a produces_artifact=False flow must never fetch an artifact"
+        )
+
+
+def _finalizer(session, *, provider=None):
+    registry = FakeProviderRegistry(provider or _ExplodingProvider())
     return TurnFinalizer(
         sessions=SessionService(session),
         messages=MessageRepository(session),
         conversations=ConversationRepository(session),
         audit=AuditLogRepository(session),
-        mitra_sessions=None,
-        mitra_clients=None,
-        mitra_rest=None,
-        rest_for=rest_for or _boom,
+        provider_for=lambda agent: registry.get(agent.spec.remote),
     )
 
 
@@ -141,8 +144,8 @@ def db():
 def test_a_no_artifact_flow_completes_without_calling_finalize(db):
     """The whole point: no finalize(), and a clean 'completed' row.
 
-    `rest_for` raises on any use, so reaching the REST client fails the test
-    rather than silently making a network call.
+    The provider raises on any use, so reaching it fails the test rather
+    than silently making a network call.
     """
     user = _new_user()
     conv_id = ConversationRepository(db).get_or_create(None, user).id
@@ -219,27 +222,13 @@ def test_a_lost_claim_still_returns_the_current_row(db):
 
 
 def test_an_artifact_flow_is_unaffected(db):
-    """Mitra's path must be untouched: produces_artifact defaults to True, so
-    the finalizer still reaches the REST client."""
-    remote = RemoteSpec(
-        provider="mitra",
-        flow_name="guest-mi-story",
-        bot_route="/guided_guest",
-        company="c",
-        connection=_CONNECTION,
-        finalize_path="/api/end-story/",
-    )
+    """The artifact path must be untouched: produces_artifact defaults to True,
+    so the finalizer still reaches the provider."""
+    remote = RemoteSpec(**remote_dict("mitra"))
     assert remote.produces_artifact is True
 
-    reached = []
-
-    class _Rest:
-        def finalize(self, **kwargs):
-            reached.append("finalize")
-            return "story-1", ""
-
-        def get_report(self, *a, **k):
-            return None
+    provider = FakeProvider()
+    provider.result_ref = "story-1"
 
     user = _new_user()
     conv_id = ConversationRepository(db).get_or_create(None, user).id
@@ -258,6 +247,6 @@ def test_an_artifact_flow_is_unaffected(db):
     )
     session_view = _session_awaiting_user(db, conv_id, agent_id)
 
-    _finalizer(db, rest_for=lambda a: _Rest()).finalize_claiming(session_view, agent, user)
+    _finalizer(db, provider=provider).finalize_claiming(session_view, agent, user)
 
-    assert reached == ["finalize"], "the artifact path must still call finalize()"
+    assert provider.finalize_calls, "the artifact path must still call finalize()"

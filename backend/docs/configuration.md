@@ -46,29 +46,24 @@ below. Everything else is a config row.
 | Key(s) | Why |
 |---|---|
 | `OPENROUTER_API_KEY`, `SAARTHI_STATIC_TOKEN` | secrets |
-| `MITRA_ORIGIN_URL` | a **credential** — Mitra gates admission on it. Never in the database, never in a log line. A scope needing its own names a *variable* via `remote.origin_env`; the value is still read from the environment |
+| `MITRA_ORIGIN_URL`, `SAATHI_ORIGIN_URL` | **credentials** — these platforms gate admission on the Origin header. Never in the database, never in a log line. NOT `Settings` fields: a config row names the *variable* via `remote.auth.credential_env` and the value is read from the environment, which is why adding a platform adds no field |
 | `DATABASE_URL`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `THREADPOOL_SIZE` | needed to reach the database at all |
 | `HOST`, `PORT`, `WORKERS`, `API_PREFIX`, `FRONTEND_ORIGINS` | read before the app object exists |
 | `APP_ENV`, `LOG_LEVEL` | process identity and logging, read at import |
-| `MITRA_ENABLED` | decides whether the database-reading Mitra client is built at all (`core/container.py`) — a boot-order cycle |
+| `PROVIDERS_ENABLED` | comma-separated registry keys. Decides whether the database-reading provider clients are built at all (`core/container.py`) — a boot-order cycle. ONE key however many platforms exist; it replaced a flag per platform |
 | `AUTH_CHECK`, `SAARTHI_ADMIN_ENABLED` | a database write must never be able to disable authentication or open the admin surface |
-| `MITRA_MAX_OPEN_CHANNELS`, `MITRA_IDLE_CLOSE_S` | bounds on **one process-global channel pool**; a per-tenant channel ceiling has nothing to apply to |
-| `MITRA_HOST_CEILING` | the operator's backstop *on* a config-supplied value — it would be pointless if the thing it constrains could edit it |
+| `PROVIDER_MAX_OPEN_CHANNELS`, `PROVIDER_IDLE_CLOSE_S` | bounds on **one channel pool per provider**, shared by every agent using it; a per-tenant channel ceiling has nothing to apply to |
+| `PROVIDER_HOST_CEILING` | the operator's backstop *on* a config-supplied value — it would be pointless if the thing it constrains could edit it |
 | `REGISTRY_TTL_S` | governs how configuration itself is loaded — circular if database-driven |
 | `JWT_IDENTIFIER_FIELD`, `JWT_EMAIL_SUFFIX` | identity resolves in `dependencies/identity.py`, upstream of any agent. Safe to keep global: Mitra keys a profile on `(email, company)`, and `company` is per-tenant, so two tenants sharing a suffix still get distinct profiles |
-| `VOICE_ENABLED` | decides whether the Bhashini client and the object store are built at all (`core/container.py`) — the same boot-order cycle as `MITRA_ENABLED` |
+| `VOICE_ENABLED` | decides whether the Bhashini client and the object store are built at all (`core/container.py`) — the same boot-order cycle as `PROVIDERS_ENABLED` |
 | `BHASHINI_API_KEY`, `BHASHINI_USER_ID`, `BHASHINI_AUTHORIZATION` | secrets |
 | `CLOUD_STORAGE_SECRET` | a **secret**, and under `gcp` an entire service-account JSON. Never in the database, never in a log line, never in `__repr__` |
 | `CLOUD_STORAGE_PROVIDER`, `CLOUD_STORAGE_ACCOUNTNAME`, `CLOUD_STORAGE_REGION`, `CLOUD_ENDPOINT`, `CLOUD_STORAGE_BUCKETNAME`, `CLOUD_STORAGE_BUCKET_TYPE` | needed to build a storage client at boot, before anything can be read from a database. Names follow the ELEVATE convention shared with the Node services, so one deployment's values drop into another |
 | `BHASHINI_BASE_URL`, `BHASHINI_*_TIMEOUT`, `VOICE_MAX_AUDIO_BYTES`, `VOICE_CHUNK_DURATION_S`, `VOICE_TTS_BYTE_LIMIT`, `VOICE_ASR_MAX_WORKERS`, `VOICE_FFMPEG_TIMEOUT_S`, `VOICE_UPLOAD_URL_EXPIRY_S` | one shared upstream, not a per-agent choice. Voice is a property of the deployment, not of which agent happens to be answering |
 | `CLOUD_STORAGE_MAX_ATTEMPTS`, `CLOUD_STORAGE_RETRY_MODE` | boto3's retry policy, for the `aws`/`s3`/`oci`/`minio` driver. `standard` mode retries throttling and transient 5xx with exponential backoff; `max_attempts` is the TOTAL, not additional |
-| `SAATHI_ENABLED` | 0 hides every `saathi_flow` agent, the same shape `MITRA_ENABLED` uses. Read at container build time |
-| `SAATHI_ORIGIN_URL` | a **credential** — Saathi gates the WebSocket on Origin (Django Channels' `AllowedHostsOriginValidator`), exactly as Mitra does |
-| `SAATHI_LOGIN_MECHANISM` | `password` (default) or `token`. See below — this is the one Saathi setting worth reading twice |
-| `SAATHI_EMAIL`, `SAATHI_PASSWORD` | **credentials**, read when the mechanism is `password` |
-| `SAATHI_ACCESS_TOKEN` | a **credential**, read when the mechanism is `token` |
-| `SAATHI_TENANT_CODE` | sent as `x-tenant-code` on login. Without it ELEVATE answers 406 "Tenant domain not found", which reads like an outage rather than a config error |
-| `ELEVATE_BASE_URL` | the ELEVATE identity service, **not** the Saathi host. Only the `password` mechanism needs it |
+| `SAATHI_EMAIL`, `SAATHI_PASSWORD` | **credentials**, read when a saathi agent's `remote.auth.scheme` is `elevate_login`. Named by the config row, not declared as `Settings` fields |
+| `SAATHI_ACCESS_TOKEN` | a **credential**, read when the scheme is `static_token` |
 | `CONVERSATIONS_PAGE_LIMIT_MAX` | ceiling on `GET /api/conversations?limit=`, applied after the client's own value. Caps how much history one request can pull |
 | `LOCAL_STORAGE_DIR` | only read by the `local` provider, which is development-only |
 
@@ -208,15 +203,17 @@ no startup sync left to catch it.
   persisted on the session row at first turn, so an in-flight interview is not
   re-profiled. **`bot_route` is re-resolved every turn** and sent in the
   authenticate frame, so changing it mid-interview repoints the bot.
-* **`WORKERS` must stay 1 while `MITRA_ENABLED=1`.** Unchanged by any of this —
-  the channel pool is still in process memory.
+* **`WORKERS` must stay 1 while any enabled provider declares
+  `stateful_transport`.** The channel pool is still in process memory. Stated in
+  terms of the PROVIDERS rather than a named flag, so a deployment running only
+  stateless providers is legitimately free of the constraint.
 * **`allowed_hosts` is an SSRF control.** It now arrives *only* through a config
-  write, so `MITRA_HOST_CEILING` is the only bound on it. It applies to every
+  write, so `PROVIDER_HOST_CEILING` is the only bound on it. It applies to every
   allowlist — it used to spare the `.env`-supplied one, but there isn't one any
   more. Set it in any deployment where config writers are not fully trusted.
-* **There is no default-scope REST client.** `container.mitra_rest` is gone:
-  building a client needs an endpoint, and an endpoint needs an agent spec.
-  Every caller goes through `MitraClientRegistry` with a resolved spec.
+* **There is no default-scope client.** Building one needs an endpoint, and an
+  endpoint needs an agent spec. Every caller goes through `ProviderRegistry`
+  with a resolved spec, which returns a provider cached by connection checksum.
 
 ## Removed
 
@@ -226,17 +223,19 @@ no startup sync left to catch it.
 | `ConfigSyncService` | nothing — with no file to reconcile against there is no drift |
 | `CONFIG_SYNC_MODE` | nothing |
 | `${VAR}` expansion inside a spec | literal values in the row |
-| `remote.bot_route_env` / `remote.company_env` | `remote.bot_route` / `remote.company` |
-| `MITRA_COMPANY`, `MITRA_STORY_BOT_ROUTE`, `MITRA_DISCUSSION_BOT_ROUTE` | `remote.company` / `remote.bot_route` |
-| the sixteen `MITRA_*` connection and path settings | `remote.connection.*` (migration 0009) |
-| `Settings.mitra_*` for all of the above | nothing — `Settings` keeps five Mitra keys |
-| `MitraRestClient.paths_from_settings`, `connection.from_settings` | `resolve_connection(settings, spec.remote)` |
-| `Container.mitra_rest` | `Container.mitra_clients` (the registry) |
+| `remote.bot_route_env` / `remote.company_env` | `remote.options.bot_route` / `.company` |
+| `MITRA_COMPANY`, `MITRA_STORY_BOT_ROUTE`, `MITRA_DISCUSSION_BOT_ROUTE` | `remote.options.company` / `.bot_route` |
+| the sixteen `MITRA_*` connection and path settings | the `remote` envelope + `remote.options.paths` (migrations 0009, 0013) |
+| `MITRA_ENABLED`, `SAATHI_ENABLED` | `PROVIDERS_ENABLED` (migration 0013) |
+| `SAATHI_TENANT_CODE`, `ELEVATE_BASE_URL`, `SAATHI_LOGIN_MECHANISM` | `remote.auth.tenant_code` / `.token_endpoint` / `.scheme` (migration 0013) |
+| `agent_type: saathi_flow` | `agent_type: remote_flow` with `remote.provider: saathi` (migration 0013) |
+| `Settings.mitra_*` / `Settings.saathi_*` | nothing — a credential is NAMED by a config row, not declared as a field |
+| `Container.mitra_rest`, `.mitra_clients`, `.mitra_sessions`, `.saathi_*` | `Container.providers` (one `ProviderRegistry`) |
 
 `BaseAgentSpec` is `extra="forbid"`, so a config still written in the old shape
 is **rejected** by the config API rather than silently ignored.
 
-One behaviour moved rather than disappearing: `MITRA_ENABLED=0` used to make
+One behaviour moved rather than disappearing: disabling a provider used to make
 `ConfigSyncService` write `status='disabled'` onto every `remote_flow` agent at
 startup, and flip it back when re-enabled. It is now a runtime filter in
 `AgentRegistry.reload()` and `capability_service` — a deployment-level switch

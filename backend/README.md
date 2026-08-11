@@ -23,7 +23,7 @@ Interactive API docs at `<host>:<port>{API_PREFIX}/docs` (OpenAPI 3.1) —
 
 | Command | Does |
 |---|---|
-| `make run` | **migrates first**, then `python -m app.main`; host/port/workers from settings, **single worker** (mandatory when `MITRA_ENABLED=1`) |
+| `make run` | **migrates first**, then `python -m app.main`; host/port/workers from settings, **single worker** (mandatory when any enabled provider is stateful) |
 | `make run-no-migrate` | starts without touching the schema — for when applying migrations is not this process's job |
 | `make test` | the full test suite |
 | `make lint` | import-linter: the four layering contracts |
@@ -38,7 +38,7 @@ variable outranks the file:
 ```bash
 PORT=9000 make run
 API_PREFIX=/saarathi-service make run
-APP_ENV=qa MITRA_ENABLED=0 make run
+APP_ENV=qa PROVIDERS_ENABLED= make run
 ```
 
 ## Layout
@@ -96,9 +96,12 @@ Each is enforced by a test in `tests/guards/`.
    connection for the whole turn. anyio's default is 40 against a 24-connection
    pool, which turns overload into `QueuePool` timeouts surfaced as 500s.
 
-5. **One uvicorn worker when `MITRA_ENABLED=1`.** `MitraSessionManager` pools
-   live WebSockets in process memory; a second worker opens a second Mitra
-   channel for the same interview. Scale with `THREADPOOL_SIZE`.
+5. **One uvicorn worker when an enabled provider is stateful.** Its
+   `ChannelPool` holds live WebSockets in process memory; a second worker opens
+   a second channel for the same conversation. Scale with `THREADPOOL_SIZE`.
+   Stated in terms of `RemoteProvider.stateful_transport` rather than a flag
+   named after one platform, so a deployment running only stateless providers
+   is legitimately free of it.
 
 6. **`sync_and_reload` runs in `create_app()`, not the lifespan.** An empty
    catalogue must abort at import rather than serving requests that can route

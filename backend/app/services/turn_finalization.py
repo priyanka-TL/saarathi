@@ -1,17 +1,24 @@
-"""Finalising a delegated interview, and recovering a turn Mitra swallowed.
+"""Finalising a delegated conversation, and recovering a turn the remote
+platform swallowed.
 
-Responsible for: the claim-then-submit sequence that ends an interview, and the
+Responsible for: the claim-then-submit sequence that ends a session, and the
 read-only reconciliation that recovers a timed-out turn.
 Used by: OrchestrationService, which owns the ordering around it.
 
-THE CLAIM IS STEP 1 AND NOTHING ELSE RUNS UNLESS IT IS WON. Mitra's
-`Story.session` is UNIQUE, so a second finalize() for one session fails on
-Mitra's side; claim_finalizing()'s conditional UPDATE makes a duplicate
-structurally impossible here too. Do not reorder the numbered steps.
+THE CLAIM IS STEP 1 AND NOTHING ELSE RUNS UNLESS IT IS WON. A platform that
+finalises into an artifact typically keys it uniquely on the session, so a
+second finalize() for one session fails upstream; claim_finalizing()'s
+conditional UPDATE makes a duplicate structurally impossible here too. Do not
+reorder the numbered steps.
 
-`rest_for` is injected as a callable because which client finalises a story is a
-per-agent, per-tenant decision -- it must be the one built from the same
-connection the interview ran over.
+`provider_for` is injected as a callable because which provider finalises a
+session is a per-agent, per-tenant decision -- it must be the one built from the
+same connection the conversation ran over.
+
+KNOWS NO PLATFORM. This module used to import one vendor's exception module,
+close one vendor's channel pool, call one vendor's REST methods by name, and
+gate recovery on `agent_type != "remote_flow"` -- which silently excluded the
+other platform's agents from turn recovery entirely.
 """
 from __future__ import annotations
 
@@ -20,8 +27,7 @@ from typing import Any, Callable, Optional
 
 from app.agents.protocol import AgentTurn, SessionDelta, SessionState
 from app.core.logger import get_logger
-from app.integrations.mitra.exceptions import MitraError
-from app.integrations.mitra.turn_recovery import Reconciliation, TurnOutcome, reconcile
+from app.providers.recovery import Reconciliation, TurnOutcome
 from app.models.orm import SYSTEM_ACTOR
 
 logger = get_logger("turn_finalization")
@@ -61,44 +67,40 @@ class TurnFinalizer:
     :param messages: MessageRepository, for the follow-up message.
     :param conversations: ConversationRepository, for seq allocation and touch.
     :param audit: AuditLogRepository.
-    :param mitra_sessions: the channel pool, or None when Mitra is disabled.
-    :param mitra_clients: the client registry, or None.
-    :param mitra_rest: a single fallback client, for registry-less callers.
-    :param rest_for: resolves the REST client for a scope-resolved agent.
+    :param provider_for: resolves the provider for a scope-resolved agent, or
+        None when the agent is not delegated / no registry was supplied.
     """
 
     def __init__(
         self, *, sessions, messages, conversations, audit,
-        mitra_sessions, mitra_clients, mitra_rest,
-        rest_for: Callable[[Any], Any],
+        provider_for: Callable[[Any], Any],
     ) -> None:
         self._sessions = sessions
         self._messages = messages
         self._conversations = conversations
         self._audit = audit
-        self._mitra_sessions = mitra_sessions
-        self._mitra_clients = mitra_clients
-        self._mitra_rest = mitra_rest
-        self._rest_for = rest_for
+        self._provider_for = provider_for
 
     def reconcile_turn(self, agent, session_view, sent_text: str) -> Optional[Reconciliation]:
-        """Ask Mitra what became of ``sent_text``. None if not applicable."""
-        # Either wiring will do: production passes only the registry, tests and
-        # registry-less callers pass only the single client. Checking just
-        # mitra_rest would silently disable turn recovery in production.
-        if (self._mitra_clients is None and self._mitra_rest is None) or session_view is None:
-            return None
-        if getattr(agent.spec, "agent_type", None) != "remote_flow":
-            return None
-        if not session_view.remote_session_id or not session_view.remote_profile_id:
+        """Ask the remote platform what became of ``sent_text``. None if not
+        applicable.
+
+        WHETHER RECOVERY APPLIES IS THE PROVIDER'S DECLARATION, not a check on
+        the agent type. That check used to read `agent_type != "remote_flow"`,
+        which excluded the second platform's agents from recovery altogether --
+        their timeouts surfaced as 504s even when the reply had already been
+        recorded upstream.
+        """
+        if session_view is None:
             return None
 
-        # Same rule as _finalize: ask the Mitra this agent's scope actually
-        # interviewed against, not whichever one the default scope points at.
-        rows = self._rest_for(agent).recent_chat(
-            session_view.remote_session_id, session_view.remote_profile_id,
-        )
-        return reconcile(rows, sent_text)
+        # Same rule as finalisation: ask the deployment this agent's scope
+        # actually conversed against, not whichever one the default scope names.
+        provider = self._provider_for(agent)
+        if provider is None or not getattr(provider, "supports_recovery", False):
+            return None
+
+        return provider.reconcile(agent.spec.remote, session_view, sent_text)
 
     def recover_timed_out_turn(self, agent, session_view, sent_text, exc):
         """Turn a MitraTurnTimeout into the reply Mitra already produced.
@@ -124,20 +126,21 @@ class TurnFinalizer:
             return None
 
         logger.info(
-            "turn recovery: recovered a reply Mitra had already sent",
+            "turn recovery: recovered a reply the provider had already sent",
             extra={"stage": result.stage, "agent_key": getattr(agent, "key", None)},
         )
 
-        # completion_poll_every_turn normally runs inside the handler, which
-        # never got that far. Without this an interview that COMPLETED during
-        # the timeout would never finalise.
+        # The completion poll normally runs inside the handler, which never got
+        # that far. Without this a conversation that COMPLETED during the
+        # timeout would never finalise.
         done = False
         try:
+            provider = self._provider_for(agent)
             done = bool(
-                agent.spec.remote.completion_poll_every_turn
-                and self._rest_for(agent).is_session_completed(session_view.remote_session_id)
+                provider is not None
+                and provider.is_complete(agent.spec.remote, session_view)
             )
-        except Exception as poll_error:
+        except Exception as poll_error:  # noqa: BLE001
             logger.warning("turn recovery: completion poll failed: %s", poll_error)
 
         return AgentTurn(
@@ -148,8 +151,8 @@ class TurnFinalizer:
             options=[],
             session_delta=SessionDelta(
                 state=SessionState.awaiting_user,
-                # step is left alone -- the REST payload has `stage`, not the
-                # numeric step, and step is display-only.
+                # step is left alone -- the recovered payload carries `stage`,
+                # not the numeric step, and step is display-only.
                 remote_session_id=session_view.remote_session_id,
                 remote_profile_id=session_view.remote_profile_id,
                 remote_flow=agent.spec.remote.flow_name,
@@ -206,13 +209,14 @@ class TurnFinalizer:
     def finalize_claiming(self, session_view, agent, user) -> Finalization:
         """Finalisation, triggered by AgentTurn.terminal (design doc §4.7, §8.5).
 
-        Mitra's Story.session is UNIQUE (story_models.py:30, verified against
-        real source) -- a second finalize() call for one session fails on
-        Mitra's side. claim_finalizing()'s conditional UPDATE + uq_agent_sessions_remote_session
-        together make a duplicate structurally impossible on Saarthi's side
-        too, which is why the claim is step 1 and everything else only runs
-        if it's won.
+        A platform that finalises into an artifact typically keys it uniquely
+        on the session, so a second finalize() call for one session fails
+        upstream. claim_finalizing()'s conditional UPDATE +
+        uq_agent_sessions_remote_session together make a duplicate structurally
+        impossible on Saarthi's side too, which is why the claim is step 1 and
+        everything else only runs if it's won.
         """
+        provider = self._provider_for(agent)
         # 1. THE CLAIM.
         claimed = self._sessions.claim_finalizing(session_view.id)
         if claimed is None:
@@ -235,27 +239,26 @@ class TurnFinalizer:
         )
 
         # 3. CLOSE THE CHANNEL cleanly BEFORE calling finalize.
-        if self._mitra_sessions is not None:
-            self._mitra_sessions.close(claimed.conversation_id)
+        if provider is not None:
+            provider.close_channel(claimed.conversation_id)
 
         # 3b. THE NO-ARTIFACT PATH.
         #
-        # A flow that creates no story has nothing to submit: Saathi's own
-        # /api/flow-connection-info/ reports create_story: "none", and calling
-        # finalize() on it raises (the response carries no story id), which the
-        # except below turns into a FAILED session. A perfectly normal
-        # conversation would end up looking like an outage.
+        # A flow that creates no artifact has nothing to submit, and calling
+        # finalize() on it raises -- which the except below would turn into a
+        # FAILED session. A perfectly normal conversation would end up looking
+        # like an outage.
         #
-        # result_ref is the REMOTE SESSION ID rather than a story id, and that
-        # is honest rather than a placeholder: the transcript is retrievable
-        # from Saathi with exactly this value (/api/companychat/?session=...),
-        # so it really is the reference to what this session produced. It also
-        # satisfies ck_agent_sessions_completed_has_result without weakening
-        # that constraint for every other provider.
+        # result_ref is the REMOTE SESSION ID rather than an artifact id, and
+        # that is honest rather than a placeholder: the transcript is
+        # retrievable from the platform with exactly this value, so it really is
+        # the reference to what this session produced. It also satisfies
+        # ck_agent_sessions_completed_has_result without weakening that
+        # constraint for every other provider.
         #
         # The claim above still ran, so two concurrent terminal turns cannot
         # both write the follow-up message.
-        if not getattr(agent.spec.remote, "produces_artifact", True):
+        if provider is None or not getattr(agent.spec.remote, "produces_artifact", True):
             completed = self._sessions.apply(
                 claimed,
                 SessionDelta(
@@ -273,78 +276,42 @@ class TurnFinalizer:
             )
             return Finalization(session=completed, claimed=True)
 
-        # 4. finalize() with the user's token.
-        #    THROUGH THIS AGENT'S OWN CLIENT: `agent` is scope-resolved by the
-        #    caller, so for a tenant that points at its own Mitra this is that
-        #    tenant's endpoint, not the default one.
-        rest = self._rest_for(agent)
+        # 4. FINALIZE, THROUGH THIS AGENT'S OWN PROVIDER: `agent` is
+        #    scope-resolved by the caller, so for a tenant that points at its own
+        #    deployment this is that tenant's endpoint, not the default one.
+        #
+        #    HOW finalisation is performed is entirely the provider's business
+        #    -- which endpoint, whether the user's token goes in a header or a
+        #    body, whether it is sent at all. Those three used to be read off the
+        #    spec and passed as arguments HERE, which is what made this method
+        #    know one platform's API. It now knows only that finalisation
+        #    yields a result reference and possibly an artifact.
+        #
+        #    The artifact is fetched by the provider BEFORE this returns, and
+        #    that ordering is load-bearing: SessionService.apply() rejects every
+        #    call on an already-terminal session, including same-state
+        #    field-only updates, so a second apply() to attach the URL after
+        #    transitioning to 'completed' would raise InvalidTransitionError.
+        #    Fetching first lets result_ref and report_url land in the SAME
+        #    apply() call. A failed artifact fetch is non-fatal inside the
+        #    provider, for the same reason: finalisation already succeeded and
+        #    is irreversible.
         try:
-            story_id, _content = rest.finalize(
-                session_id=claimed.remote_session_id,
-                profile_id=claimed.remote_profile_id,
-                flow=agent.spec.remote.flow_name,
-                language=claimed.language,
-                token=user.token,
-                # Per-agent, because v1 and v2 resolve the story bot from
-                # different Mitra tables -- see MitraRestClient's module
-                # docstring. Sending a flow to the endpoint that cannot
-                # resolve it is a deterministic HTTP 500.
-                path=agent.spec.remote.finalize_path,
-                # Also per-agent: Mitra turns token presence into auth=True and
-                # picks the PDF template's user_type from it, so a guest flow
-                # finalised with a token renders a BLANK pdf rather than
-                # failing. Must match the socket's `access_token: None`.
-                as_guest=agent.spec.remote.finalize_as_guest,
-            )
-        except Exception as e:
+            result = provider.finalize(agent.spec.remote, claimed, user)
+        except Exception as e:  # noqa: BLE001
             # Don't leave the session stuck in 'finalizing' forever -- that
-            # state has no other way out. Not explicitly in the doc's
-            # sequence, but a session that can never reach a terminal state
-            # is a real bug.
+            # state has no other way out. A session that can never reach a
+            # terminal state is a real bug.
             self._sessions.apply(claimed, SessionDelta(state=SessionState.failed, error=str(e)))
             raise
 
-        # 6. get_report() -- fetched BEFORE the completed-transition, not after.
-        # SessionService.apply() rejects every call on an already-terminal
-        # session, including same-state field-only updates (terminal states
-        # are final, by design -- see SessionService.ALLOWED). A second
-        # apply() call to attach report_url after transitioning to
-        # 'completed' would raise InvalidTransitionError. Fetching the
-        # report first lets result_ref and report_url land in the SAME
-        # apply() call instead.
-        # NON-FATAL, and it must stay that way. finalize() above already
-        # succeeded and is IRREVERSIBLE -- Mitra's Story.session is UNIQUE, so
-        # the story cannot be submitted a second time. Letting a report-URL
-        # problem propagate here left the session in 'finalizing' forever
-        # (the except above only guards finalize(), and nothing revisits
-        # 'finalizing'), with a story that exists in Mitra and can never be
-        # re-fetched. Observed live: Mitra serves report PDFs from a
-        # different host than MITRA_BASE_URL, so an incomplete
-        # MITRA_ALLOWED_HOSTS makes _validate_url raise MitraSSRFError on
-        # EVERY successful story.
-        #
-        # report_url is designed to be null here anyway -- generation lags,
-        # and GET /api/sessions/{id}/report polls for it later, where the
-        # identical failure is already treated as "not ready yet" (202).
-        try:
-            report_url = rest.get_report(
-                claimed.remote_session_id, media_type=agent.spec.remote.report_media_type,
-            )
-        except MitraError as e:
-            logger.warning(
-                "finalize: report fetch failed for session %s (%s); "
-                "completing without report_url -- the report route will retry",
-                claimed.id, e,
-            )
-            report_url = None
-
         # 5. Transition to completed -- apply() sets ended_at/finalized_at itself.
-        #    report_url stays null if the report hasn't been generated yet;
+        #    report_url stays null if the artifact hasn't been generated yet;
         #    a client polls /api/sessions/{id}/report for it later (outside
         #    this method's scope).
-        delta_fields = {"result_ref": story_id}
-        if report_url:
-            delta_fields["report_url"] = report_url
+        delta_fields = {"result_ref": result.result_ref}
+        if result.artifact_url:
+            delta_fields["report_url"] = result.artifact_url
         #    Transitioning to 'completed' is itself the release: the session is
         #    terminal, so RouterService Gate 2 stops finding it and the next
         #    turn routes freely. The explicit conversations.unpin() that used to

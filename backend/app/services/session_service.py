@@ -67,11 +67,11 @@ class SessionService:
         open session per conversation but says nothing about whose it is, and
         handing back whichever was found was a genuine cross-agent hijack: the
         next turn went to the other agent's remote_session_id, and a later
-        finalize submitted the wrong flow to Mitra for that story.
+        finalize submitted the wrong flow upstream for that story.
 
         A conversation spanning several agents is the intended product model, so
         a mismatch ABANDONS the other session rather than refusing the turn.
-        `on_displace` then lets the caller close the orphaned Mitra channel --
+        `on_displace` then lets the caller close the orphaned channel --
         this layer owns no socket.
         """
         existing = self._sessions.get_open_for_conversation(conversation_id)
@@ -199,7 +199,7 @@ class SessionService:
         """`abandon`, plus whatever has to be torn down alongside it.
 
         The pairing matters and is easy to half-do: abandoning the session
-        without closing its Mitra socket orphans the channel, and the pool then
+        without closing its socket orphans the channel, and the pool then
         hands the next agent a channel still authenticated against the old
         remote session.
 
@@ -209,7 +209,7 @@ class SessionService:
 
         :param on_abandoned: same shape as `open_for`'s `on_displace`, and for
             the same reason -- it keeps this service free of any knowledge of
-            Mitra, whose channel pool lives on the container.
+            the provider, whose channel pool lives on the container.
         """
         updated = self.abandon(conversation_id, reason=reason, actor=actor)
         if updated is not None and on_abandoned is not None:

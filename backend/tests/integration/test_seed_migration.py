@@ -22,6 +22,7 @@ THREE PROPERTIES MATTER ENOUGH TO PIN
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 from pathlib import Path
 
@@ -34,6 +35,11 @@ from app.domain.agent_spec import AgentSpec, canonical_json
 
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
+#: 0010 writes the original `remote` shape; 0013 rewrites it into the
+#: provider-neutral envelope. The database holds the second applied to the
+#: first, so validation and checksum assertions read THAT -- otherwise this
+#: suite would pin a shape the application no longer accepts.
+_GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -48,8 +54,33 @@ def _module(path: Path, name: str):
 
 
 @pytest.fixture(scope="module")
-def seed():
-    return _module(_MIGRATION, "_seed_0010")
+def generalize():
+    return _module(_GENERALIZE, "_generalize_0013")
+
+
+@pytest.fixture(scope="module")
+def seed(generalize):
+    """0010's seed, as 0013 leaves it.
+
+    Wrapped rather than read raw: `seed_agents()` is the SOURCE, and what the
+    application ever sees is the migrated form. A test asserting on the source
+    alone would go green while every stored row failed to validate.
+    """
+    module = _module(_MIGRATION, "_seed_0010")
+    original = module.seed_agents
+
+    def seed_agents():
+        agents = []
+        for agent in original():
+            agent = copy.deepcopy(agent)
+            if isinstance(agent.get("remote"), dict):
+                agent["agent_type"] = "remote_flow"
+                agent["remote"] = generalize._to_envelope(agent["remote"])
+            agents.append(agent)
+        return agents
+
+    module.seed_agents = seed_agents
+    return module
 
 
 def test_every_seeded_spec_validates(seed):
@@ -69,7 +100,10 @@ def test_a_seeded_remote_spec_is_complete_as_written(seed):
     remote = [s for s in seed.seed_agents() if s.get("agent_type") == "remote_flow"]
     assert remote, "0010 should seed the remote_flow agents"
     for raw in remote:
-        assert "connection" in raw["remote"], raw["key"]
+        # The endpoint is on the envelope itself now rather than in a nested
+        # `connection` block -- the core reads it, so it is not the provider's.
+        assert raw["remote"]["base_url"], raw["key"]
+        assert raw["remote"]["auth"]["credential_env"], raw["key"]
         _adapter.validate_python(raw)
 
 

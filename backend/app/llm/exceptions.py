@@ -11,7 +11,7 @@ which could not tell "retry in a moment" from "this will never work", and to
 whoever was on call, who got the same 500 for all four.
 
 These are the same shape as the hierarchies the other integrations already have
-(`MitraError`, `BhashiniError`, `StorageError`): raised at the boundary, so the
+(`ProviderError`, `BhashiniError`, `StorageError`): raised at the boundary, so the
 provider's own exception types never travel past `app/llm/`.
 
 WHAT IS DELIBERATELY *NOT* HERE

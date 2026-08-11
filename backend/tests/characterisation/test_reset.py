@@ -20,24 +20,32 @@ from app.services.session_service import SessionService
 from tests.characterisation.conftest import DEFAULT_AGENT, chat
 
 
-class _FakeMitraSessions:
+class _FakeProviders:
+    """Stands in for the provider registry.
+
+    ONE fake where there were two. Closing a conversation's transport is
+    provider-agnostic now -- the registry sweeps every pool -- so a test no
+    longer has to know which platform's pool to swap.
+    """
+
     def __init__(self):
         self.close_calls = []
+        self.enabled = frozenset({"mitra", "saathi"})
 
-    def close(self, conversation_id):
+    def close_conversation(self, conversation_id):
         self.close_calls.append(conversation_id)
 
 
 @pytest.fixture()
-def fake_mitra_sessions(flask_app):
+def fake_providers(flask_app):
     """Container is a frozen dataclass -- object.__setattr__ bypasses that to
     swap in a fake for the duration of one test, restored afterward."""
     container = flask_app.state.container
-    orig = container.mitra_sessions
-    fake = _FakeMitraSessions()
-    object.__setattr__(container, "mitra_sessions", fake)
+    orig = container.providers
+    fake = _FakeProviders()
+    object.__setattr__(container, "providers", fake)
     yield fake
-    object.__setattr__(container, "mitra_sessions", orig)
+    object.__setattr__(container, "providers", orig)
 
 
 def _insert_agent_row(db_session) -> uuid.UUID:
@@ -67,7 +75,7 @@ def _seed_awaiting_session(conversation_id: uuid.UUID, agent_id: uuid.UUID):
         db.close()
 
 
-def test_reset_mid_interview_abandons_session_and_closes_channel(client, script, fake_mitra_sessions):
+def test_reset_mid_interview_abandons_session_and_closes_channel(client, script, fake_providers):
     script.queue("hi there")
     _, body = chat(client, "hello", DEFAULT_AGENT)
     conv_id = uuid.UUID(body["conversation_id"])
@@ -97,7 +105,7 @@ def test_reset_mid_interview_abandons_session_and_closes_channel(client, script,
 
     assert state == "abandoned"
     assert open_count == 0
-    assert fake_mitra_sessions.close_calls == [conv_id]
+    assert fake_providers.close_calls == [conv_id]
 
 
 def test_reset_returns_success(client):

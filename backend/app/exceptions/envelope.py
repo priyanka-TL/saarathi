@@ -14,10 +14,10 @@ from typing import Any, Dict, Optional
 from fastapi.responses import JSONResponse
 
 from app.core.context import request_id_var
-from app.integrations.mitra.exceptions import (
-    MitraConcurrentTurnError,
-    MitraError,
-    MitraTurnTimeout,
+from app.providers.errors import (
+    ProviderConcurrentTurnError,
+    ProviderError,
+    ProviderTurnTimeout,
 )
 
 
@@ -49,12 +49,20 @@ def error_response(message: str, code: str, status: int) -> JSONResponse:
     )
 
 
-def mitra_error_response(exc: MitraError) -> JSONResponse:
+def upstream_error_response(exc: ProviderError) -> JSONResponse:
     """504 on a turn timeout (the session survives, so a retry is safe), 429 on
-    a duplicate request, 502 for everything else Mitra-side."""
-    if isinstance(exc, MitraTurnTimeout):
+    a duplicate request, 502 for everything else upstream.
+
+    The mapping is unchanged from when this took one platform's exception type.
+    What changed is that it now takes the SHARED base, so a provider cannot ship
+    an exception hierarchy the routers forget to catch -- which is exactly what
+    had happened: one platform's errors subclassed plain Exception, were caught
+    nowhere, and surfaced as 500 INTERNAL while the identical failure from the
+    other platform surfaced as 502.
+    """
+    if isinstance(exc, ProviderTurnTimeout):
         return error_response(str(exc), "UPSTREAM_TIMEOUT", 504)
-    if isinstance(exc, MitraConcurrentTurnError):
+    if isinstance(exc, ProviderConcurrentTurnError):
         return error_response(str(exc), "CONCURRENT_TURN_REJECTED", 429)
     return error_response(str(exc), "UPSTREAM_UNAVAILABLE", 502)
 

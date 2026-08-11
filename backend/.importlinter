@@ -12,6 +12,63 @@ forbidden_modules =
     flask
     fastapi
     starlette
+
+[importlinter:contract:no_platform_above_the_provider_seam]
+name = Nothing above app.providers may import a specific platform's package
+type = forbidden
+source_modules =
+    app.domain
+    app.services
+    app.routers
+    app.core
+    app.exceptions
+    app.agents
+    app.repositories
+forbidden_modules =
+    app.providers.mitra
+    app.providers.saathi
+# The core may import app.providers.protocol / registry / errors / recovery --
+# that IS the seam. What it must never import is one platform's implementation,
+# which is how twelve files came to know a vendor's name. Adding a provider adds
+# one line here; tests/guards/test_no_platform_names_above_providers.py is the
+# general form that needs no edit.
+
+[importlinter:contract:providers_are_peers]
+name = One platform's provider package must not import another's
+type = forbidden
+source_modules =
+    app.providers.mitra
+forbidden_modules =
+    app.providers.saathi
+# The reverse direction is covered by the contract below. Split in two because
+# import-linter's `forbidden` contract has no mutual-exclusion form.
+#
+# THIS CONTRACT WOULD HAVE FAILED BEFORE THIS REFACTOR. One platform's channel
+# and session manager were subclasses of the other's, so a change to either
+# rippled into both and neither could move off the shared protocol
+# independently. The code they genuinely share now lives BELOW them, in
+# app.providers.transport and app.providers.ws_flow.
+
+[importlinter:contract:providers_are_peers_reverse]
+name = One platform's provider package must not import another's (reverse)
+type = forbidden
+source_modules =
+    app.providers.saathi
+forbidden_modules =
+    app.providers.mitra
+
+[importlinter:contract:transport_knows_no_platform]
+name = The shared transport and protocol-family layers must not import a platform
+type = forbidden
+source_modules =
+    app.providers.transport
+    app.providers.ws_flow
+forbidden_modules =
+    app.providers.mitra
+    app.providers.saathi
+# What keeps "named for the protocol family, not for a platform" true. A shared
+# base that reaches back into one of its implementors is a platform package
+# wearing a generic name.
 # NOTE: the old `ignore_imports = src.logger -> flask` exemption is deliberately
 # gone. app.core.logger reads a ContextVar instead of flask.g, so nothing under
 # app.agents reaches a web framework even transitively.
@@ -42,6 +99,7 @@ forbidden_modules =
     app.llm
     app.tools
     app.integrations
+    app.providers
     app.repositories
     app.database
     app.models
@@ -57,6 +115,7 @@ source_modules =
     app.services
     app.agents
     app.integrations
+    app.providers
     app.llm
     app.tools
     app.database

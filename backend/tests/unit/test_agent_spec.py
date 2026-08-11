@@ -2,6 +2,7 @@ import os
 import pytest
 from pydantic import ValidationError, TypeAdapter
 
+from tests.provider_factories import remote_dict
 from app.domain.agent_spec import (
     AgentSpec,
     LlmAgentSpec,
@@ -64,15 +65,7 @@ def test_wrong_variant_fields_rejected():
         "name": "Test Remote",
         "description": "A test remote agent",
         "prompt": "this is for llm", # wrong field for remote
-        "remote": {
-            "provider": "mitra",
-            "flow_name": "guest-discussion",
-            "bot_route": "/test-bot-route", "company": "test-company",
-            "connection": {
-                "base_url": "https://mitra.example.com",
-                "ws_url": "wss://mitra.example.com/ws/common/",
-            },
-        }
+        "remote": remote_dict("mitra", flow_name="guest-discussion")
     }
     with pytest.raises(ValidationError) as exc:
         agent_spec_adapter.validate_python(raw_remote)
@@ -104,15 +97,7 @@ def test_both_variants_validate():
         "key": "test_remote",
         "name": "Test Remote",
         "description": "A test remote agent",
-        "remote": {
-            "provider": "mitra",
-            "flow_name": "guest-discussion",
-            "bot_route": "/test-bot-route", "company": "test-company",
-            "connection": {
-                "base_url": "https://mitra.example.com",
-                "ws_url": "wss://mitra.example.com/ws/common/",
-            },
-        }
+        "remote": remote_dict("mitra", flow_name="guest-discussion")
     }
     agent = agent_spec_adapter.validate_python(raw_remote)
     assert isinstance(agent, RemoteFlowAgentSpec)

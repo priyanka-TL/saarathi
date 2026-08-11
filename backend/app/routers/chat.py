@@ -25,8 +25,8 @@ from app.dependencies.request_context import get_request_id
 from app.domain.core import UserContext
 from app.domain.scope import scope_for_user
 from app.exceptions.domain import SaarthiError
-from app.exceptions.envelope import error_response, mitra_error_response
-from app.integrations.mitra.exceptions import MitraError
+from app.exceptions.envelope import error_response, upstream_error_response
+from app.providers.errors import ProviderError
 from app.services.conversations import ConversationService
 from app.services.orchestration import (
     ConcurrentTurnError,
@@ -99,19 +99,33 @@ def chat(
             "agent_key": res.agent.key,
             "agent_type": res.agent.spec.agent_type,
             "options": [{"id": o.id, "label": o.label, "value": o.value} for o in res.turn.options],
+            # Downloadable documents this turn produced. ALWAYS PRESENT, empty
+            # for a turn that produced none -- a key that appears and disappears
+            # is harder for a client to consume than an empty list.
+            "attachments": [
+                {
+                    "file_name": a.file_name,
+                    "format": a.format,
+                    "media_type": a.media_type,
+                    "url": a.url,
+                }
+                for a in res.turn.attachments
+            ],
             "session": session_payload,
         })
     except ConcurrentTurnError:
         # A double-submit. 409 and NOT an automatic retry: re-sending is what
-        # merges two user messages into one in Mitra and destroys an answer.
+        # merges two user messages into one upstream and destroys an answer.
         return error_response(
             "A reply is already on its way. Please wait for it before sending again.",
             "CONCURRENT_TURN", 409,
         )
     except TurnLimitExceeded as e:
         return error_response(e.detail, "RATE_LIMITED", 429)
-    except MitraError as e:
-        return mitra_error_response(e)
+    except ProviderError as e:
+        # Every remote platform's failures, in one clause. A provider that adds
+        # an exception type inherits this mapping instead of needing a catch.
+        return upstream_error_response(e)
     except SaarthiError as e:
         # Every mapped domain failure, LLM ones included, in one clause. Each
         # carries its own status, code and client-safe message, so a new domain
@@ -154,15 +168,15 @@ def reset(
         return error_response("conversation_id must be a UUID", "INVALID_REQUEST", 400)
 
     # Ordering lives in the service. This route supplies only what the service
-    # cannot know: how to reach the Mitra channel pool.
+    # cannot know: how to drop the conversation's transport.
+    #
+    # PROVIDER-AGNOSTIC. This used to close one named platform's pool, so a
+    # conversation abandoned on the other platform left its socket open until
+    # the idle reaper eventually noticed.
     new_conv = ConversationService(db).begin_new_chat(
         req_conv_id,
         user,
-        on_session_abandoned=(
-            container.mitra_sessions.close
-            if container.mitra_sessions is not None
-            else None
-        ),
+        on_session_abandoned=container.providers.close_conversation,
     )
 
     return json_response({

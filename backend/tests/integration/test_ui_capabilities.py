@@ -343,8 +343,8 @@ def test_an_active_card_with_no_agents_is_hidden():
     """
     session = SessionLocal()
     try:
-        shown = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
-        hidden = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=False)
+        shown = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
+        hidden = resolve_for_user(session, None, enabled_providers=frozenset({"mitra"}))
     finally:
         session.close()
 
@@ -358,7 +358,7 @@ def test_a_coming_soon_card_with_no_agents_still_shows():
     rule above from hiding it."""
     session = SessionLocal()
     try:
-        doc = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
+        doc = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
     finally:
         session.close()
 
@@ -372,7 +372,7 @@ def test_disabling_mitra_hides_the_interview_card_too():
     dead end whenever MITRA_ENABLED was off."""
     session = SessionLocal()
     try:
-        doc = resolve_for_user(session, None, mitra_enabled=False, saathi_enabled=True)
+        doc = resolve_for_user(session, None, enabled_providers=frozenset({"saathi"}))
     finally:
         session.close()
 
@@ -394,7 +394,7 @@ def test_a_self_launching_card_carries_an_agent_key_and_no_nested_agents():
     """
     session = SessionLocal()
     try:
-        doc = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
+        doc = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
     finally:
         session.close()
 
@@ -414,8 +414,8 @@ def test_suppressing_the_nested_agent_does_not_disable_the_provider_gate():
     """
     session = SessionLocal()
     try:
-        on = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
-        off = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=False)
+        on = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
+        off = resolve_for_user(session, None, enabled_providers=frozenset({"mitra"}))
     finally:
         session.close()
 
@@ -428,7 +428,7 @@ def test_a_grouping_card_keeps_its_nested_agents():
     The suppression must apply only to cards that route themselves."""
     session = SessionLocal()
     try:
-        doc = resolve_for_user(session, None, mitra_enabled=True, saathi_enabled=True)
+        doc = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
     finally:
         session.close()
 

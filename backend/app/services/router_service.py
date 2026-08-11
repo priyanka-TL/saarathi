@@ -197,7 +197,7 @@ class RouterService:
             "The meeting was cancelled last week"      -> session abandoned
             "We discussed the bus stop near the school"-> session abandoned
 
-        Each one abandoned the Mitra session, unpinned the conversation and
+        Each one abandoned the remote session, unpinned the conversation and
         rerouted to the default agent, which then answered plausibly -- so the
         user had no idea their interview had been destroyed and no report would
         ever be produced. record_stories was hit too, via "start over" inside

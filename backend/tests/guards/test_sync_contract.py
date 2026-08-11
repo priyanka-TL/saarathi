@@ -24,7 +24,7 @@ def test_no_endpoint_is_a_coroutine(api_app):
     Starlette runs a non-coroutine endpoint in the anyio worker threadpool.
     That is what lets the turn pipeline hold a SESSION-scoped
     `pg_try_advisory_lock` on one connection across a commit and across a
-    handler call of up to 60s, and what lets MitraChannel use `threading.Lock`
+    handler call of up to 60s, and what lets WsChannel use `threading.Lock`
     and a blocking `queue.Queue`.
 
     An `async def` endpoint here would block the event loop for the length of a
