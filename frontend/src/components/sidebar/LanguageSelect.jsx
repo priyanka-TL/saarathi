@@ -14,15 +14,21 @@ import { VOICE_LANGUAGES } from '../../constants';
  *
  * Renders nothing when voice is unavailable, so a browser that cannot record
  * does not get a control that changes nothing.
+ *
+ * LABELLED "Preferred language", which is broader than what it does. It is
+ * asked for, and reads better in the rail -- but the scope note above still
+ * holds: this is the VOICE language, and picking Hindi does not make the
+ * assistant reply in Hindi. If chat is ever localised, this control is where a
+ * user will expect to set it.
  */
 export default function LanguageSelect({ value, onChange, visible }) {
   if (!visible) return null;
 
   return (
     <div className="voice-language">
-      <label className="voice-language-label" htmlFor="voice-language-select">
-        Voice language
-      </label>
+      {/* <label className="voice-language-label" htmlFor="voice-language-select">
+        Preferred language
+      </label> */}
       {/*
         A native <select>: it is four options, and the platform picker is
         better on mobile than anything worth hand-rolling here.

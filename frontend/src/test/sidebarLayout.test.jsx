@@ -36,23 +36,37 @@ function sidebar(props = {}) {
 }
 
 describe('the rail puts the primary action first', () => {
-  it('renders New Chat above the voice-language row', () => {
+  it('puts the language selector ABOVE the brand card', () => {
+    // A preference set once, kept out of the way of the rail's actions rather
+    // than sitting under New Chat competing with it.
+    const { container } = render(sidebar());
+    const language = container.querySelector('.voice-language');
+
+    expect(language.nextElementSibling).toHaveClass('brand-card');
+  });
+
+  it('leaves New Chat as the first thing in the spacer', () => {
     const { container } = render(sidebar());
     const spacer = container.querySelector('.chat-history-placeholder');
 
     const order = [...spacer.children].map((el) => el.id || el.className);
     expect(order[0]).toBe('new-chat-btn');
-    expect(order[1]).toContain('voice-language');
+    expect(spacer.querySelector('.voice-language')).toBeNull();
   });
 
-  it('keeps voice language INSIDE the spacer, not between it and Chat History', () => {
-    // The spacer chain is what pins Advanced to the bottom; inserting a
-    // sibling here would break chatHistory.test.jsx and unpin the panel.
+  it('does not break the spacer chain that pins Advanced to the bottom', () => {
+    // .chat-history-placeholder { flex: 1 0 auto } is what holds Advanced down,
+    // so a sibling BETWEEN it and Chat History would unpin the panel. The
+    // selector sits ahead of the whole chain, which leaves it intact.
     const { container } = render(sidebar());
     const spacer = container.querySelector('.chat-history-placeholder');
 
-    expect(spacer.querySelector('.voice-language')).not.toBeNull();
     expect(spacer.nextElementSibling).toHaveClass('chat-history-section');
+  });
+
+  it('reads "Preferred language", not "Voice language"', () => {
+    const { getByLabelText } = render(sidebar());
+    expect(getByLabelText('Preferred language')).not.toBeNull();
   });
 
   it('drops the voice row entirely when voice is unavailable', () => {

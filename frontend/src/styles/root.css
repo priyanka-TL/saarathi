@@ -883,32 +883,51 @@ body {
 }
 
 /*
- * 9. The voice language selector, in the sidebar.
+ * 9. The preferred-language selector, top-right of the sidebar.
+ *
+ * Sits ABOVE the brand card, right-aligned and deliberately small: it is a
+ * preference set once, so it should read as a quiet setting rather than as one
+ * of the rail's actions. It was a full-width, stacked control directly under
+ * New Chat, where it carried the same visual weight as the primary button.
+ *
+ * These rules override the row version in style.css -- root.css is imported
+ * second (main.jsx) and both files define this class. Editing HERE rather than
+ * there also keeps the byte-verbatim port untouched; the selector is a
+ * voice-era addition and this file is where it has always lived.
  */
 .voice-language {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin: 0 0 14px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    /* No bottom margin: .sidebar owns the 14px gap between its children, and a
+       margin here would double it above the brand card. */
+    margin: 0;
+    /* Never let a long translated label push the select out of the rail. */
+    min-width: 0;
 }
 
 .voice-language-label {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-secondary);
+    white-space: nowrap;
 }
 
 .voice-language-select {
-    width: 100%;
-    padding: 9px 12px;
-    border-radius: 10px;
+    /* Content-sized, not full-width -- the whole point of the move. */
+    flex: 0 1 auto;
+    max-width: 60%;
+    padding: 5px 8px;
+    border-radius: 8px;
     border: 1px solid var(--border-color);
     background: var(--bg-primary);
     color: var(--text-primary);
     font-family: inherit;
-    font-size: 0.85rem;
+    font-size: 0.78rem;
+    font-weight: 500;
     cursor: pointer;
 }
 

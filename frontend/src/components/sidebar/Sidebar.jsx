@@ -60,13 +60,25 @@ export default function Sidebar({
         absent here for the same reason.
       */}
 
+      {/*
+        ABOVE the brand card and right-aligned: a preference the user sets once
+        and then ignores, so it sits out of the way of the rail's actual
+        controls rather than competing with New Chat for attention.
+
+        Before the .chat-history-placeholder spacer, deliberately. The spacer
+        carries flex: 1 0 auto and is what pins Advanced to the bottom, so a new
+        sibling BETWEEN it and Chat History would unpin that panel --
+        chatHistory.test.jsx pins the chain. Sitting ahead of the whole chain
+        leaves it untouched.
+      */}
+      <LanguageSelect
+        value={voiceLanguage}
+        onChange={onVoiceLanguageChange}
+        visible={voiceAvailable}
+      />
+
       <BrandCard />
 
-      {/*
-        Above the flex spacer, so it sits with the brand card rather than being
-        pushed to the bottom with the two collapsible panels -- it is a setting
-        the user reaches for before speaking, not an advanced option.
-      */}
       <div className="chat-history-placeholder">
         <button
           type="button"
@@ -91,22 +103,6 @@ export default function Sidebar({
           <PlusIcon />
           New Chat
         </button>
-
-        {/*
-          BELOW New Chat, and inside the spacer, on purpose.
-
-          The rail's primary action should lead; voice language is a
-          preference someone sets once. It cannot be a sibling BETWEEN the
-          spacer and Chat History -- chatHistory.test.jsx pins that chain
-          because .chat-history-placeholder { flex: 1 0 auto } is what keeps
-          Advanced at the bottom -- so it nests here instead, which leaves that
-          chain intact.
-        */}
-        <LanguageSelect
-          value={voiceLanguage}
-          onChange={onVoiceLanguageChange}
-          visible={voiceAvailable}
-        />
       </div>
 
       <ChatHistorySection
