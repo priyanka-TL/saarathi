@@ -69,3 +69,8 @@ export async function request(config) {
 
 export const get = (url, config) => request({ ...config, method: 'GET', url });
 export const post = (url, data, config) => request({ ...config, method: 'POST', url, data });
+// PATCH for the sparse profile update -- sending only the fields that changed
+// is what stops a form editing one of them from blanking the rest. Both
+// interceptors above are method-agnostic, so it carries the bearer token and
+// honours the 401 rule with no extra wiring.
+export const patch = (url, data, config) => request({ ...config, method: 'PATCH', url, data });

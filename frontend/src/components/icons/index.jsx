@@ -174,6 +174,31 @@ export const BreadcrumbSeparatorIcon = () => (
   </svg>
 );
 
+/** A simplified mortarboard -- the School row in the profile dialog. */
+export const SchoolIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <path d="M12 3 3 8l9 5 9-5-9-5z" />
+    <path d="M3 8v8l9 5 9-5V8" />
+    <path d="M12 13v8" />
+  </svg>
+);
+
+/** District and State rows in the profile dialog. */
+export const MapPinIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 1 1 16 0z" />
+    <circle cx="12" cy="10" r="3" />
+  </svg>
+);
+
+/** The role badge in the profile dialog's header. */
+export const BriefcaseIcon = () => (
+  <svg {...stroked} width="14" height="14">
+    <rect x="2" y="7" width="20" height="14" rx="2" />
+    <path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2" />
+  </svg>
+);
+
 /* -------------------------------------------------------------------------
  * Voice
  * ---------------------------------------------------------------------- */

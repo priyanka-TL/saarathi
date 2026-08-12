@@ -1,27 +1,11 @@
 import { cx } from '../../utils/cx';
-import { useAuth } from '../../context/AuthContext.jsx';
 import Toast from '../common/Toast.jsx';
-import { CloseIcon, LogoutIcon, PlusIcon } from '../icons';
+import { CloseIcon, PlusIcon } from '../icons';
+import AccountActions from './AccountActions';
 import AdvancedSection from './AdvancedSection';
 import BrandCard from './BrandCard';
 import ChatHistorySection from './ChatHistorySection';
 import LanguageSelect from './LanguageSelect';
-
-/** The logged-in user's name (or a fallback) plus a logout control. New
- * chrome, so it renders below BrandCard rather than inside it -- BrandCard
- * stays the static, ported header it always was. */
-function AccountRow() {
-  const { user, logout } = useAuth();
-  return (
-    <div className="account-row">
-      <span className="account-name">{user?.name || user?.phone || user?.email || 'Signed in'}</span>
-      <button type="button" className="account-logout-btn" onClick={logout}>
-        <LogoutIcon />
-        Logout
-      </button>
-    </div>
-  );
-}
 
 /**
  * The left rail.
@@ -96,8 +80,6 @@ export default function Sidebar({
 
       <BrandCard />
 
-      <AccountRow />
-
       <div className="chat-history-placeholder">
         <button
           type="button"
@@ -142,9 +124,25 @@ export default function Sidebar({
       />
 
       {/*
-        Last child, so it sits at the bottom of the rail under the Advanced
-        panel. Renders nothing when there is no message, which is why it can
-        live in the flex column without reserving space.
+        THE ACCOUNT BLOCK, at the end of the menu: View Profile and Logout on
+        one row. Past everything a user might actually want to do, with the
+        destructive action last.
+
+        After AdvancedSection, which is OUTSIDE the pinned spacer chain, so both
+        adjacencies sidebarLayout.test.jsx and chatHistory.test.jsx assert are
+        untouched: .voice-language -> .brand-card, and
+        .chat-history-placeholder -> .chat-history-section. AdvancedSection's own
+        `margin-top: auto` (style.css) still pins the group to the bottom; this
+        row simply sits beneath it.
+      */}
+      <AccountActions />
+
+      {/*
+        Last child. Note the distinction now that LogoutRow exists: Logout is
+        the last ACTION, Toast is the last NODE. Toast is a status region, not a
+        menu item, and it renders nothing when there is no message -- which is
+        why it can sit in the flex column without reserving space, and why
+        keeping it here does not put anything visible below Logout.
       */}
       <Toast message={toast?.message} onDismiss={toast?.dismiss} />
     </aside>

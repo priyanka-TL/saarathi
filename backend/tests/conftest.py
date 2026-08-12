@@ -52,6 +52,19 @@ os.environ["API_PREFIX"] = ""
 # that need it on swap fakes onto the container themselves.
 os.environ["VOICE_ENABLED"] = "0"
 
+# The same leak again, for the profile surface. A developer's `.env` points
+# ELEVATE_BASE_URL at the real QA user service, and without this override
+# build_container would create a live client -- so a bug in a fake would send
+# test PATCHes at real people's profiles. `.invalid` is reserved by RFC 2606 and
+# can never resolve, and `--disable-socket` stops the attempt regardless.
+#
+# Set rather than cleared, deliberately: an EMPTY value takes every /api/profile
+# test down the 503 PROFILE_UNAVAILABLE path, so the routes' real behaviour
+# would never be exercised. Tests that need the client swap a fake onto the
+# frozen container with dataclasses.replace; the 503 path has its own test that
+# clears the client explicitly.
+os.environ["ELEVATE_BASE_URL"] = "https://elevate.test.invalid"
+
 # The same leak a third time, and now in ONE key rather than one per platform.
 #
 # `mitra` alone, deliberately, because that is exactly what the pinned

@@ -765,8 +765,15 @@ body {
 }
 
 @keyframes mic-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(184, 61, 120, 0.45); }
-    50%      { box-shadow: 0 0 0 8px rgba(184, 61, 120, 0); }
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(184, 61, 120, 0.45);
+    }
+
+    50% {
+        box-shadow: 0 0 0 8px rgba(184, 61, 120, 0);
+    }
 }
 
 /* Indeterminate progress, while transcribing or synthesising. */
@@ -775,7 +782,9 @@ body {
 }
 
 @keyframes voice-spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 /*
@@ -784,8 +793,13 @@ body {
  * without it, since each also changes colour or glyph.
  */
 @media (prefers-reduced-motion: reduce) {
-    .mic-btn.is-recording { animation: none; }
-    .voice-spinner { animation: none; }
+    .mic-btn.is-recording {
+        animation: none;
+    }
+
+    .voice-spinner {
+        animation: none;
+    }
 }
 
 /*
@@ -879,7 +893,9 @@ body {
  * button would sit permanently at 55%. Show it outright instead.
  */
 @media (hover: none) {
-    .speaker-btn { opacity: 0.8; }
+    .speaker-btn {
+        opacity: 0.8;
+    }
 }
 
 /*
@@ -1198,47 +1214,341 @@ body {
 }
 
 /* =========================================================================
- * Logged-in account row, sidebar -- sits under the brand card. New chrome,
- * not a port, so it lives here rather than style.css.
+ * The account block at the END of the rail: View Profile and Logout, one row.
+ *
+ * ONE CLASS FOR BOTH BUTTONS. They were briefly .profile-row-btn (a full-width
+ * rounded rectangle) above .account-logout-btn (a small pill) on separate rows,
+ * which read as two unrelated controls that happened to be adjacent. They are
+ * one thing, so they share a class and split the row evenly.
+ *
+ * This also replaced a collapsible PROFILE panel under the brand card, whose
+ * rules (.profile-section / .profile-toggle / .profile-content /
+ * .profile-subtitle / .profile-edit-btn) are gone with it -- five read-only
+ * fields was a lot of rail for something read rarely, and it hid itself
+ * entirely when the user service was unconfigured, which made the menu entry
+ * look broken. The details moved into the dialog.
+ *
+ * .profile-fields and .profile-field-row below SURVIVED that move: the dialog's
+ * <dl> reuses them verbatim, so the field layout was not rewritten.
  * ====================================================================== */
 
-.account-row {
+.account-actions {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
     gap: 8px;
-    padding: 8px 4px;
-    border-bottom: 1px solid var(--border-color);
-    margin-bottom: 4px;
+    padding: 4px 4px 0;
 }
 
-.account-name {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+/*
+ * Box model matched to #new-chat-btn (style.css) -- same radius, padding and
+ * weight, so the two rows read as one family of rail actions. COLOR IS
+ * DELIBERATELY NOT copied from it: New Chat is filled solid because it is the
+ * rail's one primary action, whereas these are secondary and stay the quiet
+ * outline they already were -- transparent fill, border-color, muted text.
+ */
+.account-action-btn {
+    /* Equal halves. `min-width: 0` lets them shrink below their content width
+     * on a narrow rail rather than overflowing it. */
+    flex: 1 1 0;
     min-width: 0;
-}
-
-.account-logout-btn {
-    flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 5px 10px;
-    border-radius: 9999px;
+    justify-content: center;
+    gap: 6px;
+    padding: 13px 16px;
+    border-radius: 14px;
     border: 1px solid var(--border-color);
     background: transparent;
     color: var(--text-secondary);
     font-size: 15px;
     font-weight: 600;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
     cursor: pointer;
-    transition: border-color 0.15s ease, color 0.15s ease;
+    transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
 }
 
-.account-logout-btn:hover {
+.account-action-btn:hover {
     color: var(--accent-color);
     border-color: var(--accent-color);
+}
+
+.account-action-btn:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
+}
+
+.account-action-btn svg {
+    flex-shrink: 0;
+    width: 15px;
+    height: 15px;
+}
+
+
+
+/* The 503 PROFILE_UNAVAILABLE state: a notice, not a bare sentence, so an
+ * unprompted dead end still reads as a deliberate, explained answer. */
+.profile-modal-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-color);
+    margin-bottom: 4px;
+}
+
+.profile-modal-notice svg {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    color: var(--text-secondary);
+}
+
+.profile-modal-notice p {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+
+/* A clean, compact grid of details */
+.profile-details-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    row-gap: 16px;
+    column-gap: 16px;
+    margin: 16px 0 24px;
+}
+
+.profile-detail-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Ensure long text like School (3rd item) spans both columns */
+.profile-detail-item:nth-child(3) {
+    grid-column: 1 / -1;
+}
+
+.profile-detail-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.04);
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.profile-detail-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.profile-detail-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.profile-detail-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.profile-detail-value {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.profile-detail-value.profile-detail-empty {
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
+/* Success state for profile update */
+.profile-modal-success {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 0;
+    gap: 16px;
+    text-align: center;
+}
+
+.profile-modal-success-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: rgba(34, 197, 94, 0.1);
+    color: #22c55e;
+}
+
+.profile-modal-success p {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+/* =========================================================================
+ * Modal -- the app's first dialog (src/components/common/Modal.jsx).
+ *
+ * PORTALLED TO document.body, so these rules are deliberately free of any
+ * ancestor: the sidebar is position:fixed with its own stacking context on
+ * mobile and the chat column scrolls, either of which would clip a dialog
+ * rendered in place.
+ * ====================================================================== */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.modal-panel {
+    width: 100%;
+    max-width: 420px;
+    /* Caps at the viewport so a long form scrolls INSIDE the panel rather than
+     * pushing its buttons off-screen on a short window. */
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    padding: 20px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary, #fff);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+.modal-panel:focus {
+    /* Focus lands here on open purely to anchor the keyboard, so the ring would
+     * be noise -- the heading and fields are what the user reads. */
+    outline: none;
+}
+
+.modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 4px;
+}
+
+.modal-title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.modal-close {
+    flex-shrink: 0;
+    display: inline-flex;
+    padding: 4px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.modal-close:hover {
+    color: var(--accent-color);
+}
+
+/* =========================================================================
+ * Profile form, inside the modal. Reuses the login page's .auth-field /
+ * .auth-submit-btn / .auth-secondary-btn / .auth-error above -- they are the
+ * app's only form styling, and a second set would be a second thing to keep
+ * in step.
+ * ====================================================================== */
+
+.profile-modal-intro {
+    margin: 0 0 16px;
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+
+/* Fills in live as fields are completed (ProfileForm computes the width
+ * inline) -- five short inputs with no feedback reads as a wall of boxes;
+ * watching this move turns filling them in into a small, visible checklist. */
+.profile-form-progress {
+    height: 6px;
+    border-radius: 9999px;
+    background: var(--border-color);
+    overflow: hidden;
+    margin: 2px 0 6px;
+}
+
+.profile-form-progress-bar {
+    height: 100%;
+    border-radius: 9999px;
+    background: var(--primary-color);
+    transition: width 0.2s ease;
+}
+
+.profile-form-progress-label {
+    margin: 0 0 16px;
+    font-size: 15px;
+    color: var(--text-secondary);
+}
+
+/* District and State: one idea ("where"), one row. Halves the form's height
+ * without touching validation -- each stays its own .auth-field with its own
+ * error. Below 380px there is not enough room for two comfortable inputs
+ * side by side, so it drops back to stacked. */
+.profile-form-row {
+    display: flex;
+    gap: 12px;
+}
+
+.profile-form-row .auth-field {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+@media (max-width: 380px) {
+    .profile-form-row {
+        flex-direction: column;
+    }
+}
+
+/* Marks a field the API reported in `missing_fields`, so a dialog that opened
+ * by itself shows WHY it did. Only while still empty -- see ProfileForm. */
+.profile-field-missing input {
+    border-color: var(--accent-color);
+}
+
+.profile-form-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.profile-form-actions button {
+    /* Equal halves, so neither action reads as the default. Declining is a
+     * legitimate answer to an unprompted dialog. */
+    flex: 1 1 0;
+    margin: 0;
 }

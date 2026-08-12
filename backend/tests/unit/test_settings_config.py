@@ -74,7 +74,15 @@ def test_server_binding_is_configurable():
         # `remote` on the agent config row where it is per tenant.
         "mitra_enabled", "saathi_enabled",
         "mitra_host_ceiling", "mitra_max_open_channels", "mitra_idle_close_s",
-        "saathi_login_mechanism", "saathi_tenant_code", "elevate_base_url",
+        "saathi_login_mechanism", "saathi_tenant_code",
+        # NOTE: `elevate_base_url` used to be on this list and has deliberately
+        # been taken off it. What was retired was Saathi's PER-AGENT login
+        # endpoint, which is per tenant and so belongs on the config row. The
+        # field is back under the same name as a different thing: the base URL
+        # of the one first-party ELEVATE user service behind /api/profile, which
+        # is a property of the deployment and carries no credential -- the
+        # profile is read and written with the caller's own token. See the note
+        # in .env.example, and test_the_structural_provider_fields_remain below.
         # CREDENTIALS. Still in .env -- but named by `remote.auth`, never held as
         # a Settings field, so adding a platform adds no field here.
         "mitra_origin_url", "saathi_origin_url",
@@ -94,6 +102,40 @@ def test_the_structural_provider_fields_remain():
     for field in ("providers_enabled", "provider_host_ceiling",
                   "provider_max_open_channels", "provider_idle_close_s"):
         assert field in Settings.model_fields
+
+
+def test_the_elevate_user_service_is_configurable_and_off_by_default():
+    """The profile feature's one required key, plus its split timeouts.
+
+    None is the only safe default: there is no sensible fallback host for a
+    user-data write, and an unset value degrades to 503 PROFILE_UNAVAILABLE at
+    request time rather than failing the boot -- so upgrading a deployment that
+    never sets it changes nothing.
+    """
+    # The FIELD DEFAULT, not a constructed instance: a real environment
+    # variable outranks the default, and tests/conftest.py sets
+    # ELEVATE_BASE_URL to an unresolvable host for the whole suite. Asserting
+    # through `_settings()` here would pin conftest's value, not the default.
+    assert Settings.model_fields["elevate_base_url"].default is None
+    assert _settings(elevate_base_url="https://elevate.example").elevate_base_url == (
+        "https://elevate.example"
+    )
+    # Split, not one combined budget: a request holds a worker thread (and so a
+    # DB connection) for its whole life, so a dead DNS must not park one for the
+    # full read budget.
+    assert Settings.model_fields["elevate_connect_timeout"].default == 10.0
+    assert Settings.model_fields["elevate_read_timeout"].default == 30.0
+
+
+def test_there_is_no_second_switch_for_the_profile_popup():
+    """Whether the completion popup shows is a FRONTEND decision.
+
+    APPLICATION_PROFILE_POPUP_ENABLED owns it. A backend flag beside it would
+    let the two disagree, and the popup would be un-disableable from the place
+    that actually renders it.
+    """
+    assert "profile_popup_enabled" not in Settings.model_fields
+    assert "profile_enabled" not in Settings.model_fields
 
 
 def test_enablement_is_one_key_however_many_platforms_exist():

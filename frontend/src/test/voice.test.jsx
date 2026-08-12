@@ -241,6 +241,32 @@ describe('useVoiceRecorder', () => {
     expect(result.current.supported).toBe(false);
   });
 
+  it('still reports browserSupported without a conversation', () => {
+    // THE TWO FLAGS ANSWER DIFFERENT QUESTIONS, and conflating them was a bug:
+    // the sidebar's language picker only needs "can this browser record", but it
+    // was gated on `supported`, which also requires a conversationId. Since that
+    // comes from sessionStorage it is null on every fresh tab, so the whole
+    // control vanished from the rail until the user had sent a message.
+    stubMedia();
+
+    const { result } = renderRecorder({ conversationId: null });
+
+    expect(result.current.browserSupported).toBe(true);
+    expect(result.current.supported).toBe(false);
+  });
+
+  it('reports neither flag when the browser cannot record at all', async () => {
+    // The one real gate that remains for the picker. `supported` must stay
+    // false too, so the mic button's condition is provably unchanged.
+    stubMedia();
+    window.isSecureContext = false;
+
+    const { result } = renderRecorder();
+
+    expect(result.current.browserSupported).toBe(false);
+    expect(result.current.supported).toBe(false);
+  });
+
   it('treats an empty transcript as nothing heard', async () => {
     stubMedia();
     requestUploadUrl.mockResolvedValue(ok({ uploadUrl: 'u', objectKey: 'k' }));

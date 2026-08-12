@@ -55,4 +55,17 @@ describe('http.js: auth interceptors', () => {
     await http.get('/x', { adapter: fakeAdapter(200) });
     expect(localStorage.getItem(STORAGE_KEYS.authToken)).toBe('jwt-1');
   });
+
+  it('applies both interceptors to PATCH, not only GET/POST', async () => {
+    // PATCH arrived with the profile update. Both interceptors are declared
+    // method-agnostically, which is what let `patch` be a one-liner -- this
+    // pins that so a future method-specific branch cannot quietly exempt it.
+    localStorage.setItem(STORAGE_KEYS.authToken, 'jwt-1');
+
+    const response = await http.patch('/x', { role: 'Teacher' }, { adapter: fakeAdapter(200) });
+    expect(authHeader(response)).toBe('Bearer jwt-1');
+
+    await http.patch('/x', {}, { adapter: fakeAdapter(401) });
+    expect(localStorage.getItem(STORAGE_KEYS.authToken)).toBeNull();
+  });
 });

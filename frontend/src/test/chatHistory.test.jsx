@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import ChatHistorySection from '../components/sidebar/ChatHistorySection.jsx';
 import Sidebar from '../components/sidebar/Sidebar.jsx';
 import { AuthProvider } from '../context/AuthContext.jsx';
+import { ProfileProvider } from '../context/ProfileContext.jsx';
 
 const never = () => false;
 
@@ -25,13 +26,21 @@ const section = (over = {}) => (
 
 /**
  * The full rail. Sidebar pulls from no router, so it renders with plain
- * props plus AuthProvider -- empty capabilities/agents keep AdvancedSection
- * inert without stubbing it. AuthProvider is needed because the rail now
- * renders an AccountRow (logout control) that reads useAuth(), same as
- * ChatPage does via App.jsx in production.
+ * props plus the two providers it reads -- empty capabilities/agents keep
+ * AdvancedSection inert without stubbing it.
+ *
+ * AuthProvider: LogoutRow reads useAuth(). ProfileProvider: ProfileRow
+ * reads useProfile(). Both are what ChatPage gets via App.jsx in production.
+ *
+ * NO NETWORK STUB NEEDED, and that is by design rather than luck:
+ * ProfileProvider only fetches when authenticated, and there is no token in
+ * localStorage here -- so the rail renders with an empty profile and makes no
+ * request. Keep that property; a provider that fetched unconditionally would
+ * fire unmocked axios into jsdom from every test in this file.
  */
 const sidebar = (over = {}) => (
   <AuthProvider>
+    <ProfileProvider>
     <Sidebar
       open
       onClose={vi.fn()}
@@ -49,6 +58,7 @@ const sidebar = (over = {}) => (
       toast={null}
       {...over}
     />
+    </ProfileProvider>
   </AuthProvider>
 );
 

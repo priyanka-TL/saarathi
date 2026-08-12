@@ -5,6 +5,7 @@ import MessageList from '../components/chat/MessageList.jsx';
 import TypingIndicator from '../components/chat/TypingIndicator.jsx';
 import WorkflowBanner from '../components/chat/WorkflowBanner.jsx';
 import { useToast } from '../components/common/Toast.jsx';
+import ProfileGate from '../components/profile/ProfileGate.jsx';
 import Sidebar from '../components/sidebar/Sidebar.jsx';
 import { ACTION_TYPES } from '../config/capabilities';
 import { COPY, MOBILE_MAX_WIDTH } from '../constants';
@@ -337,6 +338,7 @@ export default function ChatPage() {
   );
 
   return (
+    <>
     <AppLayout
       sidebarOpen={sidebarOpen}
       onToggleSidebar={() => setSidebarOpen((o) => !o)}
@@ -358,7 +360,14 @@ export default function ChatPage() {
           toast={toast}
           voiceLanguage={voiceLanguage}
           onVoiceLanguageChange={setVoiceLanguage}
-          voiceAvailable={voice.supported && !voice.voiceDisabled}
+          // `browserSupported`, NOT `supported`: the language picker is a stored
+          // preference that is meaningful before any chat exists, whereas
+          // `supported` also requires a conversationId -- which is null on a
+          // fresh tab, so using it hid the control on every load until the
+          // first message. `voiceDisabled` is out too: it only turns true
+          // mid-session after a 503, and the preference stays valid regardless.
+          // The mic button still uses `supported` (ChatInput), unchanged.
+          voiceAvailable={voice.browserSupported}
         />
       }
       banner={<WorkflowBanner banner={banner} />}
@@ -383,5 +392,19 @@ export default function ChatPage() {
         </>
       }
     />
+
+    {/*
+      HERE, not in AppLayout or RequireAuth. AppLayout takes named slots
+      (sidebar / banner / chatCard) rather than free children, and documents
+      that .sidebar-overlay must stay its last child. RequireAuth is rendered
+      directly, with no providers, by requireAuth.test.jsx -- mounting a
+      context consumer there would break it.
+
+      This is the first authenticated screen, which is what "after login" means
+      in practice. Renders nothing unless the profile is genuinely incomplete
+      and the operator left the popup on.
+    */}
+    <ProfileGate />
+    </>
   );
 }

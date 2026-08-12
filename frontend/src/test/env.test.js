@@ -29,6 +29,9 @@ beforeEach(() => {
   // frontend/.env (currently APPLICATION_AUTH_MODES=otp) would decide what
   // "unset" resolves to in every test below that doesn't override it.
   vi.stubEnv('APPLICATION_AUTH_MODES', '');
+  // Same leak a third time: frontend/.env sets APPLICATION_PROFILE_POPUP_ENABLED,
+  // so without this the "unset" cases below would assert a developer's own value.
+  vi.stubEnv('APPLICATION_PROFILE_POPUP_ENABLED', '');
 });
 
 afterEach(() => {
@@ -98,5 +101,50 @@ describe('AUTH_MODES resolution', () => {
       build: { APPLICATION_AUTH_MODES: 'otp' },
     });
     expect(env.AUTH_MODES).toEqual(['password']);
+  });
+});
+
+describe('PROFILE_POPUP_ENABLED resolution', () => {
+  it('defaults to ON when nothing is configured anywhere', async () => {
+    // An incomplete profile is the case the popup exists for, so an operator who
+    // configures nothing gets the intended behaviour.
+    const env = await loadEnv();
+    expect(env.PROFILE_POPUP_ENABLED).toBe(true);
+  });
+
+  it.each(['false', 'FALSE', '0', 'off', 'no'])('is turned off by %s', async (value) => {
+    const env = await loadEnv({ build: { APPLICATION_PROFILE_POPUP_ENABLED: value } });
+    expect(env.PROFILE_POPUP_ENABLED).toBe(false);
+  });
+
+  it.each(['true', '1', 'on', 'yes'])('stays on for %s', async (value) => {
+    const env = await loadEnv({ build: { APPLICATION_PROFILE_POPUP_ENABLED: value } });
+    expect(env.PROFILE_POPUP_ENABLED).toBe(true);
+  });
+
+  it('treats an unrecognised value as on, same as unset', async () => {
+    // Fail OPEN: a typo must not silently disable the prompt, since nothing
+    // else would tell an operator it had.
+    const env = await loadEnv({ build: { APPLICATION_PROFILE_POPUP_ENABLED: 'maybe' } });
+    expect(env.PROFILE_POPUP_ENABLED).toBe(true);
+  });
+
+  it('lets the runtime config override the build-time value', async () => {
+    // The whole point of config.js: disable the popup on a DEPLOYED bundle
+    // without rebuilding it.
+    const env = await loadEnv({
+      runtime: { PROFILE_POPUP_ENABLED: 'false' },
+      build: { APPLICATION_PROFILE_POPUP_ENABLED: 'true' },
+    });
+    expect(env.PROFILE_POPUP_ENABLED).toBe(false);
+  });
+
+  it('ignores a blank runtime value and falls through to the build-time one', async () => {
+    // The shipped public/config.js has an empty string; it must be a no-op.
+    const env = await loadEnv({
+      runtime: { PROFILE_POPUP_ENABLED: '   ' },
+      build: { APPLICATION_PROFILE_POPUP_ENABLED: 'false' },
+    });
+    expect(env.PROFILE_POPUP_ENABLED).toBe(false);
   });
 });

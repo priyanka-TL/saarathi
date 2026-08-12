@@ -17,6 +17,12 @@
  *                      ("otp", "password", or "password,otp"). Only the
  *                      fallback -- ELEVATE's own branding response overrides
  *                      it once loaded. See src/utils/authModes.js.
+ *   PROFILE_POPUP_ENABLED
+ *                      'false'/'0'/'off'/'no' stops the profile form popping
+ *                      up after login when mandatory fields are missing.
+ *                      DEFAULT ON. The sidebar's Profile section and its
+ *                      Update button stay available either way -- this only
+ *                      governs the unprompted dialog.
  *
  * A blank value falls through to the build-time APPLICATION_* value from
  * .env; deleting the file entirely is also safe (the app just uses the
@@ -27,4 +33,5 @@ window.__APP_CONFIG__ = {
   ELEVATE_BASE_URL: '',
   ELEVATE_TENANT_ID: '',
   AUTH_MODES: '',
+  PROFILE_POPUP_ENABLED: '',
 };

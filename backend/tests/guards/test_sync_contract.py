@@ -130,7 +130,7 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
 
     GET / is deliberately absent -- the React app serves the shell now.
 
-    Three groups of ADDITIONS to the Flask surface. The first two come from
+    Four groups of ADDITIONS to the Flask surface. The first two come from
     making the sidebar database-driven and multi-tenant:
 
       * GET /api/ui/capabilities -- the capability document the sidebar
@@ -155,6 +155,16 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
         developer can run voice with CLOUD_STORAGE_PROVIDER=local and no cloud
         account; under any other provider it 404s, because the browser uploads
         to the storage origin instead.
+
+    The fourth is the profile surface, which Flask had no equivalent of either
+    -- under Mitra these five fields were only ever collected conversationally,
+    by an LLM tool over a WebSocket:
+
+      * GET/PATCH /api/profile -- the caller's own ELEVATE profile, read and
+        updated with the CALLER's token, which is why neither takes a user id.
+        Gated on ELEVATE_BASE_URL, answering 503 PROFILE_UNAVAILABLE when it is
+        unset. They feed the sidebar's Profile section and the completion
+        dialog shown after login; the turn pipeline is untouched.
 
     Every other entry below is a Flask path that must keep existing.
     """
@@ -186,6 +196,8 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
         ("POST", "/api/voice/transcribe"),
         ("POST", "/api/voice/speak"),
         ("PUT", "/api/voice/upload-local/{key:path}"),
+        ("GET", "/api/profile"),
+        ("PATCH", "/api/profile"),
     }
     actual = {
         (m, r.path)

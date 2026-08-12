@@ -133,6 +133,33 @@ class Settings(BaseSettings):
     jwt_identifier_field: str = "id"
     jwt_email_suffix: str = "@shikshalokam.org"
 
+    # ELEVATE's user service, for reading and updating the caller's PROFILE
+    # (/api/profile). Distinct from elevate_jwt_secret above, which only
+    # verifies a token ELEVATE already minted: this is an outbound call, made
+    # with the caller's OWN token, so no new credential is introduced.
+    #
+    # THIS NAME IS BACK, AND NOT BY MISTAKE. `.env.example` once retired
+    # ELEVATE_BASE_URL into `remote.auth.token_endpoint` (migration 0013) --
+    # that was Saathi's per-agent, per-tenant login endpoint, which genuinely
+    # is not configuration of this process. This is a different thing wearing
+    # the same name: the first-party user service every tenant shares.
+    #
+    # None is the only safe default -- there is no sensible fallback host for
+    # a user-data write. Unset degrades to 503 at request time rather than
+    # failing the boot, so every existing deployment keeps working untouched.
+    #
+    # There is deliberately NO `profile_enabled` flag beside it. Whether the
+    # completion popup appears is a frontend decision
+    # (APPLICATION_PROFILE_POPUP_ENABLED); a second switch here would let the
+    # two disagree.
+    elevate_base_url: Optional[str] = None
+    # Split, not one `timeout=30` as the Django original uses. A request holds
+    # a worker thread and therefore a DB connection for its whole life
+    # (THREADPOOL_SIZE <= DB_POOL_SIZE), so a dead DNS must not park one for
+    # the full read budget. Same reasoning as bhashini_*_timeout below.
+    elevate_connect_timeout: float = 10.0
+    elevate_read_timeout: float = 30.0
+
     # ---- provider credentials ----
     #
     # THERE ARE NO FIELDS HERE, DELIBERATELY, AND THAT IS THE WHOLE DESIGN.

@@ -41,6 +41,7 @@ class Container:
     providers: Any = None                  # app.providers.registry.ProviderRegistry
     bhashini: Optional[Any] = None         # BhashiniClient | None (voice_enabled gated)
     object_store: Optional[Any] = None     # ObjectStore | None (voice_enabled gated)
+    elevate: Optional[Any] = None          # ElevateUserClient | None (ELEVATE_BASE_URL gated)
 
 
 def build_container(settings: Settings) -> Container:
@@ -129,6 +130,27 @@ def build_container(settings: Settings) -> Container:
             ffmpeg_timeout_s=settings.voice_ffmpeg_timeout_s,
         )
 
+    # UNSET IS NOT AN ERROR, unlike the voice block above. Voice fails the boot
+    # when half-configured because answering upload-url and then failing at
+    # transcribe is worse than not starting; profile has no such pairing -- a
+    # deployment with no ELEVATE_BASE_URL simply has no Profile section, and the
+    # router turns None into 503 PROFILE_UNAVAILABLE. Raising here would take
+    # down every existing deployment on upgrade.
+    elevate = None
+    if settings.elevate_base_url:
+        from app.integrations.elevate import ElevateUserClient
+
+        elevate = ElevateUserClient(
+            base_url=settings.elevate_base_url,
+            connect_timeout=settings.elevate_connect_timeout,
+            read_timeout=settings.elevate_read_timeout,
+        )
+    else:
+        logger.info(
+            "ELEVATE_BASE_URL is not set: /api/profile will answer 503 "
+            "PROFILE_UNAVAILABLE and the Profile section stays hidden."
+        )
+
     deps = HandlerDeps(
         llm_factory=llm_factory,
         tool_registry=tool_registry,
@@ -158,4 +180,5 @@ def build_container(settings: Settings) -> Container:
         providers=providers,
         bhashini=bhashini,
         object_store=object_store,
+        elevate=elevate,
     )

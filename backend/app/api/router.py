@@ -1,6 +1,6 @@
 """The single API router main.py mounts.
 
-Responsible for: aggregating the eight routers in one place.
+Responsible for: aggregating the nine routers in one place.
 Used by: create_app(), which applies API_PREFIX to this router exactly once.
 
 ORDER IS PART OF THE CONTRACT -- FastAPI matches in registration order, first
@@ -13,7 +13,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.routers import admin, admin_config, agents, chat, conversations, sessions, ui, voice
+from app.routers import (
+    admin,
+    admin_config,
+    agents,
+    chat,
+    conversations,
+    profile,
+    sessions,
+    ui,
+    voice,
+)
 
 api_router = APIRouter()
 
@@ -22,8 +32,9 @@ api_router.include_router(conversations.router)
 api_router.include_router(agents.router)
 api_router.include_router(sessions.router)
 api_router.include_router(ui.router)
-# Both live under their own path prefixes, so neither can collide with admin's
+# All three live under their own path prefixes, so none can collide with admin's
 # /api/agents/{key} wildcard -- their position is consistency, not a tie-break.
 api_router.include_router(voice.router)
+api_router.include_router(profile.router)
 api_router.include_router(admin_config.router)
 api_router.include_router(admin.router)
