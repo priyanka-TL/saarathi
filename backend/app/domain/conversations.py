@@ -52,6 +52,7 @@ class MessageDTO(BaseModel):
     route_confidence: Optional[float] = None
     
     options: Optional[List[Dict[str, Any]]] = None
+    attachments: Optional[List[Dict[str, Any]]] = None
     selected_option_id: Optional[str] = None
     
     model: Optional[str] = None

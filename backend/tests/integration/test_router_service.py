@@ -451,3 +451,358 @@ def test_no_pin_no_keyword_no_llm_response_lands_on_default():
         assert decision.agent.key == "general_support"
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# Gate 2: a pin that YIELDS
+#
+# THE BUG THESE EXIST FOR. An open-ended assistant never reports completion, so
+# its session never becomes terminal and Gate 2 pinned the conversation to it
+# for good. Observed live: one `saathi` session sat `awaiting_user` for twelve
+# turns and swallowed every later request, including explicit asks for another
+# agent -- of six such sessions in the database, ZERO had ever completed, while
+# the two interview agents completed routinely.
+#
+# The release must NOT apply to an interview: a user answering "I want to tell
+# my story about attendance" is talking TO it, not asking to leave.
+# ---------------------------------------------------------------------------
+
+
+def _yield_setup(session, *, yields: bool, target_keywords=None, yield_confidence_threshold=None):
+    """A pinned assistant plus a keyword-bearing target and a default."""
+    pinned = _make_agent(
+        session, "saathi", is_default=False,
+        description="Open-ended per-user assistant with no fixed end.",
+        routing=RoutingSpec(
+            pin_session=True, exit_keywords=["/exit", "exit saathi"],
+            keywords=["improvement plan", "action plan"], priority=80,
+            yields_to_keyword=yields,
+            yield_confidence_threshold=yield_confidence_threshold,
+        ),
+    )
+    target = _make_agent(
+        session, "record_stories", is_default=False,
+        routing=RoutingSpec(
+            pin_session=True, priority=90,
+            keywords=target_keywords if target_keywords is not None else ["capture story", "my story"],
+        ),
+    )
+    default_agent = _make_agent(session, "general_support", is_default=True)
+    conv = _new_conversation(session)
+    AgentSessionRepository(session).create_pending(conv.id, uuid.UUID(pinned.id))
+    session.commit()
+    return pinned, target, default_agent, conv
+
+
+def test_a_yielding_pin_releases_on_a_keyword_with_no_llm_call():
+    session = SessionLocal()
+    try:
+        _pin, _target, default_agent, conv = _yield_setup(session, yields=True)
+        fake_llm = _FakeLlm()
+        svc = RouterService(session, _build_registry([_pin, _target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id),
+                              _ctx("I want to capture story about attendance"),
+                              explicit_key=None)
+
+        assert decision.reason == "keyword_yield"
+        assert decision.agent.key == "record_stories"
+        assert decision.unpinned is True
+        assert len(fake_llm.calls) == 0, "the keyword path must stay deterministic"
+    finally:
+        session.close()
+
+
+def test_a_yielding_pin_releases_on_the_classifier_when_no_keyword_matches():
+    """THE REPORTED SENTENCE. `_kw_match` is a plain substring test, so
+    "I wanted to capture a story" matches NONE of the target's keywords --
+    "capture story" is not in "capture a story". A keyword-only rule would have
+    left this pinned, which is why the classifier is the second step."""
+    session = SessionLocal()
+    try:
+        _pin, target, default_agent, conv = _yield_setup(session, yields=True)
+        assert not any(k in "i wanted to capture a story"
+                       for k in target.spec.routing.keywords), "premise of this test"
+
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "record_stories", "confidence": 0.9}')
+        svc = RouterService(session, _build_registry([_pin, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id),
+                              _ctx("I wanted to capture a story"), explicit_key=None)
+
+        assert decision.reason == "llm_yield"
+        assert decision.agent.key == "record_stories"
+        assert decision.unpinned is True
+    finally:
+        session.close()
+
+
+def test_an_unsure_classifier_STAYS_PINNED_rather_than_falling_to_the_default():
+    """THE FLOOR, and the most important test here.
+
+    Gates 3-5 fall through to the default agent when nothing is confident.
+    Reusing that verbatim would drop an ordinary, slightly-ambiguous assistant
+    turn onto General Support -- a worse bug than the one being fixed."""
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(session, yields=True)
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "record_stories", "confidence": 0.2}')  # below 0.5
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id),
+                              _ctx("hmm, what do you think?"), explicit_key=None)
+
+        assert decision.reason == "pinned"
+        assert decision.agent.key == "saathi"
+        assert decision.unpinned is False
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# yield_confidence_threshold -- THE REPORTED SCENARIO.
+#
+# A quick-reply answer with no story content at all ("Yes, we've tried some
+# things") cleared record_stories' own confidence_threshold (0.5, tuned for
+# cheap first-message routing) and yielded the pin away unasked. These pin
+# their own, stricter bar on the PINNED agent instead.
+# ---------------------------------------------------------------------------
+
+
+def test_a_stricter_yield_threshold_blocks_a_moderate_confidence_yield():
+    """THE REPORTED BUG. 0.6 clears record_stories' own 0.5 threshold but not
+    saathi's stricter 0.85 yield threshold, so the turn must stay pinned."""
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(
+            session, yields=True, yield_confidence_threshold=0.85)
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "record_stories", "confidence": 0.6}')
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id),
+                              _ctx("Yes, we've tried some things"), explicit_key=None)
+
+        assert decision.reason == "pinned"
+        assert decision.agent.key == "saathi"
+        assert decision.unpinned is False
+    finally:
+        session.close()
+
+
+def test_a_stricter_yield_threshold_still_yields_on_high_confidence():
+    """The stricter bar isn't a block -- an explicit, unambiguous request
+    still clears it and yields normally."""
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(
+            session, yields=True, yield_confidence_threshold=0.85)
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "record_stories", "confidence": 0.9}')
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id),
+                              _ctx("I want to record a story now"), explicit_key=None)
+
+        assert decision.reason == "llm_yield"
+        assert decision.agent.key == "record_stories"
+        assert decision.unpinned is True
+    finally:
+        session.close()
+
+
+def test_an_unset_yield_threshold_falls_back_to_the_candidates_own_threshold():
+    """No `yield_confidence_threshold` on the pin (the default, `None`) must
+    reproduce today's behaviour exactly: the candidate's own
+    `confidence_threshold` (0.5) is still the bar."""
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(session, yields=True)
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "record_stories", "confidence": 0.6}')
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id),
+                              _ctx("Yes, we've tried some things"), explicit_key=None)
+
+        assert decision.reason == "llm_yield"
+        assert decision.agent.key == "record_stories"
+    finally:
+        session.close()
+
+
+def test_the_yield_prompt_names_the_pinned_agent():
+    """The classifier is told which agent it might be interrupting, and given
+    the "short/ambiguous reply is a continuation" instruction -- the context
+    that lets it tell "answering the current question" apart from "asking for
+    something else"."""
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(session, yields=True)
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "record_stories", "confidence": 0.2}')
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        svc.select(SimpleNamespace(id=conv.id),
+                  _ctx("Yes, we've tried some things"), explicit_key=None)
+
+        assert len(fake_llm.calls) == 1
+        system_prompt = fake_llm.calls[0][0].content
+        assert pinned.name in system_prompt
+        assert pinned.description in system_prompt
+        assert "quick-reply question" in system_prompt
+    finally:
+        session.close()
+
+
+def test_a_classifier_failure_stays_pinned_rather_than_surfacing():
+    """Safer than Gate 4's fallback: the turn still reaches the agent the user
+    was already talking to."""
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(session, yields=True)
+        fake_llm = _FakeLlm()
+        fake_llm.queue_error(RuntimeError("router is down"))
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id),
+                              _ctx("something unrelated"), explicit_key=None)
+
+        assert decision.reason == "pinned"
+        assert decision.agent.key == "saathi"
+    finally:
+        session.close()
+
+
+def test_AN_INTERVIEW_IS_NEVER_HIJACKED():
+    """The regression that matters most.
+
+    `yields_to_keyword` defaults to False, so an interview keeps the absolute
+    pin. A user answering it with a sentence that happens to contain another
+    agent's keyword must stay exactly where they are -- re-routing them would
+    destroy the run."""
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(session, yields=False)
+        fake_llm = _FakeLlm()
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        for message in ("I want to capture story about attendance",
+                        "I wanted to capture a story",
+                        "my story is about the school"):
+            decision = svc.select(SimpleNamespace(id=conv.id), _ctx(message),
+                                  explicit_key=None)
+            assert decision.reason == "pinned", message
+            assert decision.agent.key == "saathi", message
+
+        assert len(fake_llm.calls) == 0, "a non-yielding pin must never call the LLM"
+    finally:
+        session.close()
+
+
+def test_a_yielding_pin_does_not_switch_to_ITSELF():
+    """The pinned agent is excluded from its own candidates, so its own
+    keywords cannot log a spurious yield to where the turn already was."""
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(session, yields=True)
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "saathi", "confidence": 0.99}')
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        # "improvement plan" is the PINNED agent's own keyword.
+        decision = svc.select(SimpleNamespace(id=conv.id),
+                              _ctx("let's revisit the improvement plan"), explicit_key=None)
+
+        assert decision.reason == "pinned"
+        assert decision.agent.key == "saathi"
+        assert decision.unpinned is False
+    finally:
+        session.close()
+
+
+def test_an_exit_keyword_still_wins_over_a_yield():
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(session, yields=True)
+        fake_llm = _FakeLlm()
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id), _ctx("exit saathi"),
+                              explicit_key=None)
+
+        assert decision.reason == "exit_to_default"
+        assert decision.agent.key == "general_support"
+        assert len(fake_llm.calls) == 0
+    finally:
+        session.close()
+
+
+def test_a_yield_cannot_route_to_an_agent_the_caller_cannot_see():
+    """The yield reuses `_visible`, so access control travels with it."""
+    session = SessionLocal()
+    try:
+        pinned = _make_agent(
+            session, "saathi", is_default=False,
+            routing=RoutingSpec(pin_session=True, yields_to_keyword=True),
+        )
+        hidden = _make_agent(
+            session, "record_stories", is_default=False,
+            routing=RoutingSpec(keywords=["capture story"], priority=90),
+            access=AccessSpec(tenant_codes=["SOME_OTHER_TENANT"], allow_anonymous=False),
+        )
+        default_agent = _make_agent(session, "general_support", is_default=True)
+        conv = _new_conversation(session)
+        AgentSessionRepository(session).create_pending(conv.id, uuid.UUID(pinned.id))
+        session.commit()
+
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "record_stories", "confidence": 0.99}')
+        svc = RouterService(session, _build_registry([pinned, hidden, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id), _ctx("capture story"),
+                              explicit_key=None)
+
+        assert decision.agent.key == "saathi", "an invisible agent must not be yielded to"
+        assert decision.reason == "pinned"
+    finally:
+        session.close()
+
+
+def test_a_yield_never_lands_on_the_DEFAULT_agent():
+    """Found by running the real thing: "tell me more about that plan" mid-
+    assistant classified to general_support ABOVE threshold and would have been
+    bounced out of the conversation it belonged to.
+
+    A yield means "the user wants THAT agent". Wanting out of this one is a
+    different intent that `_exit_to_default` already serves, so the default is
+    not a yield target and an ambiguous turn stays where it is."""
+    session = SessionLocal()
+    try:
+        pinned, target, default_agent, conv = _yield_setup(session, yields=True)
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "general_support", "confidence": 0.95}')
+        svc = RouterService(session, _build_registry([pinned, target, default_agent]),
+                            _FakeLlmFactory(fake_llm))
+
+        decision = svc.select(SimpleNamespace(id=conv.id),
+                              _ctx("tell me more about that plan"), explicit_key=None)
+
+        assert decision.reason == "pinned"
+        assert decision.agent.key == "saathi"
+    finally:
+        session.close()

@@ -7,7 +7,7 @@ Used by: services, agents and tools raise them; handlers.py maps them once.
 FRAMEWORK-FREE, and must stay so: app.agents imports from here and .importlinter
 forbids anything under app.agents from reaching FastAPI.
 
-Not to be confused with MitraError / BhashiniError / StorageError, which
+Not to be confused with ProviderError / BhashiniError / StorageError, which
 describe an EXTERNAL system failing. These describe THIS application refusing.
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ class SaarthiError(Exception):
 class ConcurrentTurnError(SaarthiError):
     """Another request is already running a turn on this conversation.
 
-    Never retried automatically: the duplicate must not reach Mitra, where two
+    Never retried automatically: the duplicate must not reach the platform, where two
     user messages in a row merge and destroy an answer (§1.6).
     """
 

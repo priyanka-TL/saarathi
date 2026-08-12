@@ -5,8 +5,8 @@ Used by: `python -m app.main`, and by every test via TestClient.
 
 EVERY ENDPOINT AND DEPENDENCY HERE IS A PLAIN `def`, so Starlette dispatches it
 to a real worker thread. Not a style choice -- the code underneath requires it:
-the session-scoped advisory lock, MitraChannel's threading.Lock and blocking
-Queue, `requests`, the sync SQLAlchemy engine, and an LLM client whose
+the session-scoped advisory lock, a provider channel's threading.Lock and
+blocking Queue, `requests`, the sync SQLAlchemy engine, and an LLM client whose
 `_agenerate` raises NotImplementedError. The only `async def` callables in the
 request path are the two body readers in app/dependencies/body.py.
 
@@ -37,8 +37,8 @@ async def lifespan(app: FastAPI):
 
     build_container and sync_and_reload run in create_app() instead, so a bad
     config aborts at import time and TestClient(app) gets a fully-booted app.
-    There is no shutdown hook: MitraSessionManager registers its own atexit,
-    and a second call would double-close.
+    There is no shutdown hook: each provider's ChannelPool registers its own
+    atexit, and a second call would double-close.
     """
     size_threadpool(app.state.container.settings)
     yield
@@ -109,9 +109,9 @@ def create_app() -> FastAPI:
         return JSONResponse({"status": "ok"})
 
     logger.info(
-        "Saarthi API ready (app_env=%s, mitra_enabled=%s, api_prefix=%r)",
+        "Saarthi API ready (app_env=%s, providers_enabled=%s, api_prefix=%r)",
         settings.app_env,
-        settings.mitra_enabled,
+        sorted(container.providers.enabled) or "none",
         prefix,
     )
     return app
@@ -125,16 +125,23 @@ if __name__ == "__main__":
 
     from app.core.runtime import assert_single_worker
     from app.core.settings import settings
+    from app.providers.registry import stateful_enabled_names
+
+    # Which providers pool sockets in process memory is a property THEY declare
+    # (stateful_transport), not a flag named after one of them -- so a
+    # deployment running only stateless providers is legitimately free of the
+    # single-worker constraint.
+    stateful = stateful_enabled_names(settings)
 
     # Host, port and workers come from Settings; `make run` goes through here
     # so there is only one source for them.
-    assert_single_worker(settings.mitra_enabled, settings.workers)
+    assert_single_worker(stateful, settings.workers)
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
-        # Raises under MITRA_ENABLED=1: the reloader's child would double-boot
-        # the WebSocket pool.
-        reload=resolve_reloader(settings.mitra_enabled),
+        # Off while any stateful provider is enabled: the reloader's child would
+        # double-boot the WebSocket pool.
+        reload=resolve_reloader(stateful),
         workers=settings.workers,
     )

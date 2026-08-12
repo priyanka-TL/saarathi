@@ -20,10 +20,12 @@ from pydantic import ValidationError, field_validator
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 # Settings does not need this -- pydantic-settings reads the file itself. One
-# thing still does: RemoteSpec.origin_env names the variable holding a scope's
-# Mitra Origin credential and is resolved with os.getenv. That indirection
-# exists because the Origin header is a credential that must not sit in a
-# config row. override=False keeps real environment variables winning.
+# thing still does: a remote provider's credentials are named by its config row
+# (`remote.auth.credential_env` and friends) and resolved with os.getenv, so
+# every variable a row can name has to be in the process environment whether or
+# not it is a Settings field. That indirection exists because a config row is
+# readable through the admin API and must never hold a credential.
+# override=False keeps real environment variables winning.
 load_dotenv(BASE_DIR / ".env", override=False)
 
 class Settings(BaseSettings):
@@ -44,8 +46,9 @@ class Settings(BaseSettings):
     # Where uvicorn binds. 0.0.0.0 in a container, 127.0.0.1 locally.
     host: str = "127.0.0.1"
     port: int = 8000
-    # MUST stay 1 while MITRA_ENABLED=1 -- MitraSessionManager pools live
-    # WebSockets in process memory. assert_single_worker enforces it at startup.
+    # MUST stay 1 while any enabled provider declares stateful_transport --
+    # those pool live WebSockets in process memory. assert_single_worker
+    # enforces it at startup, reading the providers rather than a named flag.
     workers: int = 1
     # Mounted in FRONT of every route: "/saarathi-service" makes the chat
     # endpoint POST /saarathi-service/api/chat. Normalised by the validator below.
@@ -77,40 +80,124 @@ class Settings(BaseSettings):
     threadpool_size: Optional[int] = None
 
     # ---- feature flags ----
-    # The ONLY auth switch. True decodes SAARTHI_STATIC_TOKEN for the identity;
-    # False serves the hardcoded one. Defaults True so a missing flag fails safe.
+    # The ONLY auth switch. True requires a verified per-request bearer token
+    # on every call (see app/services/identity.py); False serves the
+    # hardcoded dev identity instead, regardless of any token sent -- NEVER
+    # in prod. Defaults True so a missing flag fails safe.
     auth_check: bool = True
-    # 0 disables every remote_flow agent. Read at container build time, before
-    # any agent config is loaded, which is why it cannot live in one.
-    mitra_enabled: int = 0
     # 0 => the whole /api/agents admin surface 404s.
     saarthi_admin_enabled: int = 0
 
+    # ---- remote providers ----
+    #
+    # ONE KEY FOR EVERY PROVIDER, replacing the per-platform MITRA_ENABLED /
+    # SAATHI_ENABLED pair. Comma-separated registry keys:
+    #
+    #     PROVIDERS_ENABLED=mitra,saathi
+    #
+    # An agent whose `remote.provider` is not in this list is hidden from
+    # /api/agents and from the sidebar -- a runtime filter, never a DB write: a
+    # deployment switch has no business mutating tenant configuration.
+    #
+    # WHY THIS IS STILL ENV, when the rest of a provider's configuration moved
+    # into agent_configs. It is read at container-build time, before any agent
+    # config is loadable, and it decides whether the database-reading client is
+    # built at all. A database write must not be able to switch a provider on.
+    #
+    # Empty (the default) means no remote provider is enabled, so a deployment
+    # that has not opted in cannot reach an external platform by accident.
+    providers_enabled: str = ""
+
+    # SSRF backstop: a config-supplied allowed_hosts is intersected with this.
+    # Empty means no ceiling. An operator backstop ON configuration, so it stays
+    # env -- a control that the thing it constrains can widen is not a control.
+    provider_host_ceiling: str = ""
+
+    # Bounds on ONE channel pool per provider, shared by every agent using it,
+    # so these cannot be per-agent. Each open channel is a socket plus a thread.
+    provider_max_open_channels: int = 200
+    provider_idle_close_s: float = 1200.0
+
     # ---- auth / jwt ----
-    # Saarthi is the sole validator: this app decodes the token and never
-    # verifies signature or expiry, so there is deliberately no secret setting.
-    saarthi_static_token: Optional[str] = None
+    # ELEVATE's own ACCESS_TOKEN_SECRET. Required to trust ANY per-request
+    # bearer token (the login flow's output) -- it comes from the request
+    # itself, so it must be signature- and expiry-verified or any caller
+    # could forge an identity/tenant/role. Without this set, a per-request
+    # token is refused rather than trusted unverified -- and since AUTH_CHECK
+    # no longer has a no-token fallback (removed: it was an authentication
+    # bypass -- see app/services/identity.py), an unset secret means nothing
+    # can authenticate at all while AUTH_CHECK=true.
+    elevate_jwt_secret: Optional[str] = None
     # MUST match Mitra's SSO derivation, email = data[field] + suffix. Wrong
     # values create a SECOND Mitra profile and split a user's stories.
     jwt_identifier_field: str = "id"
     jwt_email_suffix: str = "@shikshalokam.org"
 
-    # ---- mitra ----
-    # ONLY FOUR KEYS LIVE HERE. Which Mitra deployment an agent reaches (base
-    # URL, timeouts, endpoint paths) is per agent and per tenant, so it lives in
-    # `remote.connection` on the agent config row -- not here. Note extra=ignore
-    # above: a stale MITRA_BASE_URL in a .env is accepted and does nothing.
+    # ELEVATE's user service, for reading and updating the caller's PROFILE
+    # (/api/profile). Distinct from elevate_jwt_secret above, which only
+    # verifies a token ELEVATE already minted: this is an outbound call, made
+    # with the caller's OWN token, so no new credential is introduced.
+    #
+    # THIS NAME IS BACK, AND NOT BY MISTAKE. `.env.example` once retired
+    # ELEVATE_BASE_URL into `remote.auth.token_endpoint` (migration 0013) --
+    # that was Saathi's per-agent, per-tenant login endpoint, which genuinely
+    # is not configuration of this process. This is a different thing wearing
+    # the same name: the first-party user service every tenant shares.
+    #
+    # None is the only safe default -- there is no sensible fallback host for
+    # a user-data write. Unset degrades to 503 at request time rather than
+    # failing the boot, so every existing deployment keeps working untouched.
+    #
+    # There is deliberately NO `profile_enabled` flag beside it. Whether the
+    # completion popup appears is a frontend decision
+    # (APPLICATION_PROFILE_POPUP_ENABLED); a second switch here would let the
+    # two disagree.
+    elevate_base_url: Optional[str] = None
+    # Split, not one `timeout=30` as the Django original uses. A request holds
+    # a worker thread for its whole life, so a dead DNS must not park one for
+    # the full read budget. Same reasoning as bhashini_*_timeout below.
+    #
+    # TIGHTER THAN BHASHINI'S, deliberately. A PATCH to /api/profile makes
+    # THREE sequential calls (read the baseline, write the merged set, read it
+    # back -- see ProfileService.update), so a per-call budget modelled on
+    # Bhashini's speech inference would compound into a two-minute worst case
+    # on one thread. A user-service read or write is a small database
+    # operation; 5s to connect and 10s to answer is generous for one, and
+    # keeps the three-call worst case BELOW what a single call used to allow.
+    elevate_connect_timeout: float = 5.0
+    elevate_read_timeout: float = 10.0
 
-    # A CREDENTIAL -- Mitra gates admission on the Origin header. Never log it,
-    # never store it in a config row, never echo it in an error response.
-    mitra_origin_url: str = "https://mitra.example.com"
-    # SSRF backstop: a config-supplied allowed_hosts is intersected with this.
-    # Empty means no ceiling. See docs/agent-configuration.md.
-    mitra_host_ceiling: str = ""
-    # Bounds on ONE process-wide channel pool shared by every agent, so these
-    # cannot be per-agent. Each open channel is a socket plus a thread.
-    mitra_max_open_channels: int = 200
-    mitra_idle_close_s: float = 1200.0
+    # ---- provider credentials ----
+    #
+    # THERE ARE NO FIELDS HERE, DELIBERATELY, AND THAT IS THE WHOLE DESIGN.
+    #
+    # A provider's credentials still live in .env -- a config row is readable
+    # through the admin API, so it must never hold one -- but they are reached
+    # by NAME, not by field. `remote.auth` on the agent config names the
+    # variable (`credential_env`) and app/providers/connection.py resolves it
+    # with os.getenv against the environment load_dotenv populated above.
+    #
+    # The variables a stock deployment sets are documented in .env.example:
+    #
+    #     MITRA_ORIGIN_URL     the Origin header Mitra gates admission on
+    #     SAATHI_ORIGIN_URL    the same, for Saathi
+    #
+    # Saathi used to also name SAATHI_EMAIL/SAATHI_PASSWORD/SAATHI_ACCESS_TOKEN
+    # here, to mint its own connection-level ELEVATE credential. That mechanism
+    # (app/providers/saathi/auth.py) is gone: Saathi now authenticates every
+    # call with the CALLING UserContext's own `.token`, from that user's real
+    # ELEVATE login -- see ELEVATE_JWT_SECRET above, and
+    # app/providers/saathi/provider.py.
+    #
+    # Adding a platform adds variables to .env and names them from its config
+    # row. It does NOT add fields here, which is what stopped every new platform
+    # from being a Settings change.
+    #
+    # Everything that is NOT a credential -- base URL, stream URL, timeouts,
+    # endpoint paths, the company, the bot route -- moved into the agent config
+    # row, where it is per tenant instead of per process. Note extra="ignore"
+    # above: a stale MITRA_BASE_URL or SAATHI_EMAIL left in a .env is accepted
+    # and does nothing.
 
     # ---- cloud storage (provider-agnostic) ----
     # Switching provider is a .env change, not a code change. Names follow the
@@ -159,7 +246,7 @@ class Settings(BaseSettings):
     #
     # 0 => the whole /api/voice surface answers 503 VOICE_DISABLED and the
     # container builds neither the Bhashini client nor the object store. Read at
-    # container build time, exactly like mitra_enabled.
+    # container build time, for the same reason PROVIDERS_ENABLED is.
     voice_enabled: int = 0
     # Three separate credentials, and Dhruva wants different subsets per task:
     # ASR sends all three, TTS and translation send Authorization alone.

@@ -96,6 +96,13 @@ export function useConversation({ messages, polls, onFlow, onClearActive, onSess
           // Replayed groups are decided, never live: disabled, with the chosen
           // one marked. No handler is attached at all.
           options: m.role === 'assistant' && m.options && m.options.length ? m.options : null,
+          // Replayed downloads stay LIVE. Unlike an option, a link to a
+          // generated document is still valid -- and nothing else in the UI
+          // points at it, so dropping it here would strand the file.
+          attachments:
+            m.role === 'assistant' && m.attachments && m.attachments.length
+              ? m.attachments
+              : null,
           selectedOptionId: m.selected_option_id,
           readOnly: true,
         });

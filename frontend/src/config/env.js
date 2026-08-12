@@ -21,6 +21,8 @@
  * correct when the bundle is served from the API's own origin.
  */
 
+import { DEFAULT_AUTH_MODES, parseAuthModes } from '../utils/authModes';
+
 const runtimeConfig =
   (typeof window !== 'undefined' && window.__APP_CONFIG__) || {};
 
@@ -36,3 +38,54 @@ function readConfig(key) {
 
 /** What axios uses as its baseURL. Every request is built from this. */
 export const API_BASE_URL = readConfig('API_BASE_URL');
+
+/**
+ * Login/register/OTP go DIRECTLY to ELEVATE's user service from the browser
+ * -- never proxied through Saarthi's own backend, so ELEVATE's base URL and
+ * tenant id are config here, not a Saarthi API path. Saarthi's backend only
+ * ever validates the JWT this produces; it never issues or mints one.
+ * See src/api/elevateAuth.js.
+ */
+export const ELEVATE_BASE_URL = readConfig('ELEVATE_BASE_URL');
+export const ELEVATE_TENANT_ID = readConfig('ELEVATE_TENANT_ID') || 'saarthi';
+
+/**
+ * The STATIC default for which login modes LoginPage shows -- used before
+ * ELEVATE's branding response loads, and again if it fails or the tenant
+ * declares none. Once branding loads, its own `allowed_auth_mode` (see
+ * api/elevateAuth.js::extractBranding) takes over as the source of truth;
+ * this is only ever the fallback, never re-consulted after that.
+ */
+const configuredAuthModes = parseAuthModes(readConfig('AUTH_MODES'));
+export const AUTH_MODES = configuredAuthModes.length ? configuredAuthModes : DEFAULT_AUTH_MODES;
+
+/** A boolean from config. Unset ('') keeps `fallback` -- see PROFILE_POPUP_ENABLED. */
+function readFlag(key, fallback) {
+  const raw = readConfig(key).toLowerCase();
+  if (!raw) return fallback;
+  return !['false', '0', 'off', 'no'].includes(raw);
+}
+
+/**
+ * Whether to POP UP the profile form after login when mandatory fields are
+ * missing. DEFAULT ON: an incomplete profile is the case this exists for, so
+ * an operator who configures nothing gets the intended behaviour.
+ *
+ * OFF DOES NOT MEAN "NO PROFILE FEATURE". The sidebar's Profile section and its
+ * Update button are unaffected -- this flag governs the unprompted dialog only,
+ * so turning it off makes updating voluntary rather than impossible.
+ *
+ * Deliberately frontend-only: there is no backend `PROFILE_ENABLED` beside it
+ * (see the note in backend/app/core/settings.py). Whether to interrupt someone
+ * is a decision about this UI, and two switches could disagree. Whether the
+ * feature can work at all is a different question, answered by the backend's
+ * ELEVATE_BASE_URL -- unset, /api/profile returns 503 and the section hides
+ * itself regardless of this value.
+ */
+export const PROFILE_POPUP_ENABLED = readFlag('PROFILE_POPUP_ENABLED', true);
+
+/**
+ * Hours to wait before asking the user to update their profile again if they
+ * click "Not now". Default is 2 hours.
+ */
+export const PROFILE_POPUP_REPROMPT_HOURS = parseFloat(readConfig('PROFILE_POPUP_REPROMPT_HOURS')) || 2;

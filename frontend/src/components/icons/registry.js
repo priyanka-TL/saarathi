@@ -1,4 +1,4 @@
-import { AgentIcon, BrainIcon, GlobeIcon } from './index.jsx';
+import { AgentIcon, BrainIcon, GlobeIcon, SparkleIcon } from './index.jsx';
 
 /**
  * Name -> icon component, for config-driven rendering.
@@ -16,6 +16,7 @@ const ICONS = {
   brain: BrainIcon,
   globe: GlobeIcon,
   agent: AgentIcon,
+  sparkle: SparkleIcon,
 };
 
 /**

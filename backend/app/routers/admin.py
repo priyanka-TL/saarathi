@@ -170,7 +170,7 @@ def create_config_version(
             return _admin_error("CONFIG_INVALID", 422, path=["tools"], msg=str(e))
 
     if spec.agent_type == "remote_flow":
-        problem = remote_config_problem(spec, container.settings)
+        problem = remote_config_problem(spec, container.providers, container.settings)
         if problem is not None:
             path, msg = problem
             return _admin_error("CONFIG_INVALID", 422, path=path, msg=msg)

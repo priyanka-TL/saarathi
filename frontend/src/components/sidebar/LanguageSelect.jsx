@@ -12,8 +12,23 @@ import { VOICE_LANGUAGES } from '../../constants';
  * Kannada finds "ಕನ್ನಡ" faster than "Kannada". These are the same four Mitra
  * offers, and match the CHECK constraint on conversations.locale.
  *
- * Renders nothing when voice is unavailable, so a browser that cannot record
- * does not get a control that changes nothing.
+ * Renders nothing when the BROWSER cannot record (no MediaRecorder, or an
+ * insecure context), since there is then nothing to configure. It does NOT
+ * hide merely because no conversation has been started yet -- see
+ * `browserSupported` in useVoiceRecorder. It used to, via the single
+ * `supported` flag, which meant the whole control was absent on every fresh
+ * tab and only appeared once you had sent a message.
+ *
+ * LABELLED "Preferred language", which is broader than what it does. It is
+ * asked for, and reads better in the rail -- but the scope note above still
+ * holds: this is the VOICE language, and picking Hindi does not make the
+ * assistant reply in Hindi. If chat is ever localised, this control is where a
+ * user will expect to set it.
+ *
+ * THE LABEL IS NOT DECORATION. Without it the <select> has no accessible name
+ * at all, and the rail shows an unexplained dropdown reading "English". It was
+ * commented out by accident in 031c737 -- the same commit added the test
+ * asserting its text, which could never have passed.
  */
 export default function LanguageSelect({ value, onChange, visible }) {
   if (!visible) return null;
@@ -21,7 +36,7 @@ export default function LanguageSelect({ value, onChange, visible }) {
   return (
     <div className="voice-language">
       <label className="voice-language-label" htmlFor="voice-language-select">
-        Voice language
+        Preferred language
       </label>
       {/*
         A native <select>: it is four options, and the platform picker is

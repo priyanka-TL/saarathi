@@ -42,5 +42,5 @@ def get_ui_capabilities(
     misconfigured deployment indistinguishable from a deliberately empty one.
     """
     return json_response(
-        resolve_for_user(db, user, mitra_enabled=bool(container.settings.mitra_enabled))
+        resolve_for_user(db, user, enabled_providers=container.providers.enabled)
     )

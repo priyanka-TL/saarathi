@@ -6,9 +6,10 @@ API -- so the source of truth these assert against is the migration's own
 SEED_AGENTS list, validated through the real adapter exactly as the application
 validates a row read out of agent_configs.
 
-RemoteSpec and its nested models don't set extra="forbid" (only BaseAgentSpec
-does), so a typo'd field name inside `remote:`/`routing:` would be silently
-ignored rather than rejected. These assertions are what catch that instead.
+Every model now sets extra="forbid", including the nested ones and the
+provider's own options block -- so a typo'd field name inside `remote:` is
+rejected rather than silently ignored. These assertions pin the VALUES; the
+schema pins the shape.
 """
 from __future__ import annotations
 
@@ -22,6 +23,11 @@ from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
+#: 0010 seeds the ORIGINAL shape; 0013 rewrites it into the provider-neutral
+#: envelope. What the database actually holds -- and therefore what the
+#: application validates -- is the second applied to the first, so that is what
+#: these assertions read.
+_GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -38,10 +44,26 @@ def _seed_specs() -> dict:
     What it returns is the complete spec as stored -- there is no second
     migration left to merge in.
     """
-    spec = importlib.util.spec_from_file_location("_seed_0010", _MIGRATION)
+    seed = _load_migration("_seed_0010", _MIGRATION)
+    generalize = _load_migration("_generalize_0013", _GENERALIZE)
+
+    agents = {}
+    for agent in seed.seed_agents():
+        agent = copy.deepcopy(agent)
+        if isinstance(agent.get("remote"), dict):
+            agent["agent_type"] = "remote_flow"
+            agent["remote"] = generalize._to_envelope(agent["remote"])
+        agents[agent["key"]] = agent
+    return agents
+
+
+def _load_migration(name: str, path: Path):
+    """Imported as a file rather than a module: `migrations/versions` is not a
+    package and alembic revision filenames are not importable identifiers."""
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return {a["key"]: a for a in module.seed_agents()}
+    return module
 
 
 def _raw() -> dict:
@@ -90,9 +112,9 @@ def test_bot_route_and_company_are_stored_literals():
     # NOT the story bot route. These two agents differ by exactly one route and
     # one flow name, and swapping either sends the interview to the wrong Mitra
     # bot with no error -- just the wrong questions.
-    assert raw["bot_route"] == "/shikshalokam_chaupal"
-    assert raw["company"] == "shikshalokamstaging"
-    for value in (raw["bot_route"], raw["company"]):
+    assert raw["options"]["bot_route"] == "/shikshalokam_chaupal"
+    assert raw["options"]["company"] == "shikshalokamstaging"
+    for value in (raw["options"]["bot_route"], raw["options"]["company"]):
         assert "${" not in value
 
 
@@ -122,7 +144,7 @@ def test_finalize_is_v1_and_tokenless_because_only_that_renders_the_mom_report()
     it, so presenting a token on this guest flow misses a GUEST-typed template
     and lands in the same empty-string branch. Mitra's own client for this flow
     posts `access_token: null` (storyPostSessionService._callEndStory), and
-    MitraChannel._authenticate already sends `access_token: None` on the
+    WsChannel._authenticate already sends `access_token: None` on the
     socket -- finalising as an authenticated user contradicted both.
 
     Do not move either half back without the other, and not at all without a
@@ -130,8 +152,8 @@ def test_finalize_is_v1_and_tokenless_because_only_that_renders_the_mom_report()
     text-checked PDF (scripts/verify_discussion_report.py) to prove it.
     """
     remote = _load_spec().remote
-    assert remote.finalize_path == "/api/end-story/"
-    assert remote.finalize_as_guest is True
+    assert remote.options["finalize_path"] == "/api/end-story/"
+    assert remote.options["finalize_as_guest"] is True
 
 
 def test_memory_strategy_is_none_not_recent():

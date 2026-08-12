@@ -493,6 +493,10 @@ class ConversationMessage(AuditMixin, Base):
     # interaction affordances
     options: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     selected_option_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Downloadable documents this reply produced. NOT options: an option is
+    # click-to-reply, so a URL there would be posted back as user input. One
+    # entry per file, so a document offered as PDF and DOCX is two entries.
+    attachments: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
     # telemetry
     model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -507,6 +511,7 @@ class ConversationMessage(AuditMixin, Base):
         CheckConstraint("seq > 0", name="seq"),
         CheckConstraint("role <> 'assistant' OR agent_id IS NOT NULL", name="assistant_attribution"),
         CheckConstraint("options IS NULL OR role = 'assistant'", name="options_only_assistant"),
+        CheckConstraint("attachments IS NULL OR role = 'assistant'", name="attachments_only_assistant"),
         CheckConstraint("COALESCE(prompt_tokens, 0) >= 0 AND COALESCE(completion_tokens, 0) >= 0",
                         name="tokens"),
         CheckConstraint("COALESCE(latency_ms, 0) >= 0", name="latency"),

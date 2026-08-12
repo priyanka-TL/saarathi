@@ -43,7 +43,7 @@ class RequestIDFilter(logging.Filter):
     """Stamps the current request id onto every record.
 
     Reads the ContextVar set by RequestIDMiddleware. Outside a request (startup,
-    the Mitra reader/reaper threads, CLI scripts) it resolves to None, exactly
+    the provider reader/reaper threads, CLI scripts) it resolves to None, exactly
     as the previous `has_request_context()` guard did.
 
     MUST be installed on a HANDLER. See the module docstring.

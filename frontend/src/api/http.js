@@ -1,6 +1,7 @@
 import axios from 'axios';
 
 import { API_BASE_URL } from '../config/env';
+import { readAuthToken, writeAuth } from '../utils/storage';
 
 /**
  * The single axios instance every API module uses.
@@ -28,6 +29,29 @@ export const http = axios.create({
 });
 
 /**
+ * Attaches the logged-in user's ELEVATE token to every request, read fresh
+ * from storage each time (not captured once at module load) so a login or
+ * logout in the same tab takes effect on the very next call.
+ */
+http.interceptors.request.use((config) => {
+  const token = readAuthToken();
+  if (token) {
+    config.headers = { ...config.headers, Authorization: `Bearer ${token}` };
+  }
+  return config;
+});
+
+/**
+ * A 401 means the token Saarthi validated is gone or rejected -- clear it so
+ * the next render's RequireAuth redirects to /login, rather than looping the
+ * same dead token onto every subsequent call.
+ */
+http.interceptors.response.use((response) => {
+  if (response.status === 401) writeAuth(null, null);
+  return response;
+});
+
+/**
  * Normalised result shape: `{ status, ok, data }`.
  *
  * `data` is null when the response had no parseable body. A transport-level
@@ -45,3 +69,8 @@ export async function request(config) {
 
 export const get = (url, config) => request({ ...config, method: 'GET', url });
 export const post = (url, data, config) => request({ ...config, method: 'POST', url, data });
+// PATCH for the sparse profile update -- sending only the fields that changed
+// is what stops a form editing one of them from blanking the rest. Both
+// interceptors above are method-agnostic, so it carries the bearer token and
+// honours the 401 rule with no extra wiring.
+export const patch = (url, data, config) => request({ ...config, method: 'PATCH', url, data });

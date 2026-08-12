@@ -34,6 +34,7 @@ export function makeItem(kind, fields = {}) {
     timestamp: new Date(),
     options: null,
     selectedOptionId: null,
+    attachments: null,
     agentSessionId: null,
     readOnly: false,
     reportUrl: null,

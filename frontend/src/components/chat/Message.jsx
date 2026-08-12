@@ -1,7 +1,8 @@
 import { COPY } from '../../constants';
 import { formatTime } from '../../utils/time';
-import { safeReportUrl } from '../../utils/url';
+import { safeHttpsUrl } from '../../utils/url';
 import { BotIcon, UserIcon } from '../icons';
+import MessageAttachments from './MessageAttachments';
 import MessageOptions from './MessageOptions';
 import SpeakerButton from './SpeakerButton';
 
@@ -27,7 +28,9 @@ function Meta({ timestamp, agentName, showAgent }) {
 }
 
 export default function Message({ item, onSelectOption, speech }) {
-  const { kind, content, agentName, timestamp, options, readOnly, selectedOptionId } = item;
+  const {
+    kind, content, agentName, timestamp, options, readOnly, selectedOptionId, attachments,
+  } = item;
 
   // Centred pill. Bare .message-content, nothing else.
   if (kind === 'context-switch') {
@@ -67,7 +70,7 @@ export default function Message({ item, onSelectOption, speech }) {
   // 'session-complete' carries a report link appended INSIDE .message-text,
   // which is what the original's _appendReportAction did -- not into
   // .message-content, which also holds the meta row.
-  const reportUrl = kind === 'session-complete' ? safeReportUrl(item.reportUrl) : null;
+  const reportUrl = kind === 'session-complete' ? safeHttpsUrl(item.reportUrl) : null;
 
   return (
     <div className={`message ${isAgent ? 'agent' : 'system'}`}>
@@ -94,6 +97,20 @@ export default function Message({ item, onSelectOption, speech }) {
               )}
             </div>
           )}
+          {/*
+            INSIDE .message-content, between the text and the meta row -- the
+            same place the Mitra report link sits, so a document reads as part
+            of the reply rather than as a separate control below it.
+
+            It cannot go inside .message-text for an agent bubble: that div is
+            dangerouslySetInnerHTML, so React children cannot be appended to it.
+            Directly after it is the same thing visually and is as close as the
+            two can be brought.
+
+            Being inside .message-content is why the CSS has to be qualified --
+            see the specificity note in style.css.
+          */}
+          <MessageAttachments attachments={attachments} />
           <div className="message-footer">
             <Meta timestamp={timestamp} agentName={agentName} showAgent />
             {/*

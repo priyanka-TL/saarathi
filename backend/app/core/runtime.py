@@ -3,41 +3,53 @@
 Responsible for: refusing configurations that would duplicate process-local state.
 Used by: app/main.py's __main__ block, at startup.
 
-Both guards exist for the same reason: MitraSessionManager is an in-process pool
-of live WebSockets, each with its own reader thread. A second copy of the
-process silently doubles it.
+Both guards exist for the same reason: a provider with a stateful transport
+holds an in-process pool of live WebSockets, each with its own reader thread. A
+second copy of the process silently doubles it.
 
-Both raise rather than assert -- `assert` is stripped under `python -O`, which
-is exactly the deployment mode where the guard matters most.
+THEY TAKE PROVIDER NAMES, NOT FLAGS. These used to be spelled in terms of two
+named `*_ENABLED` settings, so every new platform meant editing both guards and
+remembering which of them applied. The hazard was never a particular platform --
+it is process-local socket state, which a provider declares for itself with
+`stateful_transport`. A deployment running only stateless providers is
+legitimately free of the constraint, which the old spelling could not express.
+
+Both raise rather than assert -- `assert` is stripped under `python -O`, which is
+exactly the deployment mode where the guard matters most.
 """
 from __future__ import annotations
 
+from typing import Sequence
 
-def resolve_reloader(mitra_enabled) -> bool:
+
+def _describe(stateful: Sequence[str]) -> str:
+    return " and ".join(sorted(stateful))
+
+
+def resolve_reloader(stateful_providers: Sequence[str]) -> bool:
     """Whether the uvicorn auto-reloader may run.
 
-    Never under MITRA_ENABLED=1: the reloader re-execs a child that re-runs all
-    module-level setup, double-booting Mitra's websocket state.
+    Never while a socket-pooling provider is enabled: the reloader re-execs a
+    child that re-runs all module-level setup, double-booting the socket state.
     """
-    use_reloader = not bool(mitra_enabled)
-    if mitra_enabled and use_reloader:
-        raise RuntimeError("MITRA_ENABLED=1 requires the uvicorn reloader to be off.")
-    return use_reloader
+    return not list(stateful_providers)
 
 
-def assert_single_worker(mitra_enabled, workers: int) -> None:
-    """MITRA_ENABLED=1 must run in exactly one worker process.
+def assert_single_worker(stateful_providers: Sequence[str], workers: int) -> None:
+    """A socket-pooling provider must run in exactly one worker process.
 
     Channels are pooled per conversation in process memory, but a conversation's
-    next turn can be dispatched to any worker -- which opens a SECOND Mitra
-    channel for the same interview. The advisory lock serialises turns; it does
-    not route them to the process holding the socket. Disconnecting also stamps
-    Mitra's completion field, so the duplicate is not merely wasteful.
+    next turn can be dispatched to any worker -- which opens a SECOND channel for
+    the same conversation. The advisory lock serialises turns; it does not route
+    them to the process holding the socket. Disconnecting also stamps the remote
+    side's completion field, so the duplicate is not merely wasteful.
 
     Scale with THREADPOOL_SIZE, not --workers.
     """
-    if mitra_enabled and workers > 1:
+    stateful = list(stateful_providers)
+    if stateful and workers > 1:
         raise RuntimeError(
-            f"MITRA_ENABLED=1 requires a single worker process, got workers={workers}. "
+            f"provider(s) {_describe(stateful)} pool sockets in process memory and "
+            f"require a single worker process, got workers={workers}. "
             "Scale with THREADPOOL_SIZE instead."
         )

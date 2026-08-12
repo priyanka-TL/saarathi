@@ -39,7 +39,6 @@ def get_orchestrator(
         registry=container.agent_registry,
         handler_factory=container.handler_factory,
         llm_factory=container.llm_factory,
-        mitra_sessions=container.mitra_sessions,
-        mitra_clients=container.mitra_clients,
+        providers=container.providers,
         settings=container.settings,
     )

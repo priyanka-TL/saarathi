@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import ChatHistorySection from '../components/sidebar/ChatHistorySection.jsx';
 import Sidebar from '../components/sidebar/Sidebar.jsx';
+import { AuthProvider } from '../context/AuthContext.jsx';
+import { ProfileProvider } from '../context/ProfileContext.jsx';
 
 const never = () => false;
 
@@ -23,28 +25,41 @@ const section = (over = {}) => (
 );
 
 /**
- * The full rail. Sidebar pulls from no context and no router, so it renders
- * with plain props -- empty capabilities/agents keep AdvancedSection inert
- * without stubbing it.
+ * The full rail. Sidebar pulls from no router, so it renders with plain
+ * props plus the two providers it reads -- empty capabilities/agents keep
+ * AdvancedSection inert without stubbing it.
+ *
+ * AuthProvider: LogoutRow reads useAuth(). ProfileProvider: ProfileRow
+ * reads useProfile(). Both are what ChatPage gets via App.jsx in production.
+ *
+ * NO NETWORK STUB NEEDED, and that is by design rather than luck:
+ * ProfileProvider only fetches when authenticated, and there is no token in
+ * localStorage here -- so the rail renders with an empty profile and makes no
+ * request. Keep that property; a provider that fetched unconditionally would
+ * fire unmocked axios into jsdom from every test in this file.
  */
 const sidebar = (over = {}) => (
-  <Sidebar
-    open
-    onClose={vi.fn()}
-    conversations={conversations}
-    activeConversationId="c1"
-    onSelectConversation={vi.fn()}
-    onNewChat={vi.fn()}
-    agents={[]}
-    capabilities={[]}
-    activeCard={null}
-    activeAgentKey={null}
-    onRunAction={vi.fn()}
-    onSelectAgent={vi.fn()}
-    isBusy={never}
-    toast={null}
-    {...over}
-  />
+  <AuthProvider>
+    <ProfileProvider>
+    <Sidebar
+      open
+      onClose={vi.fn()}
+      conversations={conversations}
+      activeConversationId="c1"
+      onSelectConversation={vi.fn()}
+      onNewChat={vi.fn()}
+      agents={[]}
+      capabilities={[]}
+      activeCard={null}
+      activeAgentKey={null}
+      onRunAction={vi.fn()}
+      onSelectAgent={vi.fn()}
+      isBusy={never}
+      toast={null}
+      {...over}
+    />
+    </ProfileProvider>
+  </AuthProvider>
 );
 
 describe('the Chat History disclosure', () => {

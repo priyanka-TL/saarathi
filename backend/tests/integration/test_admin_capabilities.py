@@ -47,9 +47,11 @@ def _document_for(tenant_code: str, *, org_id: str = "default") -> dict:
 def admin_client(flask_app, monkeypatch):
     """A client authenticated as an admin.
 
-    Patches `Authenticator.authenticate()`, the single identity source now --
-    see app/services/identity.py. The `Authorization` header sent below is
-    inert (nothing reads it) but harmless to include.
+    Patches `Authenticator.authenticate()` directly rather than sending a real
+    bearer token: simplest way to force this specific admin identity
+    regardless of AUTH_CHECK/ELEVATE_JWT_SECRET in the test environment. The
+    lambda ignores its `token` argument on purpose -- this fixture wants THIS
+    admin, not whatever a header would decode to.
     """
     from app.domain.core import OrgMembership
 
@@ -60,7 +62,8 @@ def admin_client(flask_app, monkeypatch):
         active_org_id="o",
     )
     monkeypatch.setattr(
-        "app.services.identity.Authenticator.authenticate", lambda self: admin_user
+        "app.services.identity.Authenticator.authenticate",
+        lambda self, token=None: admin_user,
     )
 
     from starlette.testclient import TestClient

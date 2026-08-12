@@ -89,11 +89,11 @@ def test_error_bodies_now_carry_status_and_error_code(client):
 def test_mitra_turn_timeout_maps_to_504(client, monkeypatch):
     """A Mitra timeout must be distinguishable from any other failure -- the
     session survives a 504, so the client knows a retry is safe."""
-    from app.integrations.mitra.exceptions import MitraTurnTimeout
+    from app.providers.errors import ProviderTurnTimeout
     from app.services.orchestration import OrchestrationService
 
     def _raise(self, ctx_in):
-        raise MitraTurnTimeout(step=3)
+        raise ProviderTurnTimeout(step=3)
 
     monkeypatch.setattr(OrchestrationService, "handle_turn", _raise)
 
@@ -106,11 +106,11 @@ def test_mitra_turn_timeout_maps_to_504(client, monkeypatch):
 
 
 def test_other_mitra_failures_map_to_502(client, monkeypatch):
-    from app.integrations.mitra.exceptions import MitraHTTPError
+    from app.providers.errors import ProviderHTTPError
     from app.services.orchestration import OrchestrationService
 
     def _raise(self, ctx_in):
-        raise MitraHTTPError("POST", "/api/end-story/v2/", 503)
+        raise ProviderHTTPError("Mitra", "POST", "/api/end-story/v2/", 503)
 
     monkeypatch.setattr(OrchestrationService, "handle_turn", _raise)
 

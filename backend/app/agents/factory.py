@@ -21,13 +21,16 @@ import app.agents
 class HandlerDeps:
     llm_factory: Any
     tool_registry: Any
-    # A MitraClientRegistry, not a single client: the REST client carries the
-    # base URL, timeouts and the Origin credential, all of which now resolve
-    # per agent and per tenant. Handlers ask the registry for the client their
-    # own resolved connection needs.
-    mitra_clients: Any
-    mitra_sessions: Any
     settings: Any
+    # A ProviderRegistry, not a client and not a per-platform slot: a provider
+    # instance carries the base URL, timeouts, endpoint paths and credentials,
+    # all of which resolve per agent and per tenant. The handler asks the
+    # registry for the one its own resolved spec names.
+    #
+    # This replaced four named vendor slots. Their cost was not the four lines:
+    # it was that HandlerDeps, the container, and every test that built either
+    # had to change shape whenever a platform was added.
+    providers: Any = None
 
 # UnknownAgentType now lives in app/exceptions/domain.py (imported above).
 

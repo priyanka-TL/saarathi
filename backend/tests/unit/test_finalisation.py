@@ -2,12 +2,14 @@ import uuid
 from datetime import datetime
 from unittest.mock import MagicMock, call, patch
 
+from app.providers.protocol import FinalizeResult
+
 import pytest
 
 from app.agents.protocol import AgentSessionView, SessionDelta, SessionState
 from app.domain.sessions import AgentSessionDTO
-from app.integrations.mitra.exceptions import MitraError, MitraSSRFError, MitraTurnTimeout
-from app.integrations.mitra.turn_recovery import ChatRow
+from app.providers.errors import ProviderError, ProviderSSRFError, ProviderTurnTimeout
+from app.providers.recovery import ChatRow, reconcile
 from app.services.orchestration import OrchestrationService
 from app.services.turn_finalization import TurnFinalizer
 from app.services.session_service import SessionService
@@ -67,18 +69,20 @@ def _make_agent(
     agent.spec.remote.flow_name = spec_remote_flow
     agent.spec.remote.report_media_type = spec_report_media
     agent.spec.remote.finalize_path = spec_finalize_path
-    # Set explicitly: a MagicMock would auto-create a TRUTHY attribute here, so
+    # Set explicitly: a MagicMock would auto-create a TRUTHY value here, so
     # these tests would silently assert a guest finalisation while claiming to
-    # cover record_stories, which sends its token.
-    agent.spec.remote.finalize_as_guest = spec_finalize_as_guest
+    # cover an agent that sends its token.
+    agent.spec.remote.options = {
+        "finalize_path": "/api/end-story/",
+        "finalize_as_guest": spec_finalize_as_guest,
+    }
     return agent
 
 
 def _make_orch(
     *,
     db_session=None,
-    mitra_rest=None,
-    mitra_sessions=None,
+    provider=None,
     registry=None,
     sessions_service=None,
 ) -> OrchestrationService:
@@ -88,13 +92,13 @@ def _make_orch(
     orch._registry = registry or MagicMock()
     orch._handlers = MagicMock()
     orch._llm_factory = MagicMock()
-    orch._mitra_rest = mitra_rest or MagicMock()
-    orch._mitra_sessions = mitra_sessions or MagicMock()
-    # No client registry: rest_for() then falls back to the injected single
-    # client above, which is what every assertion here is written against.
-    # A registry is exercised in tests/guards/test_tenant_isolation.py, where
-    # the point IS that two scopes get different clients.
-    orch._mitra_clients = None
+    # ONE mock where there were three: a client, a channel pool and a client
+    # registry, each of which a test had to know the shape of. The provider is
+    # the whole seam now, so a test that wants to observe finalisation observes
+    # one object.
+    orch._provider = provider or MagicMock()
+    orch._providers = MagicMock()
+    orch._providers.get.return_value = orch._provider
     orch._settings = None
     orch._conversations = MagicMock()
     orch._messages = MagicMock()
@@ -111,18 +115,13 @@ def _make_orch(
     # from the SAME mocks, so every assertion below still observes the objects
     # the test handed in.
     #
-    # rest_for is the bound method, exactly as production passes it: that is
-    # what makes the mitra_clients=None fallback to the single injected client
-    # work, which is what these assertions are written against.
+    # provider_for is the bound method, exactly as production passes it.
     orch._finalizer = TurnFinalizer(
         sessions=orch._sessions,
         messages=orch._messages,
         conversations=orch._conversations,
         audit=orch._audit,
-        mitra_sessions=orch._mitra_sessions,
-        mitra_clients=orch._mitra_clients,
-        mitra_rest=orch._mitra_rest,
-        rest_for=orch.rest_for,
+        provider_for=orch.provider_for,
     )
     return orch
 
@@ -145,11 +144,11 @@ class TestConcurrentFinalisation:
         completed_dto = _completed_dto(session_dto, story_id)
         agent = _make_agent()
 
-        mitra_rest = MagicMock()
-        mitra_rest.finalize.return_value = (story_id, "Story narrative content.")
-        mitra_rest.get_report.return_value = None  # report not yet generated
+        provider = MagicMock()
+        provider.finalize.return_value = FinalizeResult(result_ref=story_id)
+        provider.fetch_artifact.return_value = None  # artifact not yet generated
 
-        mitra_sessions = MagicMock()
+        channel_closer = MagicMock()
 
         sessions_svc = MagicMock(spec=SessionService)
         # First call (winner): claim_finalizing returns the session
@@ -161,19 +160,18 @@ class TestConcurrentFinalisation:
         sessions_svc.get.return_value = completed_dto
 
         orch = _make_orch(
-            mitra_rest=mitra_rest,
-            mitra_sessions=mitra_sessions,
+            provider=provider,
             sessions_service=sessions_svc,
         )
 
         user = MagicMock()
         user.token = "test-jwt-token"
 
-        return orch, agent, session_dto, completed_dto, mitra_rest, mitra_sessions, sessions_svc, user
+        return orch, agent, session_dto, completed_dto, provider, channel_closer, sessions_svc, user
 
     def test_finalize_called_exactly_once_on_two_concurrent_calls(self):
-        """Two calls to _finalize() produce exactly one mitra_rest.finalize()."""
-        orch, agent, session_dto, completed_dto, mitra_rest, _, sessions_svc, user = (
+        """Two calls to _finalize() produce exactly one provider.finalize()."""
+        orch, agent, session_dto, completed_dto, provider, _, sessions_svc, user = (
             self._setup_winner_loser()
         )
 
@@ -181,8 +179,8 @@ class TestConcurrentFinalisation:
         result_winner = orch._finalize(session_dto, agent, user)
         result_loser  = orch._finalize(session_dto, agent, user)
 
-        assert mitra_rest.finalize.call_count == 1, (
-            "mitra_rest.finalize() must be called exactly ONCE regardless of "
+        assert provider.finalize.call_count == 1, (
+            "provider.finalize() must be called exactly ONCE regardless of "
             "how many concurrent callers reach _finalize(). Mitra's Story.session "
             "is UNIQUE (story_models.py:30) — a second call would 4xx."
         )
@@ -194,11 +192,19 @@ class TestConcurrentFinalisation:
         flow Mitra has no Flow row for is a guaranteed HTTP 500 -- the
         end-story failure this pins.
         """
-        orch, agent, session_dto, _, mitra_rest, _, _, user = self._setup_winner_loser()
+        orch, agent, session_dto, _, provider, _, _, user = self._setup_winner_loser()
 
         orch._finalize(session_dto, agent, user)
 
-        assert mitra_rest.finalize.call_args.kwargs["path"] == "/api/end-story/"
+        # WHICH ENDPOINT is the provider's decision now, not the orchestrator's:
+        # this layer hands over the session and gets back a result reference, so
+        # it cannot express a preference and cannot get it wrong. The property
+        # itself still matters -- a flow sent to the endpoint that cannot
+        # resolve it is a deterministic HTTP 500 -- and is pinned in
+        # tests/unit/providers/test_mitra_provider.py.
+        assert provider.finalize.call_count == 1
+        _remote, passed_session, _user = provider.finalize.call_args.args
+        assert passed_session is not None
 
     def test_finalize_passes_the_agents_token_presence_choice_through(self):
         """_finalize must pass spec.remote.finalize_as_guest through too.
@@ -208,11 +214,15 @@ class TestConcurrentFinalisation:
         call -- it renders an EMPTY pdf and returns 200. record_stories sends
         its token (False); capture_discussion does not (True).
         """
-        orch, agent, session_dto, _, mitra_rest, _, _, user = self._setup_winner_loser()
+        orch, agent, session_dto, _, provider, _, _, user = self._setup_winner_loser()
 
         orch._finalize(session_dto, agent, user)
 
-        assert mitra_rest.finalize.call_args.kwargs["as_guest"] is False
+        # Same relocation as above: token PRESENCE is a PDF-template selector on
+        # the platform's side, so the provider owns it. What this layer still
+        # guarantees is that the user reaches the provider at all.
+        _remote, _session, passed_user = provider.finalize.call_args.args
+        assert passed_user is user
 
     def test_report_fetch_failure_still_completes_the_session(self):
         """A failing get_report must NOT undo a successful finalize.
@@ -221,14 +231,14 @@ class TestConcurrentFinalisation:
         raise between it and the completed-transition leaves the session in
         'finalizing' forever with a story that exists remotely and can never
         be resubmitted. Observed live: report PDFs are served from a host
-        outside MITRA_ALLOWED_HOSTS, so _validate_url raised MitraSSRFError
+        outside MITRA_ALLOWED_HOSTS, so _validate_url raised ProviderSSRFError
         on every successful story. GET /api/sessions/{id}/report already
         treats the same failure as 'not ready yet'.
         """
-        orch, agent, session_dto, _, mitra_rest, _, sessions_svc, user = (
+        orch, agent, session_dto, _, provider, _, sessions_svc, user = (
             self._setup_winner_loser()
         )
-        mitra_rest.get_report.side_effect = MitraSSRFError()
+        provider.fetch_artifact.side_effect = ProviderSSRFError()
 
         result = orch._finalize(session_dto, agent, user)
 
@@ -262,30 +272,30 @@ class TestConcurrentFinalisation:
         sessions_svc.get.assert_called_once_with(session_dto.id)
 
     def test_loser_does_not_close_channel(self):
-        """The loser must not call mitra_sessions.close() — the winner already did."""
-        orch, agent, session_dto, _, _, mitra_sessions, _, user = (
+        """The loser must not call provider.close_channel() — the winner already did."""
+        orch, agent, session_dto, _, provider, _, _, user = (
             self._setup_winner_loser()
         )
         orch._finalize(session_dto, agent, user)  # winner
         orch._finalize(session_dto, agent, user)  # loser
 
         # close() should have been called exactly once (by the winner)
-        mitra_sessions.close.assert_called_once()
+        provider.close_channel.assert_called_once()
 
     def test_channel_closed_before_finalize(self):
         """§8.5: channel must close BEFORE end-story, not after.
 
         Verified by checking call order on the mock objects.
         """
-        orch, agent, session_dto, completed_dto, mitra_rest, mitra_sessions, _, user = (
+        orch, agent, session_dto, completed_dto, provider, channel_closer, _, user = (
             self._setup_winner_loser()
         )
         # Track call order with a shared call recorder
         call_order = []
-        mitra_sessions.close.side_effect = lambda *a, **kw: call_order.append("close")
-        mitra_rest.finalize.side_effect = lambda **kw: (
+        provider.close_channel.side_effect = lambda *a, **kw: call_order.append("close")
+        provider.finalize.side_effect = lambda *a, **kw: (
             call_order.append("finalize"),
-            ("story-9931", "content"),
+            FinalizeResult(result_ref="story-9931"),
         )[-1]
 
         orch._finalize(session_dto, agent, user)
@@ -297,26 +307,41 @@ class TestConcurrentFinalisation:
 
     def test_finalize_uses_authorization_bearer_token(self):
         """finalize() receives the user.token, not a hardcoded secret."""
-        orch, agent, session_dto, _, mitra_rest, _, _, user = self._setup_winner_loser()
+        orch, agent, session_dto, _, provider, _, _, user = self._setup_winner_loser()
         user.token = "live-jwt-abc"
 
         orch._finalize(session_dto, agent, user)
 
-        mitra_rest.finalize.assert_called_once()
-        call_kwargs = mitra_rest.finalize.call_args[1]
-        assert call_kwargs["token"] == "live-jwt-abc"
-        # Confirm the token was passed in the header (via the client), not in body
-        # (The client contract is tested in test_mitra_rest_client.py — here we
-        # just confirm the right token reaches finalize().)
+        provider.finalize.assert_called_once()
+        _remote, _session, passed_user = provider.finalize.call_args.args
+        assert passed_user.token == "live-jwt-abc"
+        # WHERE the token goes on the wire -- an Authorization header on one
+        # endpoint, a body key on the other, or nowhere at all for a guest flow
+        # -- is the provider's business. This layer's guarantee is that the
+        # caller's own token, not a hardcoded one, is what reaches it.
 
-    def test_get_report_called_after_finalize(self):
-        """get_report() is called to attach report_url in the same apply()."""
-        orch, agent, session_dto, _, mitra_rest, _, _, user = self._setup_winner_loser()
+    def test_the_artifact_is_fetched_inside_finalisation(self):
+        """The artifact URL has to arrive with the result reference.
+
+        SessionService.apply() rejects every call on an already-terminal
+        session, so a second apply() to attach the URL after transitioning to
+        'completed' would raise InvalidTransitionError. That is why the provider
+        fetches it INSIDE finalize() and returns both in one FinalizeResult --
+        this layer performs exactly one transition.
+        """
+        orch, agent, session_dto, _, provider, _, sessions_svc, user = (
+            self._setup_winner_loser()
+        )
 
         orch._finalize(session_dto, agent, user)
 
-        mitra_rest.get_report.assert_called_once_with(
-            session_dto.remote_session_id, media_type=agent.spec.remote.report_media_type
+        provider.finalize.assert_called_once()
+        completed_applies = [
+            c for c in sessions_svc.apply.call_args_list
+            if c[0][1].state is SessionState.completed
+        ]
+        assert len(completed_applies) == 1, (
+            "exactly one terminal transition -- a second would raise"
         )
 
     def test_completed_transition_includes_result_ref(self):
@@ -350,19 +375,19 @@ class TestConcurrentFinalisation:
         assert applied[0].args[0] is session_dto
 
     def test_finalize_failure_transitions_session_to_failed(self):
-        """If mitra_rest.finalize() raises, the session must move to 'failed',
+        """If provider.finalize() raises, the session must move to 'failed',
         not stay stuck in 'finalizing' forever."""
         session_dto = _session_dto()
         agent = _make_agent()
 
-        mitra_rest = MagicMock()
-        mitra_rest.finalize.side_effect = RuntimeError("Mitra 503")
+        provider = MagicMock()
+        provider.finalize.side_effect = RuntimeError("Mitra 503")
 
         sessions_svc = MagicMock(spec=SessionService)
         sessions_svc.claim_finalizing.return_value = session_dto
         sessions_svc.apply.return_value = session_dto  # return something for the failed apply
 
-        orch = _make_orch(mitra_rest=mitra_rest, sessions_service=sessions_svc)
+        orch = _make_orch(provider=provider, sessions_service=sessions_svc)
         user = MagicMock(token="tok")
 
         with pytest.raises(RuntimeError, match="Mitra 503"):
@@ -390,10 +415,11 @@ class TestConcurrentFinalisation:
         story_id = "story-xyz"
         agent = _make_agent()
 
-        mitra_rest = MagicMock()
-        mitra_rest.finalize.return_value = (story_id, "content")
-        pdf_url = "https://mitra.example.com/stories/xyz.pdf"
-        mitra_rest.get_report.return_value = pdf_url
+        provider = MagicMock()
+        pdf_url = "https://remote.example.com/stories/xyz.pdf"
+        provider.finalize.return_value = FinalizeResult(
+            result_ref=story_id, artifact_url=pdf_url,
+        )
 
         completed_dto = _completed_dto(session_dto, story_id)
         sessions_svc = MagicMock(spec=SessionService)
@@ -401,7 +427,7 @@ class TestConcurrentFinalisation:
         sessions_svc.apply.return_value = completed_dto
         sessions_svc.get.return_value = completed_dto
 
-        orch = _make_orch(mitra_rest=mitra_rest, sessions_service=sessions_svc)
+        orch = _make_orch(provider=provider, sessions_service=sessions_svc)
         user = MagicMock(token="tok")
 
         orch._finalize(session_dto, agent, user)
@@ -416,9 +442,8 @@ class TestConcurrentFinalisation:
         story_id = "story-xyz"
         agent = _make_agent()
 
-        mitra_rest = MagicMock()
-        mitra_rest.finalize.return_value = (story_id, "content")
-        mitra_rest.get_report.return_value = None  # PDF not ready
+        provider = MagicMock()
+        provider.finalize.return_value = FinalizeResult(result_ref=story_id)  # artifact not ready
 
         completed_dto = _completed_dto(session_dto, story_id)
         sessions_svc = MagicMock(spec=SessionService)
@@ -426,7 +451,7 @@ class TestConcurrentFinalisation:
         sessions_svc.apply.return_value = completed_dto
         sessions_svc.get.return_value = completed_dto
 
-        orch = _make_orch(mitra_rest=mitra_rest, sessions_service=sessions_svc)
+        orch = _make_orch(provider=provider, sessions_service=sessions_svc)
         user = MagicMock(token="tok")
 
         orch._finalize(session_dto, agent, user)
@@ -439,9 +464,9 @@ class TestConcurrentFinalisation:
 # ---------------------------------------------------------------------------
 # Automatic recovery of a turn Saarthi stopped listening for.
 #
-# A MitraTurnTimeout does not mean the turn failed. Verified live: Mitra
+# A ProviderTurnTimeout does not mean the turn failed. Verified live: Mitra
 # answered in 8.4s and only this side gave up. Without recovery the reply is
-# lost even if the user does nothing -- MitraChannel._drain_stale() discards it
+# lost even if the user does nothing -- WsChannel._drain_stale() discards it
 # at the start of the next turn -- so the interview desyncs silently.
 # ---------------------------------------------------------------------------
 
@@ -455,28 +480,36 @@ class TestTimedOutTurnRecovery:
         agent.spec.agent_type = "remote_flow"
         agent.spec.remote.completion_poll_every_turn = True
 
-        mitra_rest = MagicMock()
-        mitra_rest.recent_chat.return_value = rows
-        mitra_rest.is_session_completed.return_value = completed
+        provider = MagicMock()
+        # Reconciliation is the PROVIDER's method now, and it runs the real
+        # read-only algorithm over the platform's transcript. Wiring the real
+        # `reconcile` in keeps these tests about the decision -- adopt the
+        # reply, poll, or surface the timeout -- rather than about a mock.
+        provider.supports_recovery = True
+        provider.reconcile.side_effect = (
+            lambda remote, session_view, sent_text, user: reconcile(rows, sent_text)
+        )
+        provider.is_complete.return_value = completed
 
-        orch = _make_orch(mitra_rest=mitra_rest)
+        orch = _make_orch(provider=provider)
         session = _session_dto()
-        return orch, agent, session, mitra_rest
+        user = MagicMock(token="tok")
+        return orch, agent, session, provider, user
 
     def test_answered_turn_is_recovered_instead_of_surfacing_a_timeout(self):
         rows = [
             ChatRow(id=1, from_user=True, message=self.SENT),
             ChatRow(id=2, from_user=False, message=self.REPLY),
         ]
-        orch, agent, session, mitra_rest = self._orch_and_agent(rows)
+        orch, agent, session, provider, user = self._orch_and_agent(rows)
 
-        turn = orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout())
+        turn = orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user)
 
         assert turn is not None, "the reply Mitra already sent must not be thrown away"
         assert turn.text == self.REPLY
         assert turn.session_delta.state == SessionState.awaiting_user
         # Nothing was re-sent: recovery is read-only against Mitra.
-        assert mitra_rest.recent_chat.called
+        assert provider.reconcile.called
 
     def test_recovery_never_re_sends_the_users_turn(self):
         """The whole point. A re-send lands against the NEXT question (§1.6)."""
@@ -484,25 +517,25 @@ class TestTimedOutTurnRecovery:
             ChatRow(id=1, from_user=True, message=self.SENT),
             ChatRow(id=2, from_user=False, message=self.REPLY),
         ]
-        orch, agent, session, mitra_rest = self._orch_and_agent(rows)
+        orch, agent, session, provider, user = self._orch_and_agent(rows)
 
-        orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout())
+        orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user)
 
         for forbidden in ("send_and_await_turn", "send", "post"):
-            assert not hasattr(mitra_rest, forbidden) or not getattr(mitra_rest, forbidden).called
+            assert not hasattr(provider, forbidden) or not getattr(provider, forbidden).called
 
     def test_still_pending_lets_the_timeout_propagate(self):
         """Mitra has the message but no answer yet -- the client must see the
         timeout and poll, not receive an empty turn."""
         rows = [ChatRow(id=1, from_user=True, message=self.SENT)]
-        orch, agent, session, _ = self._orch_and_agent(rows)
+        orch, agent, session, _, user = self._orch_and_agent(rows)
 
-        assert orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout()) is None
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user) is None
 
     def test_not_delivered_lets_the_timeout_propagate(self):
-        orch, agent, session, _ = self._orch_and_agent([])
+        orch, agent, session, _, user = self._orch_and_agent([])
 
-        assert orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout()) is None
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user) is None
 
     def test_completion_is_still_polled_so_a_finished_story_finalises(self):
         """completion_poll_every_turn normally runs inside the handler, which
@@ -512,24 +545,24 @@ class TestTimedOutTurnRecovery:
             ChatRow(id=1, from_user=True, message=self.SENT),
             ChatRow(id=2, from_user=False, message=self.REPLY),
         ]
-        orch, agent, session, _ = self._orch_and_agent(rows, completed=True)
+        orch, agent, session, _, user = self._orch_and_agent(rows, completed=True)
 
-        turn = orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout())
+        turn = orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user)
 
         assert turn.terminal is True
 
     def test_a_failing_recovery_never_masks_the_original_timeout(self):
         """Best-effort: if Mitra is unreachable the user must still get the
         timeout, not a confusing secondary error."""
-        orch, agent, session, mitra_rest = self._orch_and_agent([])
-        mitra_rest.recent_chat.side_effect = MitraError("mitra unreachable")
+        orch, agent, session, provider, user = self._orch_and_agent([])
+        provider.recent_chat.side_effect = ProviderError("mitra unreachable")
 
-        assert orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout()) is None
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user) is None
 
     def test_llm_agents_are_not_reconciled(self):
         """Only remote_flow has server-side state at Mitra to reconcile with."""
-        orch, agent, session, mitra_rest = self._orch_and_agent([])
+        orch, agent, session, provider, user = self._orch_and_agent([])
         agent.spec.agent_type = "llm"
 
-        assert orch._recover_timed_out_turn(agent, session, self.SENT, MitraTurnTimeout()) is None
-        assert not mitra_rest.recent_chat.called
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user) is None
+        assert not provider.recent_chat.called

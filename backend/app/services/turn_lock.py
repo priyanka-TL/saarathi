@@ -3,7 +3,7 @@
 Responsible for: guaranteeing at most one turn in flight per conversation.
 Used by: OrchestrationService.handle_turn, around the whole turn.
 
-WHY IT EXISTS: two concurrent posts for one conversation both reached Mitra,
+WHY IT EXISTS: two concurrent posts for one conversation both reached the platform,
 where two user messages in a row MERGE and the first answer is lost (§1.6).
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ class ConversationTurnLock:
 
         SESSION-scoped (pg_try_advisory_lock), not transaction-scoped, and
         deliberately so. A transaction-scoped lock would have to stay open
-        across handler.handle(), and handler.handle() is a Mitra round trip of
+        across handler.handle(), and handler.handle() is a remote round trip of
         up to 60s -- holding a database transaction (and its pooled connection)
         for that long is exactly what test_no_transaction_held_during_handler
         exists to prevent. A session-scoped lock spans the commit at step 8
@@ -54,7 +54,7 @@ class ConversationTurnLock:
         NON-BLOCKING, so a genuine double-submit is refused rather than queued
         and then executed a second time. Queueing would be the wrong answer
         anyway: the second copy of the same answer is exactly what triggers
-        Mitra's consecutive-same-sender merge and destroys the first (§1.6).
+        the platform's consecutive-same-sender merge and destroys the first.
         """
         if not self._is_postgres():
             return True  # sqlite (unit tests) has no advisory locks

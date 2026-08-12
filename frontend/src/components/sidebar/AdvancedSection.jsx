@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-import { SIDEBAR_HIDDEN_KEYS } from '../../constants';
+import { hiddenAgentKeys } from '../../constants';
 import { cx } from '../../utils/cx';
 import { AgentIcon, ChevronDownIcon } from '../icons';
 import CapabilityCard from './CapabilityCard';
@@ -18,9 +18,8 @@ import CapabilityCard from './CapabilityCard';
  * TWO LISTS, TWO SOURCES. The capability cards come from the capability
  * document (src/config/capabilities.js and the layers above it); the manual
  * list underneath comes from GET /api/agents and always did. They are
- * separate catalogues and are not merged -- an agent reachable from a
- * capability button is deliberately hidden from the manual list, which is what
- * SIDEBAR_HIDDEN_KEYS does.
+ * separate catalogues and are not merged -- an agent reachable from a card is
+ * deliberately hidden from the manual list, which is what hiddenAgentKeys does.
  */
 export default function AdvancedSection({
   capabilities,
@@ -33,9 +32,11 @@ export default function AdvancedSection({
 }) {
   const [collapsed, setCollapsed] = useState(true);
 
-  // The manual list hides the three keys reachable another way. With the
-  // current YAML agents that leaves it EMPTY -- correct, current behaviour.
-  const listedAgents = agents.filter((a) => a.key && !SIDEBAR_HIDDEN_KEYS.has(a.key));
+  // Hide anything already reachable from a card, DERIVED from the capability
+  // document rather than from a hardcoded key list -- see hiddenAgentKeys.
+  // With the current catalogue that leaves this EMPTY, which is correct.
+  const hidden = hiddenAgentKeys(capabilities);
+  const listedAgents = agents.filter((a) => a.key && !hidden.has(a.key));
 
   return (
     <div className="advanced-section">

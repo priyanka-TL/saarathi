@@ -112,6 +112,10 @@ def get_conversation_messages(
                 # /api/chat does. The asymmetry is part of the contract.
                 "options": m.options,
                 "selected_option_id": m.selected_option_id,
+                # Same rule as options: RAW stored JSONB. This is what makes a
+                # document still downloadable after a reload -- the SPA rebuilds
+                # the buttons from here, so an omission is a lost document.
+                "attachments": m.attachments,
                 "created_at": m.created_at.isoformat(),
             }
             for m in messages

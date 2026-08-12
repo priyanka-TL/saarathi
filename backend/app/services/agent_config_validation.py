@@ -1,8 +1,20 @@
 """Validation and redaction for an agent configuration.
 
-Responsible for: rejecting a remote_flow config that would fail silently, and
-blanking unresolved credential placeholders before a config is returned.
+Responsible for: typing the provider-specific half of a config, rejecting one
+that would fail silently, and blanking unresolved credential placeholders.
 Used by: the admin router, on write and on read.
+
+TWO-STAGE VALIDATION, and this module is stage 2. `app.domain` is import-pure by
+contract, so `RemoteSpec` can validate the ENVELOPE but must leave
+`remote.options` opaque -- it cannot import a provider registry to find out what
+belongs in there. This is where the provider's own model gets to say.
+
+Both stages are strict. The envelope and every provider `options_model` set
+`extra="forbid"`, which closes a hole that was live for a long time: nested spec
+models inherited nothing from their parent's config, so a mistyped key inside
+`remote` was dropped in silence and the field took its default. For a finalize
+endpoint that meant an HTTP 200 and a downloadable, completely blank PDF,
+reachable by one doubled letter.
 """
 from __future__ import annotations
 
@@ -12,7 +24,7 @@ from typing import Any, Optional, Tuple
 #: string, so a reader can tell "this was removed" from "this was never set".
 REDACTED = "<REDACTED>"
 
-#: The marker of an unresolved environment reference, e.g. "${MITRA_TOKEN}".
+#: The marker of an unresolved environment reference, e.g. "${MITRA_ORIGIN_URL}".
 _ENV_PLACEHOLDER = "${"
 
 
@@ -24,7 +36,11 @@ def redact_secrets(data: Any) -> Any:
     replaced rather than the placeholder alone.
 
     Recurses through dicts and lists because a config is arbitrarily nested and
-    a secret is as likely to sit under `remote.connection` as at the top level.
+    a secret is as likely to sit under `remote.options` as at the top level.
+
+    Note this is a backstop, not the mechanism: credentials are referenced by
+    the NAME of an environment variable in `remote.auth`, and a name is not a
+    secret. This catches a config written the old way, by hand.
     """
     if isinstance(data, dict):
         return {k: redact_secrets(v) for k, v in data.items()}
@@ -35,37 +51,42 @@ def redact_secrets(data: Any) -> Any:
     return data
 
 
-def remote_config_problem(spec, settings) -> Optional[Tuple[list, str]]:
-    """Reject a remote_flow config that would fail SILENTLY at interview time.
+def remote_config_problem(spec, providers, settings) -> Optional[Tuple[list, str]]:
+    """Reject a remote_flow config that would fail SILENTLY at conversation time.
 
-    THIS IS THE ONLY GATE. There is no YAML and no startup sync any more, so a
-    config reaches Mitra exactly as it was written. `bot_route` and `company`
-    are non-empty by schema; what the schema cannot check is `finalize_path`,
-    because the endpoints are configurable and the domain layer cannot import
-    Settings to express them as a Literal.
+    Runs three checks, in order, each answering a question the previous one
+    makes safe to ask:
 
-    Getting it wrong is not a loud failure: anything unrecognised falls through
-    to the v1 branch and finalises with the wrong body shape, which Mitra
-    ACCEPTS -- returning a story, a story_media row, a 200 from get-story and a
-    downloadable, completely blank PDF, with nothing logged anywhere.
+      1. is `remote.provider` a name this deployment can serve?
+      2. does `remote.options` type-check against that provider's own model?
+      3. does the provider itself object to the resulting configuration?
 
-    :returns: ``(path, msg)`` for the error envelope, or None when the config
-        is fine. Returns rather than raises so the admin router can put it in
-        its own bare envelope.
+    Check 3 is where the platform-specific rules live -- and where they should:
+    they used to be written out here, so this module imported a vendor package
+    to resolve a connection and check one platform's finalize endpoints.
+
+    :returns: ``(path, msg)`` for the error envelope, or None when the config is
+        fine. Returns rather than raises so the admin router can put it in its
+        own bare envelope.
     """
-    from app.integrations.mitra.connection import resolve_connection
+    from app.providers.errors import ProviderConfigError, ProviderNotEnabled, UnknownProvider
 
     remote = spec.remote
-    # Against the endpoints THIS spec resolves to -- it may carry its own
-    # remote.connection.paths, and checking against the global pair would both
-    # reject correct configs and accept wrong ones.
-    paths = resolve_connection(settings, remote).paths
-    if not paths.is_known_finalize(remote.finalize_path):
-        return (
-            ["remote", "finalize_path"],
-            f"finalize_path {remote.finalize_path!r} matches neither the resolved "
-            f"v1 endpoint ({paths.finalize_v1!r}) nor the resolved v2 endpoint "
-            f"({paths.finalize_v2!r})",
-        )
 
-    return None
+    try:
+        provider = providers.get(remote)
+    except UnknownProvider as e:
+        return (["remote", "provider"], str(e))
+    except ProviderNotEnabled as e:
+        # Deliberately NOT an error. A config for a provider this deployment has
+        # switched off is a legitimate thing to write -- staging enables it,
+        # production does not, and both read the same rows. The agent is hidden
+        # at load time rather than rejected at write time.
+        del e
+        return None
+    except ProviderConfigError as e:
+        # Covers both a bad `options` block and credentials the environment
+        # cannot supply. The provider's own model produced the message.
+        return (["remote", "options"], str(e))
+
+    return provider.validate_config(remote, settings)

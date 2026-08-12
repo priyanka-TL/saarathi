@@ -27,6 +27,14 @@ os.environ["OPENROUTER_MODEL"] = "test/scripted-model"
 os.environ["LLM_TIMEOUT"] = "1"
 os.environ["LLM_MAX_RETRIES"] = "1"
 os.environ["LOG_LEVEL"] = "ERROR"
+# AUTH_CHECK=true has no fallback identity for a request with no bearer token
+# (removed -- it was an authentication bypass, see app/services/identity.py),
+# so the `client` fixture below has to send a REAL, verified token on every
+# request. This is what it's verified against -- a fixed, test-only value, so
+# the suite never depends on (or risks leaking) whatever real secret a
+# developer's own `.env` happens to have configured for ELEVATE_JWT_SECRET.
+TEST_ELEVATE_JWT_SECRET = "test-elevate-jwt-secret"
+os.environ["ELEVATE_JWT_SECRET"] = TEST_ELEVATE_JWT_SECRET
 # The whole suite is written against the unprefixed default (`client.post
 # ("/api/reset")`, not "/saarathi-service/api/reset"). A developer's local
 # `.env` sets API_PREFIX for THEIR OWN dev server -- e.g. to match a frontend
@@ -43,6 +51,54 @@ os.environ["API_PREFIX"] = ""
 # suite: tests/characterisation/test_voice_router.py pins the 503, and the ones
 # that need it on swap fakes onto the container themselves.
 os.environ["VOICE_ENABLED"] = "0"
+
+# The same leak again, for the profile surface. A developer's `.env` points
+# ELEVATE_BASE_URL at the real QA user service, and without this override
+# build_container would create a live client -- so a bug in a fake would send
+# test PATCHes at real people's profiles. `.invalid` is reserved by RFC 2606 and
+# can never resolve, and `--disable-socket` stops the attempt regardless.
+#
+# Set rather than cleared, deliberately: an EMPTY value takes every /api/profile
+# test down the 503 PROFILE_UNAVAILABLE path, so the routes' real behaviour
+# would never be exercised. Tests that need the client swap a fake onto the
+# frozen container with dataclasses.replace; the 503 path has its own test that
+# clears the client explicitly.
+os.environ["ELEVATE_BASE_URL"] = "https://elevate.test.invalid"
+
+# The same leak a third time, and now in ONE key rather than one per platform.
+#
+# `mitra` alone, deliberately, because that is exactly what the pinned
+# characterisation fixtures were captured against: api_agents.json lists Record
+# Stories and Capture Discussions but not the Saathi assistant. Enabling a
+# second provider here would change `GET /api/agents` and fail a fixture that is
+# NEVER edited to make a test pass. Observed, not hypothetical: turning the
+# second platform on in .env once turned three characterisation tests red
+# without touching a line of application code.
+#
+# A test that needs a different set builds its own registry or passes
+# `enabled_providers` explicitly, so nothing depends on the ambient value -- and
+# with the rest off, no test can open a socket to a live deployment.
+os.environ["PROVIDERS_ENABLED"] = "mitra"
+
+# CREDENTIALS THE SEEDED CONFIGS NAME. `remote.auth.credential_env` holds the
+# NAME of a variable, not a value, so a config row is useless without the
+# environment behind it -- and resolving a provider raises ProviderConfigError
+# when the named variable is unset. These are junk values: the suite runs with
+# `--disable-socket`, so nothing can be reached with them, and setting them here
+# rather than relying on a developer's .env is what keeps the suite runnable on
+# a clean checkout.
+os.environ.setdefault("MITRA_ORIGIN_URL", "https://mitra.test.invalid")
+os.environ.setdefault("SAATHI_ORIGIN_URL", "https://saathi.test.invalid")
+
+# The variables tests/provider_factories.py names. Same reasoning; kept distinct
+# from the two above so a factory-built spec can never accidentally resolve the
+# same credential a seeded config does.
+os.environ.setdefault("TEST_MITRA_ORIGIN_URL", "https://mitra.factory.invalid")
+os.environ.setdefault("TEST_SAATHI_ORIGIN_URL", "https://saathi.factory.invalid")
+os.environ.setdefault("TEST_SAATHI_EMAIL", "tester@example.invalid")
+os.environ.setdefault("TEST_SAATHI_PASSWORD", "not-a-real-password")
+os.environ.setdefault("TEST_SAATHI_ACCESS_TOKEN", "not-a-real-token")
+
 # CLOUD_STORAGE_PROVIDER is not overridden: with voice off, build_container
 # never constructs a store, so the developer's provider is never reached.
 
@@ -157,6 +213,48 @@ LlmFactory.get = _fake_llm_factory_get  # type: ignore[assignment]
 import pytest  # noqa: E402
 
 
+def make_test_token(
+    *,
+    user_id: str = "test-client",
+    tenant_code: str = "shikshalokam",
+    roles=("mentee", "creator", "program_designer"),
+    org_id: str = "62",
+    secret: str = TEST_ELEVATE_JWT_SECRET,
+    exp_offset_s: int = 3600,
+) -> str:
+    """Mint a Saarthi-shaped JWT, signed with `secret`, expiring in
+    `exp_offset_s` seconds (negative => already expired).
+
+    The one place the whole suite's default identity shape lives. Defaults
+    mirror app/services/identity.py's own AUTH_CHECK=false dev identity
+    (same tenant/org/roles) purely for familiarity -- nothing asserts on
+    these specific values (a real per-caller identity varies by definition),
+    so a test that cares about a particular field passes its own kwargs.
+    """
+    import time
+
+    import jwt
+
+    payload = {
+        "data": {
+            "id": user_id,
+            "name": f"User {user_id}",
+            "tenant_code": tenant_code,
+            "organization_ids": [org_id],
+            "organizations": [
+                {
+                    "id": int(org_id),
+                    "code": "sot",
+                    "roles": [{"title": r} for r in roles],
+                }
+            ],
+        },
+        "iat": int(time.time()),
+        "exp": int(time.time()) + exp_offset_s,
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
 # ---------------------------------------------------------------------------
 # 3. Fixtures.
 # ---------------------------------------------------------------------------
@@ -190,21 +288,17 @@ def flask_app(api_app):
 
 @pytest.fixture()
 def auth_headers():
-    """An `Authorization` header, for tests that construct their own TestClient
-    (because they need a differently-configured app) and want their intent to
-    read clearly even though nothing in the app examines this header.
+    """A real, verified `Authorization` header, for tests that build their
+    own `TestClient` (because they need a differently-configured app) rather
+    than using the shared `client` fixture below -- e.g.
+    tests/integration/test_api_prefix.py, which calls `create_app()` itself.
 
-    Identity is resolved once from configuration, not from the request (see
-    app/dependencies/identity.py) -- there is no login flow upstream of this
-    API that could supply a caller-specific token. Sending this header is
-    therefore inert, not required; it costs nothing to include and documents
-    "this client represents an authenticated caller" at the call site.
+    Signed with TEST_ELEVATE_JWT_SECRET, which is configured globally above
+    (section 1), so it verifies against ANY app built from the shared
+    `app.core.settings.settings` singleton -- including a freshly
+    `create_app()`-ed one.
     """
-    from app.core.settings import settings
-
-    if not settings.saarthi_static_token:
-        return {}
-    return {"Authorization": f"Bearer {settings.saarthi_static_token}"}
+    return {"Authorization": f"Bearer {make_test_token()}"}
 
 
 @pytest.fixture()
@@ -218,29 +312,31 @@ def client(api_app):
     flag keeps it visible as a failing assertion on a 500 body rather than as a
     traceback from inside the client.
 
-    Sends the static token's `Authorization` header for documentation value
-    only -- see `auth_headers`. `anonymous_client` below sends none at all and
-    resolves identically, which is itself the thing worth testing (see
-    tests/integration/test_identity_per_request.py).
+    Sends a REAL, verified `Authorization: Bearer <token>` -- AUTH_CHECK=true
+    has no fallback identity for a request with none (removed as an
+    authentication bypass; see app/services/identity.py), so this is what
+    makes `client` a genuinely AUTHENTICATED caller rather than merely an
+    unrejected one. `anonymous_client` below is the deliberate contrast: same
+    app, no token, and now a 401 on anything protected.
     """
     from starlette.testclient import TestClient
 
-    from app.core.settings import settings
-
-    headers = {}
-    if settings.saarthi_static_token:
-        headers["Authorization"] = f"Bearer {settings.saarthi_static_token}"
-
-    return TestClient(api_app, raise_server_exceptions=False, headers=headers)
+    token = make_test_token()
+    return TestClient(
+        api_app, raise_server_exceptions=False, headers={"Authorization": f"Bearer {token}"},
+    )
 
 
 @pytest.fixture()
 def anonymous_client(api_app):
-    """A client that sends no credential.
+    """A client that sends no credential at all.
 
-    Resolves to the SAME identity `client` does -- there is no per-caller
-    identity for it to be missing. Exists to make that equivalence an explicit
-    test fixture rather than something asserted ad hoc.
+    No longer equivalent to `client` -- that equivalence WAS the bug this
+    project's own auth review found (any caller, logged in or not, served as
+    a real identity for free). This fixture exists precisely to make "no
+    credential" a first-class, explicit case: expect 401 on protected routes,
+    same as `test_identity_per_request.py` pins at the identity layer
+    directly.
     """
     from starlette.testclient import TestClient
 

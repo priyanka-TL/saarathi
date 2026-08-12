@@ -89,8 +89,8 @@ class AgentSessionRepository:
         `language` is the agent's configured default. It used to fall through to
         the column's server_default ('en') on every session, which meant
         RemoteSpec.default_language was never read by anything -- an agent
-        configured for hi/kn/te still opened its Mitra channel with route='en',
-        because MitraChannel._authenticate sends this column's value.
+        configured for hi/kn/te still opened its channel with route='en',
+        because the provider's handshake frame sends this column's value.
         """
         row = AgentSession(
             conversation_id=conversation_id,

@@ -156,10 +156,46 @@ export const AgentIcon = () => (
   </svg>
 );
 
+/**
+ * The Saathi capability's mark: a large four-pointed sparkle with a small one
+ * trailing it. Stroked like the rest, so it follows the theme colour.
+ */
+export const SparkleIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <path d="M11 3 L13 9 L19 11 L13 13 L11 19 L9 13 L3 11 L9 9 Z" />
+    <path d="M18.5 3.5 L19.4 5.6 L21.5 6.5 L19.4 7.4 L18.5 9.5 L17.6 7.4 L15.5 6.5 L17.6 5.6 Z" />
+  </svg>
+);
+
 /** The separator between workflow breadcrumb chips. */
 export const BreadcrumbSeparatorIcon = () => (
   <svg {...stroked} width="14" height="14">
     <polyline points="9 18 15 12 9 6" />
+  </svg>
+);
+
+/** A simplified mortarboard -- the School row in the profile dialog. */
+export const SchoolIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <path d="M12 3 3 8l9 5 9-5-9-5z" />
+    <path d="M3 8v8l9 5 9-5V8" />
+    <path d="M12 13v8" />
+  </svg>
+);
+
+/** District and State rows in the profile dialog. */
+export const MapPinIcon = () => (
+  <svg {...stroked} width="16" height="16">
+    <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 1 1 16 0z" />
+    <circle cx="12" cy="10" r="3" />
+  </svg>
+);
+
+/** The role badge in the profile dialog's header. */
+export const BriefcaseIcon = () => (
+  <svg {...stroked} width="14" height="14">
+    <rect x="2" y="7" width="20" height="14" rx="2" />
+    <path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2" />
   </svg>
 );
 
@@ -209,5 +245,14 @@ export const SpeakerOffIcon = () => (
 export const SpinnerIcon = () => (
   <svg {...stroked} width="15" height="15" className="voice-spinner">
     <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+  </svg>
+);
+
+/** Logout, next to the logged-in user's name in the sidebar. */
+export const LogoutIcon = () => (
+  <svg {...stroked} width="14" height="14">
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+    <polyline points="16 17 21 12 16 7" />
+    <line x1="21" y1="12" x2="9" y2="12" />
   </svg>
 );

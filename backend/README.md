@@ -4,7 +4,7 @@
 
 ```bash
 make install                 # uv venv (py3.10) + uv pip install -r requirements.txt
-cp .env.example .env         # ONE config file — fill OPENROUTER_API_KEY, SAARTHI_STATIC_TOKEN, MITRA_*
+cp .env.example .env         # ONE config file — fill OPENROUTER_API_KEY, ELEVATE_JWT_SECRET, MITRA_*
 createdb saarthi_new         # local Postgres 17
 make run                     # migrates to head, then binds HOST:PORT from .env
 ```
@@ -23,7 +23,7 @@ Interactive API docs at `<host>:<port>{API_PREFIX}/docs` (OpenAPI 3.1) —
 
 | Command | Does |
 |---|---|
-| `make run` | **migrates first**, then `python -m app.main`; host/port/workers from settings, **single worker** (mandatory when `MITRA_ENABLED=1`) |
+| `make run` | **migrates first**, then `python -m app.main`; host/port/workers from settings, **single worker** (mandatory when any enabled provider is stateful) |
 | `make run-no-migrate` | starts without touching the schema — for when applying migrations is not this process's job |
 | `make test` | the full test suite |
 | `make lint` | import-linter: the four layering contracts |
@@ -38,7 +38,7 @@ variable outranks the file:
 ```bash
 PORT=9000 make run
 API_PREFIX=/saarathi-service make run
-APP_ENV=qa MITRA_ENABLED=0 make run
+APP_ENV=qa PROVIDERS_ENABLED= make run
 ```
 
 ## Layout
@@ -96,9 +96,12 @@ Each is enforced by a test in `tests/guards/`.
    connection for the whole turn. anyio's default is 40 against a 24-connection
    pool, which turns overload into `QueuePool` timeouts surfaced as 500s.
 
-5. **One uvicorn worker when `MITRA_ENABLED=1`.** `MitraSessionManager` pools
-   live WebSockets in process memory; a second worker opens a second Mitra
-   channel for the same interview. Scale with `THREADPOOL_SIZE`.
+5. **One uvicorn worker when an enabled provider is stateful.** Its
+   `ChannelPool` holds live WebSockets in process memory; a second worker opens
+   a second channel for the same conversation. Scale with `THREADPOOL_SIZE`.
+   Stated in terms of `RemoteProvider.stateful_transport` rather than a flag
+   named after one platform, so a deployment running only stateless providers
+   is legitimately free of it.
 
 6. **`sync_and_reload` runs in `create_app()`, not the lifespan.** An empty
    catalogue must abort at import rather than serving requests that can route
@@ -196,22 +199,31 @@ Everything the sidebar shows, and every agent's configuration, lives in the
 **database** and can vary **per tenant**. No file edit, no rebuild, no
 restart.
 
-**How a tenant is reached today, and how it is not.** Identity is resolved
-once from `.env`, not per request (see [Configuration](#configuration) below)
-— the frontend is a bare SPA with no login flow and no way to supply a
-caller-specific token, so there is no live path today where an ordinary
-end-user request resolves to more than one tenant. What *is* fully real and
-exercised: the admin API (`/api/admin/capabilities`) takes `tenant_id` /
-`organization_id` as **explicit** parameters, not derived from the caller's
-own identity, so scoped rows are completely writable and readable, and the
-resolver (`capability_service.resolve_for_user`,
-`AgentRegistry.resolve_for_scope`) is generic over *whatever* `UserContext` it
-is given — see `tests/guards/test_tenant_isolation.py` and
+**How a tenant is reached.** Identity is resolved **per request**, from the
+`Authorization: Bearer <token>` header (see [Configuration](#configuration)
+below) — the frontend logs a user in directly against ELEVATE's user service
+and sends the JWT it gets back on every subsequent call, so an ordinary
+end-user request resolves to *that* user's own tenant, org and roles. The
+token is decoded WITH signature verification (`ELEVATE_JWT_SECRET`), since it
+comes from the request itself and is fully attacker-reachable. A request with
+no bearer token is `401` when `AUTH_CHECK=true` — there is no fallback
+identity for a missing token; one existed briefly (a static, operator-
+provisioned token served to any caller that sent nothing) and was removed for
+being exactly that: an authentication bypass, reachable by anyone regardless
+of whether they had ever logged in. The only way to skip real auth is the
+separate, explicit `AUTH_CHECK=false` development identity, which is not a
+per-request fallback — it ignores every request's header identically, on
+purpose, and is never meant for production.
+Separately, and unaffected by any of this: the admin API
+(`/api/admin/capabilities`) takes `tenant_id` / `organization_id` as
+**explicit** parameters, not derived from the caller's own identity, so scoped
+rows are completely writable and readable regardless of who is logged in — see
+`tests/guards/test_tenant_isolation.py` and
 `tests/integration/test_admin_capabilities.py`, which exercise it directly.
-Wiring a real per-caller identity source back in (e.g. a gateway that
-terminates a user's own session and forwards their token) is then a change
-to `app/dependencies/identity.py` alone — the schema, services and admin API
-need nothing further.
+The resolver (`capability_service.resolve_for_user`,
+`AgentRegistry.resolve_for_scope`) is generic over *whatever* `UserContext` it
+is given, admin or ordinary — see `app/dependencies/identity.py` and
+`app/services/identity.py` for the whole seam.
 
 **Saarthi does not own tenants or users.** Those are the user service's
 records. `tenant_code` and organization id are JWT claims

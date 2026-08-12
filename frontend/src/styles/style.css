@@ -255,8 +255,15 @@ body {
 }
 
 .chat-history-placeholder {
+    /* Still the rail's flex spacer -- this is what absorbs free space and pins
+       Advanced to the bottom. Do not remove it. */
     flex: 1 0 auto;
     min-height: 20px;
+    /* It holds two controls now (New Chat, then voice language), so it lays
+       them out rather than leaving them to collapse together. */
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
 }
 
 .advanced-section {
@@ -544,6 +551,131 @@ body {
 [data-theme="dark"] .agent-item.active {
     background: rgba(162, 118, 214, 0.18);
     border-color: rgba(162, 118, 214, 0.35);
+}
+
+/* -------------------------------------------------------------------------
+ * Sidebar control hierarchy: one primary action, one quiet preference.
+ *
+ * New Chat is the rail's PRIMARY action and is the only filled control in the
+ * sidebar, which is what makes it read as primary without being large. It wears
+ * .agent-item for its box model, so these rules hang off the id -- that
+ * outranks the class without !important and without changing markup that other
+ * selectors and tests query.
+ *
+ * Voice language is a set-once preference and is styled as a settings row:
+ * label left, control right, both muted. Before this it was UNSTYLED -- a block
+ * label above a default-chrome select -- which made the least-used control the
+ * tallest thing above the fold.
+ *
+ * NEITHER SETS A BOTTOM MARGIN. `.sidebar` is a flex column with `gap: 14px`
+ * and `.chat-history-placeholder` adds its own gap below, so a margin here is
+ * added to that gap rather than replacing it.
+ * ---------------------------------------------------------------------- */
+
+#new-chat-btn {
+    /* Centred, unlike the list rows it borrows its box from: a full-width
+       filled button reads as a call to action, and a left-aligned one reads as
+       another row in a list. */
+    justify-content: center;
+    background: var(--primary-color);
+    border-color: var(--primary-color);
+    color: #fff;
+    /* Tighter than .agent-item's 16px 18px -- a one-line action needs less
+       room than a content card. */
+    padding: 13px 16px;
+    border-radius: 14px;
+    font-size: 0.92rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    box-shadow: 0 1px 2px rgba(78, 34, 119, 0.16), 0 4px 12px rgba(78, 34, 119, 0.2);
+}
+
+#new-chat-btn:hover {
+    /* .agent-item:hover would otherwise wash the fill out to near-white. */
+    background: var(--primary-color);
+    border-color: var(--primary-color);
+    filter: brightness(1.07);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(78, 34, 119, 0.18), 0 8px 18px rgba(78, 34, 119, 0.26);
+}
+
+#new-chat-btn:active {
+    transform: translateY(0);
+    filter: brightness(0.98);
+    box-shadow: 0 1px 2px rgba(78, 34, 119, 0.2);
+}
+
+#new-chat-btn:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+}
+
+/* stroke="currentColor", so it follows the white label. */
+#new-chat-btn svg {
+    color: currentColor;
+    flex-shrink: 0;
+}
+
+[data-theme="dark"] #new-chat-btn {
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="dark"] #new-chat-btn:hover {
+    background: var(--primary-color);
+    border-color: var(--primary-color);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.45), 0 8px 18px rgba(0, 0, 0, 0.35);
+}
+
+.voice-language {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    /* Optically aligns the row's text with the button's label above it, which
+       is inset by its own border and padding. */
+    padding: 0 4px;
+}
+
+.voice-language-label {
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.voice-language-select {
+    /* Sized to its content. A full-width select would carry the same visual
+       weight as the primary button directly above it. */
+    flex: 0 0 auto;
+    max-width: 55%;
+    padding: 5px 9px;
+    font-size: 0.78rem;
+    font-family: inherit;
+    font-weight: 500;
+    color: var(--text-primary);
+    /* The rail's surface token, so it reads as an input of the same family as
+       the cards rather than as raw browser chrome. */
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.voice-language-select:hover {
+    border-color: rgba(78, 34, 119, 0.28);
+}
+
+.voice-language-select:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+    border-color: var(--primary-color);
+}
+
+[data-theme="dark"] .voice-language-select:hover {
+    border-color: rgba(162, 118, 214, 0.4);
 }
 
 .agent-item-title {
@@ -1228,6 +1360,70 @@ body {
    on top of the var(--primary-color) background set here — purple on purple,
    i.e. a button that went blank on hover. Matching the qualifier wins on
    source order without resorting to !important. */
+/* Per-turn document downloads. Same pill as the report link below, but laid
+   out as a ROW of them (a turn can offer PDF and DOCX) and living in
+   .message-body next to the option group rather than inside .message-text --
+   so it renders under an agent bubble, whose body is innerHTML we must not
+   append to. The .report-link selectors are matched here too, which is why the
+   .message-content qualifier is absent: these are not inside .message-content,
+   so they never hit the generic `.message-content a:hover` trap that rule guards
+   against. */
+/* Per-turn document downloads, rendered INSIDE .message-content between the
+   reply text and the meta row -- the same place the report link below sits, so
+   a document reads as part of the reply rather than as a separate control.
+
+   EVERY SELECTOR IS QUALIFIED WITH .message-content, for the reason spelled out
+   above the .report-link rules: the generic `.message-content a:hover` is
+   (0,3,0), so a bare `.attachment-link:hover` at (0,2,0) LOSES and hover would
+   repaint the label var(--primary-color) on top of a var(--primary-color) fill
+   -- a button that goes blank on hover. Matching the qualifier wins on source
+   order without reaching for !important. */
+.message-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.message-content a.attachment-link,
+.message-content a.attachment-link:visited {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: 1px solid var(--primary-color);
+    border-radius: 999px;
+    /* FILLED, not an outline. var(--primary-color) is #4e2277 in the light
+       theme and #a276d6 in the dark one -- kept as the variable rather than
+       hardcoded so the button follows the theme, which is what every other
+       filled button in this stylesheet does. */
+    background: var(--primary-color);
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    text-decoration: none;
+    max-width: 100%;
+    word-break: break-word;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.message-content a.attachment-link:hover,
+.message-content a.attachment-link:focus-visible {
+    /* Already filled, so hover DARKENS rather than fills. */
+    background: var(--primary-hover);
+    border-color: var(--primary-hover);
+    color: #fff;
+    text-decoration: none;
+}
+
+[data-theme="dark"] .message-content a.attachment-link:hover,
+[data-theme="dark"] .message-content a.attachment-link:focus-visible {
+    /* Dark theme has its own `.message-content a:hover` override, same trap. */
+    background: var(--primary-hover);
+    border-color: var(--primary-hover);
+    color: #fff;
+}
+
 .message-content a.report-link,
 .message-content a.report-link:visited {
     /* `flex`, not `inline-flex`: this is appended after the confirmation text

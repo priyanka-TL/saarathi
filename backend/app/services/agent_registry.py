@@ -39,12 +39,27 @@ class RegisteredAgent:
     spec: AgentSpec
 
 class AgentRegistry:
-    def __init__(self, ttl_s: float = 60.0, mitra_enabled: bool = True):
+    def __init__(
+        self,
+        ttl_s: float = 60.0,
+        enabled_providers: Optional[frozenset] = None,
+    ):
         self._ttl_s = ttl_s
-        # MITRA_ENABLED=0 hides every remote_flow agent, or the sidebar offers
-        # interviews nothing can serve. A runtime filter, not a DB write: a
-        # deployment switch has no business mutating tenant configuration.
-        self._mitra_enabled = mitra_enabled
+        # A disabled provider's agents are HIDDEN, or the sidebar offers
+        # conversations nothing can serve and the handler raises at click time.
+        # A runtime filter, not a DB write: a deployment switch has no business
+        # mutating tenant configuration.
+        #
+        # KEYED ON THE PROVIDER, NOT ON THE AGENT TYPE. Gating by type is what
+        # forced a second delegated agent_type into existence when a second
+        # platform arrived -- two platforms sharing `remote_flow` could not be
+        # switched on independently. One set of provider names scales without a
+        # Postgres enum value per platform.
+        #
+        # None means "no filtering", which is what tests and any caller with no
+        # deployment opinion want; an empty frozenset really does hide every
+        # delegated agent.
+        self._enabled_providers = enabled_providers
         self._snapshot: Dict[str, RegisteredAgent] = {}
         self._legacy_names: Dict[str, str] = {}
         self._version: int = 0
@@ -76,8 +91,6 @@ class AgentRegistry:
 
             skipped = []
             for row in result:
-                if row.agent_type == "remote_flow" and not self._mitra_enabled:
-                    continue
                 # PER-ROW: one bad config costs one agent, not all of them.
                 # Aborting the loop left the snapshot empty and refused the
                 # boot -- one editable row able to take down every agent.
@@ -89,6 +102,10 @@ class AgentRegistry:
                         "AgentRegistry: skipping agent %r -- its active config does "
                         "not validate: %s", row.key, exc,
                     )
+                    continue
+                # AFTER validation, not before: the provider name lives inside
+                # the config, so the gate needs a parsed spec to read it.
+                if not self._provider_enabled(spec):
                     continue
                 agent = RegisteredAgent(
                     id=str(row.id),
@@ -225,6 +242,21 @@ class AgentRegistry:
             if agent.is_default:
                 return agent
         return None
+
+    def _provider_enabled(self, spec) -> bool:
+        """Whether this deployment serves the provider a spec names.
+
+        An `llm` agent has no provider and is never gated here. A delegated
+        agent is hidden when its `remote.provider` is not in the enabled set --
+        one line, however many platforms exist, because the set is the only
+        thing that grows.
+        """
+        if self._enabled_providers is None:
+            return True
+        remote = getattr(spec, "remote", None)
+        if remote is None:
+            return True
+        return remote.provider in self._enabled_providers
 
     # ------------------------------------------------------------------
     # Tenant-scoped resolution

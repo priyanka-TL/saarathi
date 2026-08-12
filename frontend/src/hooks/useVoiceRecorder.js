@@ -195,15 +195,30 @@ export function useVoiceRecorder({ conversationId, language, onTranscript }) {
     else start();
   }, [isRecording, start, stop]);
 
+  /**
+   * TWO QUESTIONS, NOT ONE. These were a single `supported` flag, which
+   * conflated "this browser can record" with "we can record right now" -- and
+   * the sidebar's language picker, which only needs the first, was hidden by
+   * the second. `conversationId` is sessionStorage-backed and null on a fresh
+   * tab, so the picker vanished on every load until a message had been sent.
+   *
+   * `supported` keeps its exact previous meaning and value, so every existing
+   * consumer is unaffected -- notably ChatInput's `showMic`, which genuinely
+   * does need a conversation: upload keys are `voice/{conversation_id}/...` and
+   * the backend checks ownership against that id.
+   */
+  const browserSupported = isRecordingSupported() && isSecureContextForMedia();
+
   return {
     isRecording,
     isTranscribing,
     error,
     clearError: useCallback(() => setError(null), []),
     voiceDisabled,
-    // The feature is pointless without somewhere to attribute the recording to,
-    // and the backend requires a conversation it can check ownership against.
-    supported: isRecordingSupported() && isSecureContextForMedia() && !!conversationId,
+    // Can this browser record at all? Enough to offer the language preference.
+    browserSupported,
+    // Can we record right now? Also needs somewhere to attribute the recording.
+    supported: browserSupported && !!conversationId,
     start,
     stop,
     toggle,

@@ -19,17 +19,12 @@ from sqlalchemy import text
 from app.database.engine import SessionLocal
 from app.domain.core import UserContext
 from app.domain.agent_spec import (
-    MitraConnectionSpec,
     RemoteFlowAgentSpec,
     RemoteSpec,
     RoutingSpec,
 )
 
-#: Required on every RemoteSpec now -- the MITRA_* environment floor is gone.
-_CONNECTION = MitraConnectionSpec(
-    base_url="https://mitra.example.com",
-    ws_url="wss://mitra.example.com/ws/common/",
-)
+from tests.provider_factories import FakeProvider, FakeProviderRegistry, remote_spec
 from app.agents.protocol import SessionDelta, SessionState
 from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -37,33 +32,21 @@ from app.services.orchestration import OrchestrationService
 from app.services.session_service import SessionService
 
 
-class _FakeMitraRest:
-    """Thread-safe-enough for this test: list.append is atomic under the
-    GIL, and a lock guards the read-modify-write in finalize()."""
+class _ThreadSafeProvider(FakeProvider):
+    """FakeProvider with a lock around the finalize bookkeeping.
+
+    The base double is fine single-threaded; this test deliberately runs two
+    requests at once, so the read-modify-write in finalize() needs guarding.
+    list.append is atomic under the GIL, so nothing else does.
+    """
+
     def __init__(self):
+        super().__init__()
         self._lock = threading.Lock()
-        self.finalize_calls: List[Tuple] = []
 
-    def finalize(
-        self, session_id, profile_id, flow, language, token,
-        path="/api/end-story/v2/", as_guest=False,
-    ):
+    def finalize(self, remote, session_view, user):
         with self._lock:
-            self.finalize_calls.append((session_id, profile_id, flow, language, token))
-        return "9931", "narrative content"
-
-    def get_report(self, session_id, media_type="application/pdf"):
-        return None
-
-
-class _FakeMitraSessions:
-    def __init__(self):
-        self._lock = threading.Lock()
-        self.close_calls: List[uuid.UUID] = []
-
-    def close(self, conversation_id):
-        with self._lock:
-            self.close_calls.append(conversation_id)
+            return super().finalize(remote, session_view, user)
 
 
 def _insert_agent_row(session, key: str) -> uuid.UUID:
@@ -92,10 +75,9 @@ def _remote_agent(agent_id: uuid.UUID):
         id: uuid.UUID
         spec: RemoteFlowAgentSpec
 
-    remote = RemoteSpec(
-        provider="mitra", flow_name="guest-mi-story",
+    remote = remote_spec(
+        flow_name="guest-mi-story",
         bot_route="/test-bot-route", company="test-company",
-        connection=_CONNECTION,
     )
     spec = RemoteFlowAgentSpec(
         key="record_stories", name="Record Stories", description="test",
@@ -128,8 +110,10 @@ def test_concurrent_terminal_turns_produce_exactly_one_finalisation():
     finally:
         setup_session.close()
 
-    shared_rest = _FakeMitraRest()
-    shared_pool = _FakeMitraSessions()
+    # ONE provider shared by both threads, exactly as production shares one
+    # registry across every request in the process.
+    shared_provider = _ThreadSafeProvider()
+    shared_registry = FakeProviderRegistry(shared_provider)
     agent = _remote_agent(agent_id)
     user = _new_user()
 
@@ -138,7 +122,7 @@ def test_concurrent_terminal_turns_produce_exactly_one_finalisation():
         try:
             orch = OrchestrationService(
                 session=thread_session, registry=None, handler_factory=None, llm_factory=None,
-                mitra_rest=shared_rest, mitra_sessions=shared_pool,
+                providers=shared_registry,
             )
             # Each thread re-reads its own view of the session, as a real
             # caller would (the terminal AgentTurn each request produced).
@@ -153,7 +137,7 @@ def test_concurrent_terminal_turns_produce_exactly_one_finalisation():
         futures = [executor.submit(try_finalize) for _ in range(2)]
         results = [f.result() for f in futures]
 
-    assert len(shared_rest.finalize_calls) == 1, (
+    assert len(shared_provider.finalize_calls) == 1, (
         "exactly one upstream finalize() call must happen across both concurrent requests"
     )
 
