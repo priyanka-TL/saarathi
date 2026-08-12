@@ -83,3 +83,9 @@ function readFlag(key, fallback) {
  * itself regardless of this value.
  */
 export const PROFILE_POPUP_ENABLED = readFlag('PROFILE_POPUP_ENABLED', true);
+
+/**
+ * Hours to wait before asking the user to update their profile again if they
+ * click "Not now". Default is 2 hours.
+ */
+export const PROFILE_POPUP_REPROMPT_HOURS = parseFloat(readConfig('PROFILE_POPUP_REPROMPT_HOURS')) || 2;

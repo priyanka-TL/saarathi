@@ -10,7 +10,12 @@ no status codes -- the router does that.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Mapping
+
+from app.integrations.elevate.exceptions import ElevateError
+
+logger = logging.getLogger(__name__)
 
 # The five fields the profile-completion popup exists to collect. Taken from
 # Mitra's `submit_user_context` tool, which writes exactly these
@@ -42,6 +47,62 @@ def _is_filled(value: Any) -> bool:
 def missing_fields(profile: Mapping[str, Any]) -> List[str]:
     """The mandatory fields this profile has not filled in, in a stable order."""
     return [field for field in MANDATORY_FIELDS if not _is_filled(profile.get(field))]
+
+
+def merge_for_update(
+    current: Mapping[str, Any], changes: Mapping[str, Any]
+) -> Dict[str, str]:
+    """Every mandatory field ELEVATE should still hold after this write.
+
+    THE WHOLE POINT: ELEVATE's `/user/v1/user/update` CLEARS the profile fields
+    its body omits. A sparse body -- only what the user edited -- therefore
+    wipes the rest, which is the data-loss bug this exists to prevent. So the
+    caller's changes are merged over the profile ELEVATE currently holds and
+    the COMPLETE set goes upstream every time.
+
+    That is also correct if ELEVATE turns out to merge after all: resending an
+    unchanged value is a no-op. Being right under both semantics is deliberate,
+    because the upstream contract is not documented anywhere we can check.
+
+    Fields empty on BOTH sides are left out entirely rather than sent as `""`:
+    an empty string asks ELEVATE to store a blank, which is not the same as
+    leaving an attribute unset, and `_is_filled` would then disagree with what
+    is actually stored.
+    """
+    merged: Dict[str, str] = {}
+    for field in MANDATORY_FIELDS:
+        value = changes[field] if field in changes else current.get(field)
+        if _is_filled(value):
+            merged[field] = str(value).strip()
+    return merged
+
+
+def _log_fields_that_did_not_stick(
+    sent: Mapping[str, str], refreshed: Mapping[str, Any]
+) -> None:
+    """Warn when a value we just wrote is not what came back.
+
+    The one signal worth raising here. "Carried a field over" is NOT -- that is
+    the normal case for every single-field edit now, so logging it would be
+    pure noise.
+
+    This fires if the merge silently breaks, if ELEVATE's semantics shift
+    again, and -- the reason it is worth the line -- if the four
+    entity-suspect fields reject the bare label strings we send. `to_profile`
+    unwraps `userRole`/`userSchool`/`userDistrict`/`profileState` from
+    `{value, label}` objects, but `to_update_body` writes plain strings back.
+    If those attributes are entity references upstream, our writes may not
+    resolve, and the merge above would quietly paper over it forever.
+
+    FIELD NAMES ONLY, NEVER VALUES: these are the user's school and district.
+    """
+    dropped = [
+        field
+        for field, value in sent.items()
+        if str(refreshed.get(field) or "").strip() != value
+    ]
+    if dropped:
+        logger.warning("profile: ELEVATE did not persist fields=%s", sorted(dropped))
 
 
 def is_profile_complete(profile: Mapping[str, Any]) -> bool:
@@ -115,12 +176,42 @@ class ProfileService:
         return self._client.read_profile(token)
 
     def update(self, token: str, fields: Dict[str, str]) -> Dict[str, Any]:
-        """Write the fields, then RE-READ and return what ELEVATE actually stored.
+        """Read, merge the caller's changes, write the COMPLETE set, re-read.
 
-        The second call is not redundant. ELEVATE may normalise a value or drop
-        one it cannot resolve, and the client's whole purpose is to tell the UI
-        the truth -- reporting "complete" for a value that did not stick would
-        stop the user being asked again for a field that is still empty.
+        THREE CALLS, EACH LOAD-BEARING:
+
+        1. The pre-read is the merge baseline. ELEVATE clears whatever the
+           write body omits, so the other four fields have to be resent, and
+           only ELEVATE knows their current values. Doing this server-side also
+           makes a stale client harmless -- the merge happens against upstream
+           truth, not against whatever the browser last loaded.
+        2. The write carries all five (see `merge_for_update`).
+        3. The re-read is what the caller gets. ELEVATE may normalise a value
+           or drop one it cannot resolve, and reporting "complete" for a value
+           that did not stick would stop the user ever being asked again.
+
+        KNOWN RACE, ACCEPTED: read-modify-write is not atomic. Two tabs, or a
+        retried request, can lose an update -- A reads, B reads, A writes, B
+        writes from its stale baseline, A's edit is gone. Closing it needs
+        optimistic concurrency (an ETag / `If-Match`) that ELEVATE is not known
+        to offer. The window is small and a user rarely races themselves, so it
+        is documented rather than solved. It is a real trade: the sparse
+        version had no such race, and lost data unconditionally instead.
         """
-        self._client.update_profile(token, fields)
-        return self._client.read_profile(token)
+        current = self._client.read_profile(token)
+        merged = merge_for_update(current, fields)
+        self._client.update_profile(token, merged)
+
+        try:
+            refreshed = self._client.read_profile(token)
+        except ElevateError:
+            # THE WRITE ALREADY LANDED. Failing here would send the user back
+            # to retry a save that succeeded, showing them stale values while
+            # they did it. What we just wrote is the honest answer.
+            logger.warning(
+                "profile: post-write re-read failed; answering from the merged values"
+            )
+            return {**current, **merged}
+
+        _log_fields_that_did_not_stick(merged, refreshed)
+        return refreshed

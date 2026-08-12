@@ -17,17 +17,14 @@ import { BriefcaseIcon, GlobeIcon, InfoIcon, MapPinIcon, SchoolIcon, UserIcon } 
  * The modes are one dialog rather than two stacked ones: opening a second modal
  * over the first leaves two backdrops and two focus traps fighting each other.
  *
- * VIEW MODE READS AS A PROFILE CARD, NOT A FORM DUMP. Name and role are
- * promoted into a header (avatar, heading, a plain subtitle line) instead of
- * sitting in the same row shape as School/District/State -- those two are what
- * you look for first, so they get the space. Deliberately NOT a coloured
- * badge/pill: this is a business-card layout, and a bright chip next to a
- * person's title reads as a marketing flourish rather than information.
+ * VIEW MODE IS ONE UNIFORM LIST. Every field -- name, role, school, district,
+ * state, language -- gets the same icon/label/value row, so the dialog reads as
+ * a record rather than a mix of header treatments. An unset field shows
+ * "Not set" rather than a blank, which would read as a rendering fault.
  *
- * COPY IS FORMAL THROUGHOUT: full sentences, no contractions, no dashes-as-
- * punctuation. "Missing details" uses the brand colour, never the
- * error/accent colour -- an incomplete profile is routine, not a fault, and
- * should not read like one.
+ * A SAVE ENDS ON A CONFIRMATION, not silently back on the list: `success` mode
+ * holds for a moment so the user sees the write landed before the dialog
+ * closes itself.
  */
 
 /** School/District/State, in `missing_fields` order -- Name and Role moved to
@@ -39,28 +36,6 @@ const DETAIL_ROWS = [
 ];
 
 const LANGUAGE_LABELS = { en: 'English', hi: 'हिंदी', kn: 'ಕನ್ನಡ', te: 'తెలుగు' };
-
-/**
- * Up to two initials from a name, for the avatar. `null` when there is no name
- * yet, so the caller can fall back to a person icon -- an empty circle would
- * look broken rather than merely empty.
- */
-function initialsOf(name) {
-  if (!name) return null;
-  const letters = name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((word) => word[0]);
-  return letters.length ? letters.join('').toUpperCase() : null;
-}
-
-/** The line under the header: how complete the profile is, as one plain
- * sentence rather than a bare count or a warning. */
-function statusLine(missingFields) {
-  const count = missingFields.length;
-  if (count === 0) return 'Your profile is complete and synced with your Shikshalokam account.';
-  const noun = count === 1 ? 'detail' : 'details';
-  const verb = count === 1 ? 'is' : 'are';
-  const pronoun = count === 1 ? 'it' : 'them';
-  return `${count} required ${noun} ${verb} missing. Complete ${pronoun} below to personalise your Saarthi experience.`;
-}
 
 export default function ProfileModal({ onClose, prompted = false, initialMode = 'edit' }) {
   const { profile, missingFields, loading, unavailable, save } = useProfile();

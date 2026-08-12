@@ -42,6 +42,33 @@ UPDATE_PATH = "/user/v1/user/update"
 _DETAIL_LIMIT = 200
 
 
+# The four attributes ELEVATE may model as entity references. We READ them as
+# `{value, label}` objects but WRITE bare label strings back -- see
+# _log_attribute_shapes.
+_ENTITY_SUSPECT_KEYS = ("userRole", "userSchool", "userDistrict", "profileState")
+
+
+def _log_attribute_shapes(result: Dict[str, Any]) -> None:
+    """Record the JSON TYPE of the entity-suspect attributes. Never the values.
+
+    Evidence-gathering for an open question, not diagnostics. `to_profile`
+    unwraps these four from `{value, label}` objects, but `to_update_body`
+    sends plain strings back. If ELEVATE models them as entity references, a
+    bare label may not resolve and our writes would not stick -- a bug distinct
+    from the sparse-body data loss, and one that read-merge-write would hide.
+
+    DEBUG, so normal operation stays quiet: raise LOG_LEVEL when you want to
+    settle it. If these consistently come back `dict` while we send `str`, the
+    write path needs entity resolution.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    shapes = " ".join(
+        f"{key}={type(result.get(key)).__name__}" for key in _ENTITY_SUSPECT_KEYS
+    )
+    logger.debug("elevate read: attribute shapes %s", shapes)
+
+
 class ElevateUserClient:
     """Profile read/update against ELEVATE's user service."""
 
@@ -68,6 +95,7 @@ class ElevateUserClient:
     def read_profile(self, token: str) -> Dict[str, Any]:
         """The caller's profile, in Saarthi's field names."""
         result = self._request("GET", READ_PATH, token, task="read")
+        _log_attribute_shapes(result)
         profile = to_profile(result)
         if not profile.get("user_id"):
             # The original returns a bare `{}` here, which its callers cannot

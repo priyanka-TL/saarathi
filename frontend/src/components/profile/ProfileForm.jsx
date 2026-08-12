@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { cx } from '../../utils/cx';
 
 /**
- * The five mandatory profile fields, as free text.
+ * The five profile fields, as free text.
  *
  * FREE TEXT, NOT DROPDOWNS, and that is a constraint rather than a preference:
  * neither Saarthi nor the Mitra implementation this was ported from has any
@@ -73,8 +73,7 @@ export default function ProfileForm({
     const errors = {};
     for (const { name, label } of FIELDS) {
       const value = values[name].trim();
-      if (!value) errors[name] = `${label} is required.`;
-      else if (value.length > MAX_LENGTH) errors[name] = `${label} is too long.`;
+      if (value.length > MAX_LENGTH) errors[name] = `${label} is too long.`;
     }
     if (Object.keys(errors).length) {
       setFieldErrors(errors);
@@ -87,6 +86,14 @@ export default function ProfileForm({
      * to actual edits keeps the request honest -- and if every value is
      * unchanged there is nothing to save, which the backend would reject as an
      * empty update anyway.
+     *
+     * SPARSENESS IS NOT WHAT PROTECTS THE OTHER FIELDS -- the SERVER merges.
+     * It reads the stored profile, merges these changes over it, and sends
+     * ELEVATE the complete set, because ELEVATE clears whatever a write body
+     * omits (see backend ProfileService.update). Sending only the diff from
+     * here once wiped every untouched field. A consequence worth knowing: a
+     * stale `profile` prop is harmless, since the merge baseline is upstream
+     * truth rather than whatever this form last loaded.
      */
     const changed = {};
     for (const { name } of FIELDS) {

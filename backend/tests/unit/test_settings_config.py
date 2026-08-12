@@ -120,11 +120,18 @@ def test_the_elevate_user_service_is_configurable_and_off_by_default():
     assert _settings(elevate_base_url="https://elevate.example").elevate_base_url == (
         "https://elevate.example"
     )
-    # Split, not one combined budget: a request holds a worker thread (and so a
-    # DB connection) for its whole life, so a dead DNS must not park one for the
-    # full read budget.
-    assert Settings.model_fields["elevate_connect_timeout"].default == 10.0
-    assert Settings.model_fields["elevate_read_timeout"].default == 30.0
+    # Split, not one combined budget: a request holds a worker thread for its
+    # whole life, so a dead DNS must not park one for the full read budget.
+    #
+    # And TIGHTER than the Bhashini equivalents (10/30): PATCH /api/profile
+    # makes three sequential ELEVATE calls, so these compound. At 5/10 the
+    # three-call worst case stays below what a single call used to allow.
+    assert Settings.model_fields["elevate_connect_timeout"].default == 5.0
+    assert Settings.model_fields["elevate_read_timeout"].default == 10.0
+    assert (
+        Settings.model_fields["elevate_read_timeout"].default
+        < Settings.model_fields["bhashini_read_timeout"].default
+    )
 
 
 def test_there_is_no_second_switch_for_the_profile_popup():

@@ -144,85 +144,43 @@ describe('the profile dialog', () => {
     expect(screen.getByText('ಕನ್ನಡ')).toBeTruthy();
   });
 
-  it('promotes name and role into a header rather than a flat field list', async () => {
-    // The two things you scan a profile for first, so they get a heading and a
-    // badge instead of sitting in the same row shape as School/District/State.
+  it('lists every field in one uniform row shape', async () => {
+    // Name and role get the same icon/label/value treatment as the rest, so
+    // the dialog reads as a record rather than a mix of header styles.
     mount(<AccountActions />);
     await waitFor(() => expect(getProfile).toHaveBeenCalled());
 
     await openDialog();
 
     // document.body, not a render-returned container: the dialog is portalled.
-    expect(document.body.querySelector('.profile-summary-name')).toHaveTextContent('Asha Rao');
-    expect(document.body.querySelector('.profile-summary-role')).toHaveTextContent('Teacher');
+    const rows = [...document.body.querySelectorAll('.profile-detail-item')];
+    const labels = rows.map((r) => r.querySelector('.profile-detail-label').textContent);
+    expect(labels).toEqual(['Full name', 'Role', 'School', 'District', 'State', 'Language']);
+    expect(rows[0].querySelector('.profile-detail-value')).toHaveTextContent('Asha Rao');
+    expect(rows[1].querySelector('.profile-detail-value')).toHaveTextContent('Teacher');
   });
 
-  it('prompts for a name instead of showing a blank heading', async () => {
-    getProfile.mockResolvedValue(ok({ ...COMPLETE, name: '' }, ['name']));
+  it('shows "Not set" rather than a blank for a field with no value', async () => {
+    // A blank cell reads as a rendering fault; this reads as "not provided".
+    getProfile.mockResolvedValue(ok({ ...COMPLETE, name: '', role: '' }, ['name', 'role']));
     mount(<AccountActions />);
     await waitFor(() => expect(getProfile).toHaveBeenCalled());
 
     await openDialog();
 
-    expect(screen.getByText('Add your name')).toBeTruthy();
-    // Role is still shown independently -- it is a real, separately-tracked
-    // fact, not something that only makes sense once a name exists.
-    expect(document.body.querySelector('.profile-summary-role')).toHaveTextContent('Teacher');
+    expect(document.body.querySelectorAll('.profile-detail-empty')).toHaveLength(2);
+    expect(screen.getAllByText('Not set')).toHaveLength(2);
   });
 
-  it('omits the role line entirely when there is no role either', async () => {
-    getProfile.mockResolvedValue(ok({ ...COMPLETE, role: '' }, ['role']));
-    mount(<AccountActions />);
-    await waitFor(() => expect(getProfile).toHaveBeenCalled());
-
-    await openDialog();
-
-    expect(document.body.querySelector('.profile-summary-role')).toBeNull();
-  });
-
-  it('says how many details are still missing, and why it matters', async () => {
-    getProfile.mockResolvedValue(ok(INCOMPLETE, ['school_name', 'state']));
-    mount(<AccountActions />);
-    await waitFor(() => expect(getProfile).toHaveBeenCalled());
-
-    await openDialog();
-
-    expect(screen.getByText(
-      '2 required details are missing. Complete them below to personalise your Saarthi experience.',
-    )).toBeTruthy();
-  });
-
-  it('singularises that for one missing detail', async () => {
-    getProfile.mockResolvedValue(ok({ ...COMPLETE, state: '' }, ['state']));
-    mount(<AccountActions />);
-    await waitFor(() => expect(getProfile).toHaveBeenCalled());
-
-    await openDialog();
-
-    expect(screen.getByText(
-      '1 required detail is missing. Complete it below to personalise your Saarthi experience.',
-    )).toBeTruthy();
-  });
-
-  it('reads as a status, not a warning, once nothing is missing', async () => {
-    mount(<AccountActions />);
-    await waitFor(() => expect(getProfile).toHaveBeenCalled());
-
-    await openDialog();
-
-    expect(screen.getByText('Your profile is complete and synced with your Shikshalokam account.')).toBeTruthy();
-  });
-
-  it('shows an em-dash for a field that is not filled in', async () => {
+  it('marks exactly the unset fields, not the populated ones', async () => {
     getProfile.mockResolvedValue(ok(INCOMPLETE, ['school_name', 'state']));
     const { baseElement } = mount(<AccountActions />);
     await waitFor(() => expect(getProfile).toHaveBeenCalled());
 
     await openDialog();
 
-    // A blank cell would read as a rendering fault; this reads as "not yet".
     // baseElement, not container: the dialog is portalled to document.body.
-    expect(baseElement.querySelectorAll('.profile-field-empty').length).toBe(2);
+    expect(baseElement.querySelectorAll('.profile-detail-empty').length).toBe(2);
   });
 
   it('explains itself with a Close action instead of showing blank fields when unconfigured', async () => {
@@ -380,10 +338,9 @@ describe('updating the profile', () => {
     await waitFor(() => expect(updateProfile).toHaveBeenCalledWith({ district: 'Mysuru' }));
   });
 
-  it('returns to the view showing the refreshed values', async () => {
+  it('confirms the save, without a second read', async () => {
     // No second GET: the backend re-reads from the user service before
-    // answering, so the PATCH response IS the refreshed state. Back to view
-    // rather than closing, so the user sees what actually stuck.
+    // answering, so the PATCH response IS the refreshed state.
     updateProfile.mockResolvedValue(ok({ ...COMPLETE, district: 'Mysuru' }));
     await openForm();
 
@@ -392,8 +349,7 @@ describe('updating the profile', () => {
     await userEvent.type(district, 'Mysuru');
     await userEvent.click(screen.getByRole('button', { name: 'Save profile' }));
 
-    expect(await screen.findByText('Mysuru')).toBeTruthy();
-    expect(screen.getByText('Your profile')).toBeTruthy();
+    expect(await screen.findByText('Profile updated successfully!')).toBeTruthy();
     expect(getProfile).toHaveBeenCalledTimes(1);
   });
 

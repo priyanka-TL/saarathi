@@ -30,6 +30,7 @@ from app.services.profile_service import (
     ProfileService,
     clean_update,
     is_profile_complete,
+    merge_for_update,
     missing_fields,
     serialize,
 )
@@ -172,6 +173,64 @@ def test_serialize_returns_one_shape_for_both_routes():
     assert set(body) == {"profile", "is_complete", "missing_fields"}
     assert body["is_complete"] is False
     assert body["missing_fields"] == ["role", "school_name", "district", "state"]
+
+
+# ---------------------------------------------------------------------------
+# the merge that stops a write clearing the fields it does not carry
+# ---------------------------------------------------------------------------
+
+def test_the_merge_carries_over_every_field_the_edit_did_not_touch():
+    """The fix for the reported data loss, at its smallest.
+
+    ELEVATE clears the profile fields a write body omits, so a one-field edit
+    still has to send all five.
+    """
+    current = to_profile(_full_result())
+
+    merged = merge_for_update(current, {"district": "Mysuru"})
+
+    assert merged == {
+        "name": "Asha Rao",
+        "role": "Teacher",
+        "school_name": "GHS Anekal",
+        "district": "Mysuru",
+        "state": "Karnataka",
+    }
+
+
+def test_a_change_wins_over_the_stored_value():
+    merged = merge_for_update({"name": "Old"}, {"name": "New"})
+
+    assert merged["name"] == "New"
+
+
+def test_a_field_empty_on_both_sides_is_omitted_not_sent_blank():
+    """`""` asks ELEVATE to STORE a blank, which is not "leave it unset"."""
+    merged = merge_for_update({"name": "Asha Rao", "state": None}, {"role": "Teacher"})
+
+    assert "state" not in merged
+    assert merged == {"name": "Asha Rao", "role": "Teacher"}
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None])
+def test_a_whitespace_only_stored_value_is_treated_as_unset(blank):
+    merged = merge_for_update({"name": blank}, {"role": "Teacher"})
+
+    assert "name" not in merged
+
+
+def test_values_are_trimmed_on_the_way_out():
+    merged = merge_for_update({"name": "  Asha Rao  "}, {"role": "  Teacher  "})
+
+    assert merged == {"name": "Asha Rao", "role": "Teacher"}
+
+
+def test_a_key_that_is_not_a_mandatory_field_is_ignored():
+    # Only MANDATORY_FIELDS are ours to write. `preferred_language` and the
+    # T&C flag are read but deliberately never sent back.
+    merged = merge_for_update({"preferred_language": "kn"}, {"nickname": "x"})
+
+    assert merged == {}
 
 
 # ---------------------------------------------------------------------------

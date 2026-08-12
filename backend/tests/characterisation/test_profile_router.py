@@ -34,9 +34,34 @@ COMPLETE = {
     "has_accepted_tnc": True,
 }
 
+# What a write leaves behind for everything the body did NOT carry. The five
+# profile fields are cleared; identity and settings ELEVATE holds elsewhere are
+# not, which is why they are listed here rather than blanked with the rest.
+CLEARED_BY_A_WRITE = {
+    "user_id": "1355",
+    "name": None,
+    "role": None,
+    "school_name": None,
+    "district": None,
+    "state": None,
+    "preferred_language": "kn",
+    "has_accepted_tnc": True,
+}
+
 
 class FakeElevate:
-    """Stands in for ElevateUserClient. Records the token it was called with."""
+    """Stands in for ElevateUserClient. Records the token it was called with.
+
+    `update_profile` REPLACES rather than merges, because that is what ELEVATE
+    actually does: any of the five profile fields the body omits comes back
+    null on the next read.
+
+    THIS FAKE USED TO DO `self.profile.update(fields)` -- a dict merge -- and
+    that single line is why the sparse-PATCH data-loss bug shipped green. The
+    fake was more forgiving than the real service, so a test suite that
+    explicitly asserted "editing one field must not blank the other four"
+    passed while production blanked them. Do not soften it back.
+    """
 
     def __init__(self, profile=None):
         self.profile = dict(profile if profile is not None else COMPLETE)
@@ -56,7 +81,7 @@ class FakeElevate:
         self.updates.append(fields)
         if self.update_error:
             raise self.update_error
-        self.profile.update(fields)
+        self.profile = {**CLEARED_BY_A_WRITE, **fields}
 
 
 @pytest.fixture()
@@ -156,12 +181,59 @@ def test_the_callers_own_token_is_what_reaches_elevate(client, elevate):
 # PATCH
 # ---------------------------------------------------------------------------
 
-def test_patch_sends_only_the_supplied_fields(client, elevate):
-    """Sparse, so editing one field cannot blank the other four."""
+def test_a_single_field_edit_still_sends_elevate_the_complete_set(client, elevate):
+    """The client request stays sparse; the UPSTREAM body must not be.
+
+    This assertion is the inverse of the one it replaces, which read
+    `elevate.updates == [{"district": "Mysuru"}]` under the banner "sparse, so
+    editing one field cannot blank the other four". That was exactly backwards:
+    ELEVATE clears what the body omits, so a sparse body is what blanked them.
+    """
     response = client.patch("/api/profile", json={"district": "Mysuru"})
 
     assert response.status_code == 200
-    assert elevate.updates == [{"district": "Mysuru"}]
+    assert elevate.updates == [{
+        "name": "Asha Rao",
+        "role": "Teacher",
+        "school_name": "GHS Anekal",
+        "district": "Mysuru",       # the edit
+        "state": "Karnataka",
+    }]
+
+
+def test_consecutive_single_field_updates_lose_nothing(client, elevate):
+    """The reported bug, as its own regression test.
+
+    Three saves in a row, each touching ONE field. Before the read-merge-write
+    fix the third response came back with only `name` populated and everything
+    else null -- which is precisely what the user reported and screenshotted.
+    """
+    client.patch("/api/profile", json={"district": "Mysuru"})
+    client.patch("/api/profile", json={"role": "Head Teacher"})
+    body = client.patch("/api/profile", json={"name": "P P"}).json()
+
+    assert body["profile"] == {
+        "user_id": "1355",
+        "name": "P P",
+        "role": "Head Teacher",
+        "school_name": "GHS Anekal",
+        "district": "Mysuru",
+        "state": "Karnataka",
+        "preferred_language": "kn",
+        "has_accepted_tnc": True,
+    }
+    assert body["is_complete"] is True
+    assert body["missing_fields"] == []
+
+
+def test_a_field_never_set_is_omitted_rather_than_sent_blank(client, elevate):
+    """Sending "" would ask ELEVATE to store a blank, not to leave it unset."""
+    elevate.profile = {**COMPLETE, "state": None}
+
+    client.patch("/api/profile", json={"district": "Mysuru"})
+
+    assert "state" not in elevate.updates[0]
+    assert elevate.updates[0]["district"] == "Mysuru"
 
 
 def test_patch_returns_the_refreshed_profile_so_the_ui_need_not_re_read(client, elevate):
@@ -175,9 +247,12 @@ def test_patch_returns_the_refreshed_profile_so_the_ui_need_not_re_read(client, 
 
 
 def test_patch_trims_whitespace_before_writing(client, elevate):
-    client.patch("/api/profile", json={"role": "  Teacher  "})
+    client.patch("/api/profile", json={"role": "  Head Teacher  "})
 
-    assert elevate.updates == [{"role": "Teacher"}]
+    # Trimmed -- and carried alongside the four fields the edit did not touch,
+    # which is what stops the write clearing them.
+    assert elevate.updates[0]["role"] == "Head Teacher"
+    assert elevate.updates[0]["school_name"] == "GHS Anekal"
 
 
 @pytest.mark.parametrize(
@@ -247,6 +322,46 @@ def test_a_timeout_is_a_504(client, elevate):
 
     assert response.status_code == 504
     assert response.json()["error_code"] == "UPSTREAM_TIMEOUT"
+
+
+def test_a_failed_re_read_still_reports_the_save_that_landed(client, elevate):
+    """The write succeeded; only the confirming read failed.
+
+    Answering 502 here would send the user back to retry a save that already
+    happened, and show them stale values while they did it. The merged values
+    are what was just written, so they are the honest answer.
+    """
+    calls = {"n": 0}
+    original_read = elevate.read_profile
+
+    def read_then_fail(token):
+        calls["n"] += 1
+        if calls["n"] > 1:                      # the post-write re-read
+            raise ElevateUpstreamError("read", 503)
+        return original_read(token)
+
+    elevate.read_profile = read_then_fail
+
+    response = client.patch("/api/profile", json={"district": "Mysuru"})
+
+    assert response.status_code == 200
+    assert response.json()["profile"]["district"] == "Mysuru"
+    # And nothing else was lost on the way through.
+    assert response.json()["profile"]["school_name"] == "GHS Anekal"
+
+
+def test_a_failed_pre_read_does_not_write_a_half_known_profile(client, elevate):
+    """No baseline means no safe merge, so the write must not go out at all.
+
+    Writing with an empty baseline would send only the caller's one field --
+    exactly the sparse body that caused the data loss.
+    """
+    elevate.read_error = ElevateUpstreamError("read", 503)
+
+    response = client.patch("/api/profile", json={"district": "Mysuru"})
+
+    assert response.status_code == 502
+    assert elevate.updates == []
 
 
 def test_an_upstream_failure_never_echoes_elevates_body(client, elevate):

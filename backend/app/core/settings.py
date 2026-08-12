@@ -154,11 +154,18 @@ class Settings(BaseSettings):
     # two disagree.
     elevate_base_url: Optional[str] = None
     # Split, not one `timeout=30` as the Django original uses. A request holds
-    # a worker thread and therefore a DB connection for its whole life
-    # (THREADPOOL_SIZE <= DB_POOL_SIZE), so a dead DNS must not park one for
+    # a worker thread for its whole life, so a dead DNS must not park one for
     # the full read budget. Same reasoning as bhashini_*_timeout below.
-    elevate_connect_timeout: float = 10.0
-    elevate_read_timeout: float = 30.0
+    #
+    # TIGHTER THAN BHASHINI'S, deliberately. A PATCH to /api/profile makes
+    # THREE sequential calls (read the baseline, write the merged set, read it
+    # back -- see ProfileService.update), so a per-call budget modelled on
+    # Bhashini's speech inference would compound into a two-minute worst case
+    # on one thread. A user-service read or write is a small database
+    # operation; 5s to connect and 10s to answer is generous for one, and
+    # keeps the three-call worst case BELOW what a single call used to allow.
+    elevate_connect_timeout: float = 5.0
+    elevate_read_timeout: float = 10.0
 
     # ---- provider credentials ----
     #
