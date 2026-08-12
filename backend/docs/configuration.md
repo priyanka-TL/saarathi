@@ -45,7 +45,8 @@ below. Everything else is a config row.
 
 | Key(s) | Why |
 |---|---|
-| `OPENROUTER_API_KEY`, `SAARTHI_STATIC_TOKEN` | secrets |
+| `OPENROUTER_API_KEY` | secret |
+| `ELEVATE_JWT_SECRET` | **secret** — ELEVATE's own `ACCESS_TOKEN_SECRET`. Required to trust ANY per-request bearer token the frontend sends after a real login; without it, a request carrying a token is refused rather than trusted unverified. Since AUTH_CHECK=true has no fallback identity for a missing token (removed — it was an authentication bypass), an unset secret means nothing can authenticate at all |
 | `MITRA_ORIGIN_URL`, `SAATHI_ORIGIN_URL` | **credentials** — these platforms gate admission on the Origin header. Never in the database, never in a log line. NOT `Settings` fields: a config row names the *variable* via `remote.auth.credential_env` and the value is read from the environment, which is why adding a platform adds no field |
 | `DATABASE_URL`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `THREADPOOL_SIZE` | needed to reach the database at all |
 | `HOST`, `PORT`, `WORKERS`, `API_PREFIX`, `FRONTEND_ORIGINS` | read before the app object exists |
@@ -62,8 +63,6 @@ below. Everything else is a config row.
 | `CLOUD_STORAGE_PROVIDER`, `CLOUD_STORAGE_ACCOUNTNAME`, `CLOUD_STORAGE_REGION`, `CLOUD_ENDPOINT`, `CLOUD_STORAGE_BUCKETNAME`, `CLOUD_STORAGE_BUCKET_TYPE` | needed to build a storage client at boot, before anything can be read from a database. Names follow the ELEVATE convention shared with the Node services, so one deployment's values drop into another |
 | `BHASHINI_BASE_URL`, `BHASHINI_*_TIMEOUT`, `VOICE_MAX_AUDIO_BYTES`, `VOICE_CHUNK_DURATION_S`, `VOICE_TTS_BYTE_LIMIT`, `VOICE_ASR_MAX_WORKERS`, `VOICE_FFMPEG_TIMEOUT_S`, `VOICE_UPLOAD_URL_EXPIRY_S` | one shared upstream, not a per-agent choice. Voice is a property of the deployment, not of which agent happens to be answering |
 | `CLOUD_STORAGE_MAX_ATTEMPTS`, `CLOUD_STORAGE_RETRY_MODE` | boto3's retry policy, for the `aws`/`s3`/`oci`/`minio` driver. `standard` mode retries throttling and transient 5xx with exponential backoff; `max_attempts` is the TOTAL, not additional |
-| `SAATHI_EMAIL`, `SAATHI_PASSWORD` | **credentials**, read when a saathi agent's `remote.auth.scheme` is `elevate_login`. Named by the config row, not declared as `Settings` fields |
-| `SAATHI_ACCESS_TOKEN` | a **credential**, read when the scheme is `static_token` |
 | `CONVERSATIONS_PAGE_LIMIT_MAX` | ceiling on `GET /api/conversations?limit=`, applied after the client's own value. Caps how much history one request can pull |
 | `LOCAL_STORAGE_DIR` | only read by the `local` provider, which is development-only |
 
@@ -227,10 +226,12 @@ no startup sync left to catch it.
 | `MITRA_COMPANY`, `MITRA_STORY_BOT_ROUTE`, `MITRA_DISCUSSION_BOT_ROUTE` | `remote.options.company` / `.bot_route` |
 | the sixteen `MITRA_*` connection and path settings | the `remote` envelope + `remote.options.paths` (migrations 0009, 0013) |
 | `MITRA_ENABLED`, `SAATHI_ENABLED` | `PROVIDERS_ENABLED` (migration 0013) |
-| `SAATHI_TENANT_CODE`, `ELEVATE_BASE_URL`, `SAATHI_LOGIN_MECHANISM` | `remote.auth.tenant_code` / `.token_endpoint` / `.scheme` (migration 0013) |
+| `SAATHI_TENANT_CODE`, `ELEVATE_BASE_URL`, `SAATHI_LOGIN_MECHANISM` | `remote.auth.tenant_code` / `.token_endpoint` / `.scheme` (migration 0013) — **and these three in turn removed by migration 0018**, once Saathi stopped minting a connection-level token at all |
+| `SAATHI_EMAIL`, `SAATHI_PASSWORD`, `SAATHI_ACCESS_TOKEN`, `remote.auth.token_endpoint` / `.tenant_code` / `.identifier_env` / `.secret_env` / `.token_env` | the calling `UserContext.token` — Saathi's own per-request, already-verified ELEVATE login (migration 0018; see `app/providers/saathi/provider.py`) |
 | `agent_type: saathi_flow` | `agent_type: remote_flow` with `remote.provider: saathi` (migration 0013) |
 | `Settings.mitra_*` / `Settings.saathi_*` | nothing — a credential is NAMED by a config row, not declared as a field |
 | `Container.mitra_rest`, `.mitra_clients`, `.mitra_sessions`, `.saathi_*` | `Container.providers` (one `ProviderRegistry`) |
+| `SAARTHI_STATIC_TOKEN` / `Settings.saarthi_static_token` | nothing — it was the fallback identity `Authenticator.authenticate()` served to any request with **no** bearer token at all, which was an authentication bypass in practice (any caller, logged in or not, got a real identity for free). `AUTH_CHECK=true` now has no fallback: no token is unconditionally `401` |
 
 `BaseAgentSpec` is `extra="forbid"`, so a config still written in the old shape
 is **rejected** by the config API rather than silently ignored.

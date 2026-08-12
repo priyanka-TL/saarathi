@@ -14,13 +14,14 @@ so what this route answers IS the sidebar. Two things are pinned here.
    onboarding costs zero writes -- and a tenant's own row shadows the default
    for that tenant ONLY.
 
-READING THE DOCUMENT FOR A SPECIFIC TENANT. Identity is resolved once from
-configuration, not per request (app/dependencies/identity.py -- there is no
-login flow upstream of this API that could supply a caller-specific token), so
-an HTTP client cannot be made to look like a different tenant's browser. The
-scope-resolution tests below call `resolve_for_user` directly instead -- the
-exact function this route calls -- which is what actually proves the
-precedence rule, independent of how a caller's tenant reaches it.
+READING THE DOCUMENT FOR A SPECIFIC TENANT. Identity IS resolved per request
+now (app/dependencies/identity.py), from whatever bearer token a caller sends
+-- an HTTP client minting its own signed token absolutely can look like a
+different tenant's browser (see tests/integration/test_identity_per_request.py).
+The scope-resolution tests below still call `resolve_for_user` directly,
+though, because that is the exact function this route calls and proving the
+precedence rule against it directly is simpler than minting a token per
+tenant just to reach the same code one HTTP hop later.
 """
 from __future__ import annotations
 
@@ -315,13 +316,19 @@ def test_an_empty_catalogue_is_200_with_an_empty_list_not_404(client, monkeypatc
     assert response.json()["capabilities"] == []
 
 
-def test_the_route_needs_no_credential(anonymous_client):
-    """Identity comes from configuration, not the request (see
-    app/dependencies/identity.py) -- a caller that sends no `Authorization`
-    header at all still gets 200, because there is nothing about the request
-    the resolver ever reads. This is the frontend's actual traffic pattern: it
-    has no login flow and sends no such header, ever."""
+def test_the_route_401s_with_no_credential(anonymous_client):
+    """Identity is resolved per request from the Authorization header (see
+    app/dependencies/identity.py), and AUTH_CHECK=true has no fallback for a
+    request that sends none -- removed as an authentication bypass. The
+    frontend now has a real login flow and sends a bearer token on every
+    call (src/api/http.js), so an anonymous caller here is genuinely
+    unauthenticated, not the app's normal traffic pattern."""
     response = anonymous_client.get("/api/ui/capabilities")
+    assert response.status_code == 401
+
+
+def test_the_route_returns_capabilities_with_a_valid_credential(client):
+    response = client.get("/api/ui/capabilities")
     assert response.status_code == 200
     assert response.json()["capabilities"]
 

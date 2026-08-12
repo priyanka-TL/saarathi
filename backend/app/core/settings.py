@@ -80,8 +80,10 @@ class Settings(BaseSettings):
     threadpool_size: Optional[int] = None
 
     # ---- feature flags ----
-    # The ONLY auth switch. True decodes SAARTHI_STATIC_TOKEN for the identity;
-    # False serves the hardcoded one. Defaults True so a missing flag fails safe.
+    # The ONLY auth switch. True requires a verified per-request bearer token
+    # on every call (see app/services/identity.py); False serves the
+    # hardcoded dev identity instead, regardless of any token sent -- NEVER
+    # in prod. Defaults True so a missing flag fails safe.
     auth_check: bool = True
     # 0 => the whole /api/agents admin surface 404s.
     saarthi_admin_enabled: int = 0
@@ -117,9 +119,15 @@ class Settings(BaseSettings):
     provider_idle_close_s: float = 1200.0
 
     # ---- auth / jwt ----
-    # Saarthi is the sole validator: this app decodes the token and never
-    # verifies signature or expiry, so there is deliberately no secret setting.
-    saarthi_static_token: Optional[str] = None
+    # ELEVATE's own ACCESS_TOKEN_SECRET. Required to trust ANY per-request
+    # bearer token (the login flow's output) -- it comes from the request
+    # itself, so it must be signature- and expiry-verified or any caller
+    # could forge an identity/tenant/role. Without this set, a per-request
+    # token is refused rather than trusted unverified -- and since AUTH_CHECK
+    # no longer has a no-token fallback (removed: it was an authentication
+    # bypass -- see app/services/identity.py), an unset secret means nothing
+    # can authenticate at all while AUTH_CHECK=true.
+    elevate_jwt_secret: Optional[str] = None
     # MUST match Mitra's SSO derivation, email = data[field] + suffix. Wrong
     # values create a SECOND Mitra profile and split a user's stories.
     jwt_identifier_field: str = "id"
@@ -132,27 +140,30 @@ class Settings(BaseSettings):
     # A provider's credentials still live in .env -- a config row is readable
     # through the admin API, so it must never hold one -- but they are reached
     # by NAME, not by field. `remote.auth` on the agent config names the
-    # variable (`credential_env`, `identifier_env`, `secret_env`, `token_env`)
-    # and app/providers/connection.py resolves it with os.getenv against the
-    # environment load_dotenv populated above.
+    # variable (`credential_env`) and app/providers/connection.py resolves it
+    # with os.getenv against the environment load_dotenv populated above.
     #
     # The variables a stock deployment sets are documented in .env.example:
     #
     #     MITRA_ORIGIN_URL     the Origin header Mitra gates admission on
     #     SAATHI_ORIGIN_URL    the same, for Saathi
-    #     SAATHI_EMAIL         ) the ELEVATE login, when a Saathi agent's
-    #     SAATHI_PASSWORD      ) auth.scheme is "elevate_login"
-    #     SAATHI_ACCESS_TOKEN  a pre-issued JWT, for auth.scheme "static_token"
+    #
+    # Saathi used to also name SAATHI_EMAIL/SAATHI_PASSWORD/SAATHI_ACCESS_TOKEN
+    # here, to mint its own connection-level ELEVATE credential. That mechanism
+    # (app/providers/saathi/auth.py) is gone: Saathi now authenticates every
+    # call with the CALLING UserContext's own `.token`, from that user's real
+    # ELEVATE login -- see ELEVATE_JWT_SECRET above, and
+    # app/providers/saathi/provider.py.
     #
     # Adding a platform adds variables to .env and names them from its config
     # row. It does NOT add fields here, which is what stopped every new platform
     # from being a Settings change.
     #
     # Everything that is NOT a credential -- base URL, stream URL, timeouts,
-    # endpoint paths, tenant code, the ELEVATE token endpoint, the company, the
-    # bot route -- moved into the agent config row, where it is per tenant
-    # instead of per process. Note extra="ignore" above: a stale MITRA_BASE_URL
-    # or SAATHI_TENANT_CODE left in a .env is accepted and does nothing.
+    # endpoint paths, the company, the bot route -- moved into the agent config
+    # row, where it is per tenant instead of per process. Note extra="ignore"
+    # above: a stale MITRA_BASE_URL or SAATHI_EMAIL left in a .env is accepted
+    # and does nothing.
 
     # ---- cloud storage (provider-agnostic) ----
     # Switching provider is a .env change, not a code change. Names follow the

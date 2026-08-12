@@ -98,7 +98,7 @@ class BaseWsFlowProvider:
     def open_session(self, remote, session_view, user) -> SessionInit:
         raise NotImplementedError
 
-    def _access_token(self) -> Optional[str]:
+    def _access_token(self, user) -> Optional[str]:
         """The token to put in the authenticate frame.
 
         None means a guest socket, which is not a degraded mode: a server that
@@ -112,7 +112,7 @@ class BaseWsFlowProvider:
     # The channel
     # ------------------------------------------------------------------
 
-    def _handshake_frame(self, remote, sess) -> dict:
+    def _handshake_frame(self, remote, sess, user) -> dict:
         """The authenticate frame this family's consumer expects."""
         return {
             "type": "authenticate",
@@ -120,7 +120,7 @@ class BaseWsFlowProvider:
             "profileid": sess.remote_profile_id,
             "projectid": "",
             "taskid": None,
-            "access_token": self._access_token(),
+            "access_token": self._access_token(user),
             "route": sess.language,
             "bot_route": sess.remote_bot_route,
             "flow_name": remote.flow_name,
@@ -134,14 +134,14 @@ class BaseWsFlowProvider:
     def _turn_frame(self, text: str) -> dict:
         return {"type": "message", "text": text, "context": "", "asr_audio": None}
 
-    def _new_channel(self, remote, sess) -> WsChannel:
+    def _new_channel(self, remote, sess, user) -> WsChannel:
         conn = self._conn
         return WsChannel(
             url=conn.stream_url,
             origin=conn.origin_url,
             headers=[f"User-Agent: {conn.user_agent}", ACCEPT_LANGUAGE],
             connect_timeout_s=conn.stream_connect_timeout_s,
-            handshake_frame=self._handshake_frame(remote, sess),
+            handshake_frame=self._handshake_frame(remote, sess, user),
             turn_frame=self._turn_frame,
             parse=partial(
                 parse,
@@ -159,7 +159,7 @@ class BaseWsFlowProvider:
     # RemoteProvider
     # ------------------------------------------------------------------
 
-    def turn(self, remote, session_view, text: str, *, first_turn: bool) -> ProviderTurn:
+    def turn(self, remote, session_view, text: str, user, *, first_turn: bool) -> ProviderTurn:
         timeout_s = (
             remote.turn.first_turn_timeout_ms if first_turn
             else remote.turn.turn_timeout_ms
@@ -167,7 +167,7 @@ class BaseWsFlowProvider:
         idle_gap_s = remote.turn.idle_gap_ms / 1000
 
         def factory():
-            return self._new_channel(remote, session_view)
+            return self._new_channel(remote, session_view, user)
 
         ch = self._pool.acquire(session_view, self._conn, factory)
         try:
@@ -179,8 +179,10 @@ class BaseWsFlowProvider:
             # second failure here propagates.
             #
             # For a per-user platform a closed socket is also how a rejected
-            # token presents, and reconnecting re-reads the token provider -- so
-            # an expired session heals here without the caller knowing.
+            # token presents. Reconnecting re-reads `user.token`, which is the
+            # SAME token for the rest of this turn -- there is nothing to
+            # re-mint -- so a genuinely expired ELEVATE session fails again
+            # here, cleanly, rather than "healing" silently.
             ch = self._pool.reacquire(session_view, self._conn, factory)
             bot = ch.send_and_await_turn(text, timeout_s, idle_gap_s)
 
@@ -236,23 +238,34 @@ class BaseWsFlowProvider:
             )
         return kept
 
-    def is_complete(self, remote, session_view) -> bool:
+    def is_complete(self, remote, session_view, user) -> bool:
         if not self.options.completion_poll_every_turn:
             return False
         if not session_view.remote_session_id:
             return False
-        return bool(self._rest.is_session_completed(session_view.remote_session_id))
+        return bool(self._is_session_completed(session_view.remote_session_id, user))
 
-    def reconcile(self, remote, session_view, sent_text: str) -> Optional[Reconciliation]:
+    def _is_session_completed(self, session_id: str, user) -> bool:
+        """A hook, not a direct `self._rest` call: Mitra's REST surface needs no
+        per-user credential and SaathiRestClient's does (`_access_token`'s
+        counterpart for REST rather than the socket) -- override where it does.
+        """
+        return self._rest.is_session_completed(session_id)
+
+    def reconcile(self, remote, session_view, sent_text: str, user) -> Optional[Reconciliation]:
         """READ-ONLY. Never re-sends -- see app/providers/recovery.py."""
         if session_view is None:
             return None
         if not session_view.remote_session_id or not session_view.remote_profile_id:
             return None
-        rows = self._rest.recent_chat(
-            session_view.remote_session_id, session_view.remote_profile_id,
+        rows = self._recent_chat(
+            session_view.remote_session_id, session_view.remote_profile_id, user,
         )
         return reconcile(rows, sent_text)
+
+    def _recent_chat(self, session_id: str, profile_id: str, user):
+        """See `_is_session_completed` -- the same per-platform credential seam."""
+        return self._rest.recent_chat(session_id, profile_id)
 
     def close_channel(self, conversation_id: UUID) -> None:
         if self._pool is not None:

@@ -81,7 +81,7 @@ class TurnFinalizer:
         self._audit = audit
         self._provider_for = provider_for
 
-    def reconcile_turn(self, agent, session_view, sent_text: str) -> Optional[Reconciliation]:
+    def reconcile_turn(self, agent, session_view, sent_text: str, user) -> Optional[Reconciliation]:
         """Ask the remote platform what became of ``sent_text``. None if not
         applicable.
 
@@ -100,16 +100,16 @@ class TurnFinalizer:
         if provider is None or not getattr(provider, "supports_recovery", False):
             return None
 
-        return provider.reconcile(agent.spec.remote, session_view, sent_text)
+        return provider.reconcile(agent.spec.remote, session_view, sent_text, user)
 
-    def recover_timed_out_turn(self, agent, session_view, sent_text, exc):
+    def recover_timed_out_turn(self, agent, session_view, sent_text, exc, user):
         """Turn a MitraTurnTimeout into the reply Mitra already produced.
 
         Returns an AgentTurn to carry on with, or None to let the timeout
         propagate (the client then gets its 504 as before).
         """
         try:
-            result = self.reconcile_turn(agent, session_view, sent_text)
+            result = self.reconcile_turn(agent, session_view, sent_text, user)
         except Exception as recovery_error:
             # Recovery is best-effort: never let it mask the original timeout.
             logger.warning(
@@ -138,7 +138,7 @@ class TurnFinalizer:
             provider = self._provider_for(agent)
             done = bool(
                 provider is not None
-                and provider.is_complete(agent.spec.remote, session_view)
+                and provider.is_complete(agent.spec.remote, session_view, user)
             )
         except Exception as poll_error:  # noqa: BLE001
             logger.warning("turn recovery: completion poll failed: %s", poll_error)

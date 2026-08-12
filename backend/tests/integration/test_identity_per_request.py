@@ -1,50 +1,56 @@
-"""Identity is resolved from CONFIGURATION, not from the request.
+"""Identity is resolved per request from the Authorization header, and a
+missing or invalid one is UNAUTHORIZED -- there is no fallback identity.
 
-`get_current_user` (app/dependencies/identity.py) reads nothing off the
-request at all -- no `Authorization` header, no cookie, nothing. It always
-returns `Authenticator.authenticate()`, which was decided once at container
-build time from `.env`. This is deliberate, not an oversight: the frontend is
-a bare SPA with no login flow and no way to obtain or send a caller-specific
-JWT, so a design that expected one would either 401 every real browser
-request (nothing to read) or invent a token source that does not exist.
-`AUTH_CHECK` still has its two branches -- decode `SAARTHI_STATIC_TOKEN` vs.
-the hardcoded development identity -- but the choice between them is made once
-at startup, not per request.
+`get_current_user` (app/dependencies/identity.py) reads the request's
+`Authorization: Bearer <token>` header. When present and it VERIFIES (against
+ELEVATE_JWT_SECRET -- see app/services/identity.py::context_from_token), the
+UserContext comes from that token: their real tenant, org, roles. When
+present but INVALID -- bad signature, expired, or no ELEVATE_JWT_SECRET
+configured at all to check it against -- the request 401s. When ABSENT, the
+request ALSO 401s (when AUTH_CHECK=true): falling back to a different,
+unrelated identity would be worse than rejecting a call that carries no
+credential at all, and doing so was exactly the authentication bypass this
+project's own review found -- any caller, logged in or not, was served a
+real identity for free via a boot-provisioned SAARTHI_STATIC_TOKEN. That
+fallback is gone; this file used to pin it deliberately (see prior history)
+and now pins its removal instead.
 
-This file used to test the opposite of that (identity varying per caller, via
-the bearer token) -- that mechanism existed for one phase of this session's
-work before turning out to be undeployable given the frontend's shape, and was
-reverted. What is asserted here now is the actual, current contract: nothing
-about a request -- present header, absent header, garbage header -- changes
-who a request resolves to.
-
-Multi-tenant CONFIGURATION still exists and is still exercised (see
+Multi-tenant CONFIGURATION still exists independently (see
 tests/integration/test_admin_capabilities.py, tests/guards/
-test_tenant_isolation.py): an admin's `/api/admin/capabilities` calls specify
-`tenant_id`/`organization_id` explicitly, not derived from the caller's own
-identity. What does not exist is an ordinary end-user request resolving to
-more than one tenant.
+test_tenant_isolation.py): an admin's /api/admin/capabilities calls specify
+tenant_id/organization_id explicitly, not derived from the caller. What's new
+here is that an ORDINARY end-user request can now resolve to more than one
+identity too, depending on who is logged in -- or to none at all, if no one
+is.
 """
 from __future__ import annotations
+
+import time
 
 import jwt
 import pytest
 from starlette.testclient import TestClient
 
+#: Matches what `verified_app` configures as ELEVATE_JWT_SECRET -- a token
+#: minted with this by default actually verifies, so a test proving forgery is
+#: rejected has to pass a different secret explicitly. (The whole suite now
+#: has a secret configured globally too -- see tests/conftest.py -- but
+#: `verified_app` still patches it explicitly so this file works even if that
+#: default ever changes.)
+TEST_SECRET = "test-elevate-jwt-secret"
 
-def make_token(*, user_id: str, tenant_code: str, roles=("mentee",), org_id="62") -> str:
-    """Mint a Saarthi-shaped JWT.
 
-    No longer decoded by anything in the live request path -- kept because
-    building one is still occasionally useful for a test that wants to prove a
-    header is IGNORED (see below), and because
-    app/services/identity.py::context_from_token is still real, tested,
-    decode-only logic (see tests/unit/test_identity.py) even though nothing on
-    the live HTTP path calls it anymore.
-
-    Signed with a throwaway secret ON PURPOSE: Saarthi is the sole validator
-    of a real token; this app was never the one checking a signature.
-    """
+def make_token(
+    *,
+    user_id: str,
+    tenant_code: str,
+    roles=("mentee",),
+    org_id: str = "62",
+    secret: str = TEST_SECRET,
+    exp_offset_s: int = 3600,
+) -> str:
+    """Mint a Saarthi-shaped JWT, signed with `secret` and expiring in
+    `exp_offset_s` seconds (negative => already expired)."""
     payload = {
         "data": {
             "id": user_id,
@@ -59,109 +65,158 @@ def make_token(*, user_id: str, tenant_code: str, roles=("mentee",), org_id="62"
                 }
             ],
         },
-        "iat": 1785242569,
-        "exp": 1785847369,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + exp_offset_s,
     }
-    return jwt.encode(payload, "irrelevant-secret", algorithm="HS256")
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+@pytest.fixture()
+def verified_app(api_app, monkeypatch):
+    """`api_app`, with ELEVATE_JWT_SECRET configured so a bearer token minted
+    with TEST_SECRET actually verifies.
+    """
+    monkeypatch.setattr(api_app.state.container.settings, "elevate_jwt_secret", TEST_SECRET)
+    return api_app
+
+
+def _bearer_client(app, token: str | None = None) -> TestClient:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    return TestClient(app, raise_server_exceptions=False, headers=headers)
 
 
 # ---------------------------------------------------------------------------
-# The actual bug this file exists to prevent a regression of
+# No credential at all: UNAUTHORIZED. This is the headline behaviour.
 # ---------------------------------------------------------------------------
 
 
-def test_a_request_with_no_credential_at_all_succeeds(anonymous_client):
-    """THE headline behaviour. The frontend sends no Authorization header on
-    any request, ever -- it has no login flow. If this 401s, the whole app is
-    unusable from the browser, which is exactly what happened when identity
-    was briefly made per-request without a frontend that could supply one."""
+def test_a_request_with_no_credential_at_all_401s(anonymous_client):
+    """No fallback identity for a missing token -- this used to be a 200 via
+    SAARTHI_STATIC_TOKEN, which was exactly the authentication bypass this
+    file now exists to keep closed."""
     response = anonymous_client.get("/api/conversations")
-    assert response.status_code == 200
+    assert response.status_code == 401
 
 
-def test_a_request_with_no_credential_gets_the_configured_identity(anonymous_client, client):
-    """Not just "succeeds" -- succeeds AS the same identity a credentialed
-    request gets, because both paths resolve identically now."""
+def test_a_logged_in_users_activity_is_invisible_to_an_anonymous_caller(anonymous_client, client):
+    """The contrast that matters: `client` (a real, verified bearer token) can
+    create and read its own data; `anonymous_client` (no token) cannot reach
+    ANY of it -- not "sees nothing," but 401, before the question of whose
+    data it is even comes up."""
     created = client.post("/api/reset", json={})
     assert created.status_code == 200
     conversation_id = created.json()["conversation_id"]
 
-    # Visible to the "anonymous" client too: there is only one identity.
     response = anonymous_client.get(f"/api/conversations/{conversation_id}/messages")
-    assert response.status_code == 200
+    assert response.status_code == 401
 
 
 # ---------------------------------------------------------------------------
-# Nothing about the request changes the outcome
+# A present-but-invalid credential: rejected, never silently downgraded
 # ---------------------------------------------------------------------------
+
+
+def test_a_garbage_bearer_token_401s(api_app):
+    client = _bearer_client(api_app, "not-a-real-jwt")
+    assert client.get("/api/conversations").status_code == 401
+
+
+def test_a_well_formed_token_401s_when_no_secret_is_configured(api_app, monkeypatch):
+    """Models a deployment that hasn't set ELEVATE_JWT_SECRET yet -- even a
+    perfectly well-formed, correctly-shaped token cannot be trusted and is
+    refused. (The suite configures a secret globally by default -- see
+    tests/conftest.py -- so this test explicitly blanks it for itself.)"""
+    monkeypatch.setattr(api_app.state.container.settings, "elevate_jwt_secret", "")
+    token = make_token(user_id="1", tenant_code="someone_else")
+    client = _bearer_client(api_app, token)
+    assert client.get("/api/conversations").status_code == 401
+
+
+def test_a_forged_signature_401s_even_with_a_secret_configured(verified_app):
+    forged = make_token(user_id="1", tenant_code="attacker", secret="wrong-secret")
+    assert _bearer_client(verified_app, forged).get("/api/conversations").status_code == 401
+
+
+def test_an_expired_bearer_token_401s_even_with_a_secret_configured(verified_app):
+    expired = make_token(user_id="1", tenant_code="t", exp_offset_s=-3600)
+    assert _bearer_client(verified_app, expired).get("/api/conversations").status_code == 401
 
 
 @pytest.mark.parametrize(
     "header",
-    [
-        None,
-        "Bearer not-a-real-jwt",
-        "Basic dXNlcjpwYXNz",
-        "",
-    ],
-    ids=["absent", "well-formed-but-fake-jwt", "wrong-scheme", "empty"],
+    ["Basic dXNlcjpwYXNz", ""],
+    ids=["wrong-scheme", "empty"],
 )
-def test_no_header_value_is_examined_at_all(api_app, header):
-    """A present-but-garbage `Authorization` header does not even reach a
-    decoder -- it is never read. All four cases resolve identically."""
-    headers = {"Authorization": header} if header is not None else {}
-    client = TestClient(api_app, raise_server_exceptions=False, headers=headers)
-    assert client.get("/api/conversations").status_code == 200
-
-
-def test_a_real_bearer_token_for_a_different_tenant_changes_nothing(api_app):
-    """The strongest version of the point: even a WELL-FORMED token naming a
-    different tenant is inert, because nothing reads it. Two requests --
-    identical except for this header -- resolve to the same identity."""
-    plain = TestClient(api_app, raise_server_exceptions=False)
-    with_token = TestClient(
-        api_app, raise_server_exceptions=False,
-        headers={"Authorization": f"Bearer {make_token(user_id='1', tenant_code='someone_else')}"},
+def test_a_non_bearer_or_empty_header_401s_same_as_no_header(verified_app, header):
+    """Not every header is a credential attempt -- one that isn't even shaped
+    like a bearer token is treated the same as no header at all, which is
+    401 (no fallback), same as a genuinely absent header."""
+    client = TestClient(
+        verified_app, raise_server_exceptions=False, headers={"Authorization": header},
     )
-
-    plain_ids = {c["id"] for c in plain.get("/api/conversations").json()["conversations"]}
-    token_ids = {
-        c["id"] for c in with_token.get("/api/conversations").json()["conversations"]
-    }
-    assert plain_ids == token_ids
+    assert client.get("/api/conversations").status_code == 401
 
 
 # ---------------------------------------------------------------------------
-# AUTH_CHECK's two branches -- chosen once, at startup, not per request
+# A verified bearer token: the real per-request identity
 # ---------------------------------------------------------------------------
 
 
-def test_auth_check_true_serves_the_decoded_static_token_identity(api_app):
-    assert api_app.state.container.settings.auth_check is True
-    identity = api_app.state.authenticator.authenticate()
-    # Matches SAARTHI_STATIC_TOKEN in the test environment's .env-derived
-    # settings -- see tests/conftest.py for why that value is deterministic.
-    assert identity.tenant_code
-    assert identity.user_id
+def test_a_verified_bearer_token_is_accepted(verified_app):
+    token = make_token(user_id="111", tenant_code="tenant-a")
+    assert _bearer_client(verified_app, token).get("/api/conversations").status_code == 200
 
 
-def test_auth_check_false_serves_the_development_identity(api_app, anonymous_client, monkeypatch):
+def test_two_different_verified_tokens_both_resolve_independently(verified_app):
+    """The headline behaviour this feature exists to deliver: the SAME running
+    process serves two different logged-in identities on two requests."""
+    token_a = make_token(user_id="111", tenant_code="tenant-a")
+    token_b = make_token(user_id="222", tenant_code="tenant-b")
+
+    resp_a = _bearer_client(verified_app, token_a).get("/api/conversations")
+    resp_b = _bearer_client(verified_app, token_b).get("/api/conversations")
+
+    assert resp_a.status_code == 200
+    assert resp_b.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Authenticator's own behaviour, below the HTTP layer
+# ---------------------------------------------------------------------------
+
+
+def test_authenticate_with_no_token_raises_every_time(api_app, monkeypatch):
+    """No caching, no fallback: every argument-less call raises afresh. (There
+    used to be a cached fallback identity here -- see this file's own module
+    docstring for why it's gone.)"""
+    monkeypatch.setattr(api_app.state.container.settings, "elevate_jwt_secret", "")
+    authenticator = api_app.state.authenticator
+
+    from app.exceptions.domain import InvalidTokenError
+
+    with pytest.raises(InvalidTokenError):
+        authenticator.authenticate()
+    with pytest.raises(InvalidTokenError):
+        authenticator.authenticate()
+
+
+def test_auth_check_false_serves_the_development_identity_regardless_of_any_token(
+    api_app, monkeypatch
+):
     from app.services.identity import DEFAULT_TENANT_CODE, DEFAULT_USER_ID, default_context
 
     monkeypatch.setattr(api_app.state.container.settings, "auth_check", False)
     monkeypatch.setattr(
-        api_app.state.authenticator, "_user",
+        api_app.state.authenticator, "_default",
         default_context(api_app.state.container.settings),
     )
+    monkeypatch.setattr(api_app.state.authenticator, "_auth_check", False)
 
     identity = api_app.state.authenticator.authenticate()
     assert identity.tenant_code == DEFAULT_TENANT_CODE
     assert identity.user_id == DEFAULT_USER_ID
-    assert anonymous_client.get("/api/conversations").status_code == 200
 
-
-def test_authenticate_returns_the_same_cached_identity_every_call(api_app):
-    """Resolved once at construction, not re-decoded per call -- there is no
-    per-request work happening here at all."""
-    authenticator = api_app.state.authenticator
-    assert authenticator.authenticate() is authenticator.authenticate()
+    # Even a well-formed, otherwise-valid bearer token is ignored in this mode.
+    token = make_token(user_id="999", tenant_code="someone_else")
+    client = _bearer_client(api_app, token)
+    assert client.get("/api/conversations").status_code == 200

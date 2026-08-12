@@ -2,6 +2,7 @@ import { render } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import Sidebar from '../components/sidebar/Sidebar.jsx';
+import { AuthProvider } from '../context/AuthContext.jsx';
 
 /**
  * The rail's control hierarchy, asserted structurally.
@@ -9,29 +10,35 @@ import Sidebar from '../components/sidebar/Sidebar.jsx';
  * jsdom computes no layout, so "New Chat looks primary" is not directly
  * testable. What IS testable is the ordering and nesting the design depends on,
  * and the spacer chain it must not break.
+ *
+ * Wrapped in AuthProvider: the rail now renders an AccountRow (logout
+ * control) that reads useAuth(), same as ChatPage does via App.jsx in
+ * production.
  */
 function sidebar(props = {}) {
   return (
-    <Sidebar
-      open={false}
-      onClose={() => {}}
-      conversations={[]}
-      activeConversationId={null}
-      onSelectConversation={() => {}}
-      onNewChat={() => {}}
-      agents={[]}
-      capabilities={[]}
-      activeCard={null}
-      activeAgentKey={null}
-      onRunAction={() => {}}
-      onSelectAgent={() => {}}
-      isBusy={() => false}
-      toast={null}
-      voiceLanguage="en"
-      onVoiceLanguageChange={() => {}}
-      voiceAvailable
-      {...props}
-    />
+    <AuthProvider>
+      <Sidebar
+        open={false}
+        onClose={() => {}}
+        conversations={[]}
+        activeConversationId={null}
+        onSelectConversation={() => {}}
+        onNewChat={() => {}}
+        agents={[]}
+        capabilities={[]}
+        activeCard={null}
+        activeAgentKey={null}
+        onRunAction={() => {}}
+        onSelectAgent={() => {}}
+        isBusy={() => false}
+        toast={null}
+        voiceLanguage="en"
+        onVoiceLanguageChange={() => {}}
+        voiceAvailable
+        {...props}
+      />
+    </AuthProvider>
   );
 }
 

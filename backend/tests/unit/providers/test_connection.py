@@ -130,28 +130,26 @@ def test_a_different_origin_still_produces_a_different_checksum(monkeypatch):
 
 
 def test_saathi_credentials_are_resolved_by_name(monkeypatch):
-    from tests.provider_factories import (
-        SAATHI_EMAIL_ENV, SAATHI_ORIGIN_ENV, SAATHI_PASSWORD_ENV,
-    )
+    """Saathi's remote.auth is Origin-only now (same shape as Mitra's) --
+    the per-user ELEVATE token it used to mint from identifier_env/secret_env
+    comes from the caller's own UserContext.token instead, never from
+    connection config. See app/providers/saathi/provider.py."""
+    from tests.provider_factories import SAATHI_ORIGIN_ENV
 
     monkeypatch.setenv(SAATHI_ORIGIN_ENV, "https://saathi-origin.test")
-    monkeypatch.setenv(SAATHI_EMAIL_ENV, "person@example.test")
-    monkeypatch.setenv(SAATHI_PASSWORD_ENV, "s3cret")
 
     conn = resolve_connection(_Settings(), remote_spec("saathi"))
     assert conn.origin_url == "https://saathi-origin.test"
-    assert conn.secrets["identifier_env"] == "person@example.test"
-    assert conn.secrets["secret_env"] == "s3cret"
-    # The names are on the connection; the values are not in its repr.
-    assert "s3cret" not in repr(conn)
-    assert dict(conn.auth)["identifier_env"] == SAATHI_EMAIL_ENV
+    # The name is on the connection; the value is not in its repr.
+    assert "https://saathi-origin.test" not in repr(conn)
+    assert dict(conn.auth)["credential_env"] == SAATHI_ORIGIN_ENV
 
 
-def test_a_different_secret_produces_a_different_checksum(monkeypatch):
-    from tests.provider_factories import SAATHI_PASSWORD_ENV
+def test_a_different_origin_produces_a_different_checksum_for_saathi_too(monkeypatch):
+    from tests.provider_factories import SAATHI_ORIGIN_ENV
 
     a = resolve_connection(_Settings(), remote_spec("saathi"))
-    monkeypatch.setenv(SAATHI_PASSWORD_ENV, "a-rotated-password")
+    monkeypatch.setenv(SAATHI_ORIGIN_ENV, "https://a-different-saathi-origin.test")
     b = resolve_connection(_Settings(), remote_spec("saathi"))
     assert a.checksum != b.checksum
 

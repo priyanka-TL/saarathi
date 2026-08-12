@@ -27,7 +27,8 @@ def admin_client(flask_app, monkeypatch):
         active_org_id="o",
     )
     monkeypatch.setattr(
-        "app.services.identity.Authenticator.authenticate", lambda self: admin_user,
+        "app.services.identity.Authenticator.authenticate",
+        lambda self, token=None: admin_user,
     )
     return TestClient(
         flask_app,

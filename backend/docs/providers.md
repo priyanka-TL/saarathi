@@ -85,7 +85,7 @@ provider reads**. The rule that decides the split, and the only one:
   "allowed_hosts": [],               // SSRF list, ∩ PROVIDER_HOST_CEILING
   "timeouts":  { "connect_s": 10.0, "read_s": 30.0, "stream_connect_s": 10.0 },
   "headers":   { "User-Agent": "…" },
-  "auth":      { "scheme": "elevate_login", "credential_env": "SAATHI_ORIGIN_URL", … },
+  "auth":      { "scheme": "origin_header", "credential_env": "SAATHI_ORIGIN_URL" },
   "flow_name": "saathi",             // persisted to agent_sessions.remote_flow
   "default_language": "en",
   "supported_languages": ["en","hi","kn","te"],
@@ -129,6 +129,19 @@ it is.
 
 This is also why adding a platform adds no `Settings` field: the variables go in
 `.env`, and the row names them.
+
+**Saathi is the one exception, and deliberately so.** It used to mint its own
+connection-level ELEVATE credential from `remote.auth` (`scheme:
+"elevate_login"` reading `SAATHI_EMAIL`/`SAATHI_PASSWORD`, or `scheme:
+"static_token"` reading `SAATHI_ACCESS_TOKEN`) — one identity shared by every
+user of a tenant's Saathi agent, which contradicted "per-user assistant."
+Now that Saarthi's frontend logs users in directly against ELEVATE's user
+service, `app/providers/saathi/provider.py` authenticates every REST/WS call
+with **the calling `UserContext`'s own `token`** instead — nothing is minted,
+cached, or named in `remote.auth`. Saathi's `remote.auth` is therefore just
+the Origin credential now, identical in shape to a guest platform's. A caller
+with no token (not logged in) gets a clear `ProviderAuthError`, not a
+fallback identity.
 
 ---
 

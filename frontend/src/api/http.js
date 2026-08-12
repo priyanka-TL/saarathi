@@ -1,6 +1,7 @@
 import axios from 'axios';
 
 import { API_BASE_URL } from '../config/env';
+import { readAuthToken, writeAuth } from '../utils/storage';
 
 /**
  * The single axios instance every API module uses.
@@ -25,6 +26,29 @@ export const http = axios.create({
   baseURL: API_BASE_URL,
   headers: { 'Content-Type': 'application/json' },
   validateStatus: () => true,
+});
+
+/**
+ * Attaches the logged-in user's ELEVATE token to every request, read fresh
+ * from storage each time (not captured once at module load) so a login or
+ * logout in the same tab takes effect on the very next call.
+ */
+http.interceptors.request.use((config) => {
+  const token = readAuthToken();
+  if (token) {
+    config.headers = { ...config.headers, Authorization: `Bearer ${token}` };
+  }
+  return config;
+});
+
+/**
+ * A 401 means the token Saarthi validated is gone or rejected -- clear it so
+ * the next render's RequireAuth redirects to /login, rather than looping the
+ * same dead token onto every subsequent call.
+ */
+http.interceptors.response.use((response) => {
+  if (response.status === 401) writeAuth(null, null);
+  return response;
 });
 
 /**

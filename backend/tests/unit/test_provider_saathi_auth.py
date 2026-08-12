@@ -1,225 +1,145 @@
-"""Where Saathi's access token comes from, and what happens when one dies.
+"""Where Saathi's per-turn access token comes from: the caller, never a mint.
 
-The 401 path is the one that matters. A JWT four days short of its own `exp`
-was rejected by ELEVATE with "Session expired. Please login again." -- ELEVATE
-tracks the session_id claim server-side and can end it at any moment. So a
-token dying mid-conversation is an ordinary event, not an edge case, and the
-refresh has to be exercised rather than merely written.
+This used to test app/providers/saathi/auth.py's LoginTokenProvider /
+StaticTokenProvider -- a connection-level credential shared by every user of a
+tenant's Saathi agent, minted from a service login or a hardcoded env var. That
+module is gone. Saathi's docstring always called it "a per-user assistant
+conversation", and the fix that makes that literally true is: the credential is
+`UserContext.token`, the caller's own already-verified ELEVATE JWT from their
+own login (app/services/identity.py), threaded through as an explicit
+per-call argument -- never minted, cached, or stored on the provider instance,
+because that instance is shared across every conversation on this tenant's
+connection (ProviderRegistry.get() caches by (provider, conn.checksum), not
+per user).
 """
 from __future__ import annotations
 
-import json
-
 import pytest
-import responses
+import responses as resp_lib
 
-from app.providers.saathi.auth import (
-    LOGIN_PATH,
-    TENANT_HEADER,
-    LoginTokenProvider,
-    StaticTokenProvider,
-    build_token_provider,
-)
-from app.providers.errors import ProviderAuthError, ProviderConfigError
-
-ELEVATE = "https://elevate.example.org"
-LOGIN_URL = f"{ELEVATE}{LOGIN_PATH}"
+from app.domain.core import OrgMembership, UserContext
+from app.providers.connection import resolve_connection
+from app.providers.errors import ProviderAuthError
+from app.providers.saathi.provider import AUTH_HEADER, SaathiProvider
+from app.providers.saathi.spec import SaathiOptions
+from tests.provider_factories import SAATHI_ORIGIN_ENV, remote_spec
 
 
-class _Conn:
-    """Duck-typed stand-in for a resolved RemoteConnection.
-
-    The builder reads its scheme and endpoint off `auth` -- which the CONFIG ROW
-    supplies -- and its credential VALUES off `secrets`, which
-    resolve_connection read from the variables that row NAMED. That split is the
-    whole point: one deployment can now serve several identities, because the
-    scheme and the tenant travel with the agent rather than with the process.
-    """
-
-    def __init__(self, **kw):
-        self.auth = (
-            ("scheme", kw.get("scheme", "elevate_login")),
-            ("token_endpoint", kw.get("base_url", ELEVATE)),
-            ("tenant_code", kw.get("tenant_code", "saathi")),
-            ("credential_env", "SAATHI_ORIGIN_URL"),
-            ("identifier_env", "SAATHI_EMAIL"),
-            ("secret_env", "SAATHI_PASSWORD"),
-            ("token_env", "SAATHI_ACCESS_TOKEN"),
-        )
-        self.secrets = {
-            "identifier_env": kw.get("email") or "",
-            "secret_env": kw.get("password") or "",
-            "token_env": kw.get("token") or "",
-        }
-        self.connect_timeout_s = 10.0
-        self.read_timeout_s = 30.0
-
-
-def _login(**kw) -> LoginTokenProvider:
-    return LoginTokenProvider(
-        base_url=ELEVATE, identifier="a@b.com", password="pw",
-        tenant_code="saathi", **kw,
+def _user(token: str | None) -> UserContext:
+    return UserContext(
+        user_id="1",
+        email="1@shikshalokam.org",
+        display_name="Test User",
+        tenant_code="saathi",
+        orgs=(OrgMembership(org_id="1", org_code="default", roles=("mentee",)),),
+        active_org_id="1",
+        token=token,
     )
 
 
-# ---------------------------------------------------------------------------
-# StaticTokenProvider
-# ---------------------------------------------------------------------------
+@pytest.fixture()
+def provider(monkeypatch) -> SaathiProvider:
+    monkeypatch.setenv(SAATHI_ORIGIN_ENV, "https://saathi-origin.test")
+    spec = remote_spec("saathi")
+    options = SaathiOptions.model_validate(spec.options)
+    conn = resolve_connection(_Settings(), spec, options)
+    return SaathiProvider(conn, pool=None)
 
 
-def test_static_returns_the_configured_token():
-    assert StaticTokenProvider("tok-1").get() == "tok-1"
-
-
-def test_static_refuses_to_hand_back_a_token_it_knows_is_dead():
-    """Returning the same dead token would give the caller a second, identical
-    401 and no explanation. The error names the mechanism and the way out."""
-    provider = StaticTokenProvider("tok-1")
-    provider.invalidate()
-
-    with pytest.raises(ProviderAuthError) as excinfo:
-        provider.get()
-
-    assert excinfo.value.mechanism == "static_token"
-    assert "remote.auth.scheme='elevate_login'" in str(excinfo.value)
-
-
-def test_static_rejects_an_empty_token_at_construction():
-    """At BOOT, not at the first request -- a misconfigured deployment should
-    fail to start rather than render a button that errors on click."""
-    with pytest.raises(ProviderConfigError):
-        StaticTokenProvider("")
-
-
-def test_static_repr_does_not_leak_the_token():
-    assert "tok-secret" not in repr(StaticTokenProvider("tok-secret"))
+class _Settings:
+    provider_host_ceiling = ""
 
 
 # ---------------------------------------------------------------------------
-# LoginTokenProvider
+# _access_token: the caller's own token, no fallback
 # ---------------------------------------------------------------------------
 
 
-@responses.activate
-def test_login_mints_a_token_and_caches_it():
-    responses.add(responses.POST, LOGIN_URL,
-                  json={"result": {"access_token": "minted-1"}}, status=200)
-
-    provider = _login()
-    assert provider.get() == "minted-1"
-    assert provider.get() == "minted-1"
-    assert len(responses.calls) == 1, "the token must be cached, not re-minted per call"
+def test_access_token_returns_the_callers_own_token(provider):
+    assert provider._access_token(_user("caller-jwt")) == "caller-jwt"
 
 
-@responses.activate
-def test_login_sends_the_tenant_header_and_the_identifier_field():
-    """Both were established against the live QA service: without the tenant
-    header ELEVATE answers 406 'Tenant domain not found', and the identity
-    field is `identifier`, NOT `email`."""
-    responses.add(responses.POST, LOGIN_URL,
-                  json={"result": {"access_token": "t"}}, status=200)
-
-    _login().get()
-
-    request = responses.calls[0].request
-    assert request.headers[TENANT_HEADER] == "saathi"
-    body = json.loads(request.body)
-    assert body["identifier"] == "a@b.com"
-    assert "email" not in body
+def test_access_token_raises_when_the_caller_has_none(provider):
+    """No shared/hardcoded fallback identity exists to converse as instead --
+    unlike Mitra's guest flow, a missing token is a hard stop for Saathi."""
+    with pytest.raises(ProviderAuthError, match="logged-in ELEVATE user"):
+        provider._access_token(_user(None))
 
 
-@responses.activate
-def test_invalidate_forces_a_fresh_mint():
-    """The 401 recovery path: a caller that saw a 401 invalidates and retries."""
-    responses.add(responses.POST, LOGIN_URL,
-                  json={"result": {"access_token": "first"}}, status=200)
-    responses.add(responses.POST, LOGIN_URL,
-                  json={"result": {"access_token": "second"}}, status=200)
-
-    provider = _login()
-    assert provider.get() == "first"
-    provider.invalidate()
-    assert provider.get() == "second"
-
-
-@responses.activate
-@pytest.mark.parametrize("body", [
-    {"result": {"access_token": "t"}},
-    {"result": {"accessToken": "t"}},
-    {"access_token": "t"},
-    {"result": {"tokens": {"access": "t"}}},
-])
-def test_the_token_is_found_in_every_envelope_shape_seen(body):
-    """The envelope is ELEVATE's, not ours. A single wrong guess would fail at
-    runtime as a token-less success, which is worse than a loud error."""
-    responses.add(responses.POST, LOGIN_URL, json=body, status=200)
-    assert _login().get() == "t"
-
-
-@responses.activate
-def test_a_quoted_token_is_unquoted():
-    """Some ELEVATE builds return the JWT wrapped in quotes; Saathi's own
-    client strips them too. A quoted token is not rejected as malformed -- it
-    simply authenticates as nobody."""
-    responses.add(responses.POST, LOGIN_URL,
-                  json={"result": {"access_token": '"tok-quoted"'}}, status=200)
-    assert _login().get() == "tok-quoted"
-
-
-@responses.activate
-def test_rejected_credentials_raise_rather_than_return_empty():
-    responses.add(responses.POST, LOGIN_URL,
-                  json={"message": "Invalid credentials"}, status=400)
-
-    with pytest.raises(ProviderAuthError) as excinfo:
-        _login().get()
-
-    assert excinfo.value.mechanism == "elevate_login"
-    assert "Invalid credentials" in str(excinfo.value)
-
-
-@responses.activate
-def test_a_tokenless_success_is_an_error_not_an_empty_string():
-    responses.add(responses.POST, LOGIN_URL, json={"result": {}}, status=200)
-
-    with pytest.raises(ProviderAuthError):
-        _login().get()
-
-
-def test_login_repr_leaks_neither_identifier_nor_password():
-    text = repr(_login())
-    assert "a@b.com" not in text
-    assert "pw" not in text
-
-
-def test_login_requires_its_credentials_at_construction():
-    with pytest.raises(ProviderConfigError):
-        LoginTokenProvider(base_url=ELEVATE, identifier="", password="pw", tenant_code="saathi")
-    with pytest.raises(ProviderConfigError):
-        LoginTokenProvider(base_url=ELEVATE, identifier="a@b.com", password="", tenant_code="saathi")
+def test_two_different_users_resolve_two_different_tokens_on_the_same_instance(provider):
+    """THE HEADLINE PROPERTY. One shared provider instance, two different
+    logged-in identities, on two different calls."""
+    assert provider._access_token(_user("token-a")) == "token-a"
+    assert provider._access_token(_user("token-b")) == "token-b"
 
 
 # ---------------------------------------------------------------------------
-# The registry
+# The REST client sends whatever token it was called with -- nothing cached
 # ---------------------------------------------------------------------------
 
 
-def test_build_selects_the_scheme_named_in_the_config_row():
-    """The scheme travels with the AGENT now, not with the process.
+@resp_lib.activate
+def test_read_profile_sends_the_given_token_as_x_auth_token(provider):
+    resp_lib.add(
+        resp_lib.GET, "https://saathi.test/api/shikshalokam/read-elevate-profile/",
+        json={"profile_details": {"profileid": "42", "has_accepted_tnc": True}},
+        status=200,
+    )
 
-    It used to be one SAATHI_LOGIN_MECHANISM setting, which meant one identity
-    per deployment for every tenant.
-    """
-    assert build_token_provider(
-        _Conn(scheme="static_token", token="t")).mechanism == "static_token"
-    assert build_token_provider(
-        _Conn(scheme="elevate_login", email="a@b.com", password="pw")
-    ).mechanism == "elevate_login"
+    provider._rest.read_profile("token-a")
+
+    assert resp_lib.calls[0].request.headers[AUTH_HEADER] == "token-a"
 
 
-def test_build_rejects_an_unknown_scheme_by_name():
-    with pytest.raises(ProviderConfigError) as excinfo:
-        build_token_provider(_Conn(scheme="oauth"))
-    assert "oauth" in str(excinfo.value)
-    # And names the ones that DO work, so the operator can fix it in one pass.
-    assert "elevate_login" in str(excinfo.value)
+@resp_lib.activate
+def test_the_same_client_sends_a_different_users_token_on_the_next_call(provider):
+    """No instance-level caching of the credential: back-to-back calls on the
+    SAME SaathiRestClient/transport, for two different users, must each carry
+    that call's own token -- proving there is nothing left to leak between
+    concurrent callers."""
+    resp_lib.add(
+        resp_lib.GET, "https://saathi.test/api/shikshalokam/read-elevate-profile/",
+        json={"profile_details": {"profileid": "1", "has_accepted_tnc": True}},
+        status=200,
+    )
+    resp_lib.add(
+        resp_lib.GET, "https://saathi.test/api/shikshalokam/read-elevate-profile/",
+        json={"profile_details": {"profileid": "2", "has_accepted_tnc": True}},
+        status=200,
+    )
+
+    provider._rest.read_profile("token-a")
+    provider._rest.read_profile("token-b")
+
+    assert resp_lib.calls[0].request.headers[AUTH_HEADER] == "token-a"
+    assert resp_lib.calls[1].request.headers[AUTH_HEADER] == "token-b"
+
+
+@resp_lib.activate
+def test_open_session_uses_the_given_users_token_throughout(provider):
+    """open_session's three REST calls (profile, accept-tnc, generate-session)
+    all carry the SAME caller's token, resolved once via _access_token."""
+    resp_lib.add(
+        resp_lib.GET, "https://saathi.test/api/shikshalokam/read-elevate-profile/",
+        json={"profile_details": {"profileid": "7", "has_accepted_tnc": False}},
+        status=200,
+    )
+    resp_lib.add(
+        resp_lib.PATCH, "https://saathi.test/api/accept-tnc/",
+        json={}, status=200,
+    )
+    resp_lib.add(
+        resp_lib.GET, "https://saathi.test/api/generate-session/",
+        json={"sessionid": "s-1"}, status=200,
+    )
+
+    class _Session:
+        remote_session_id = None
+        remote_profile_id = None
+
+    init = provider.open_session(remote_spec("saathi"), _Session(), _user("caller-jwt"))
+
+    assert init.remote_session_id == "s-1"
+    assert init.remote_profile_id == "7"
+    for call in resp_lib.calls:
+        assert call.request.headers[AUTH_HEADER] == "caller-jwt"

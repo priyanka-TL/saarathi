@@ -72,7 +72,7 @@ class _FakeProvider:
     # -- lost-turn recovery -------------------------------------------------
     # chat_rows is what the platform's transcript "already contains"; recording
     # the calls is how the tests assert that recovery is READ-ONLY.
-    def reconcile(self, remote, session_view, sent_text):
+    def reconcile(self, remote, session_view, sent_text, user):
         from app.providers.recovery import reconcile
 
         self.recent_chat_calls.append(
@@ -80,7 +80,7 @@ class _FakeProvider:
         )
         return reconcile(list(self.chat_rows), sent_text)
 
-    def is_complete(self, remote, session_view):
+    def is_complete(self, remote, session_view, user):
         return False
 
     def close_channel(self, conversation_id):

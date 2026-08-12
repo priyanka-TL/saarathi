@@ -10,10 +10,10 @@ them apart: it is the cache key, so different content implies a different
 instance and identical content shares correctly.
 
 CREDENTIALS ARE RESOLVED FROM NAMES THE CONFIG ROW CARRIES, NEVER FROM VALUES.
-A config row is readable through the admin API, so `remote.auth` names
-environment variables (`credential_env`, `identifier_env`, `secret_env`,
-`token_env`) and this module reads them with os.getenv. Their VALUES enter the
-checksum only as a sha256, and every field holding one is `repr=False`.
+A config row is readable through the admin API, so `remote.auth` names an
+environment variable (`credential_env`, the Origin header every platform in
+this family gates on) and this module reads it with os.getenv. Its VALUE
+enters the checksum only as a sha256, and the field holding it is `repr=False`.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from app.providers.errors import ProviderConfigError
 
@@ -43,16 +43,15 @@ class RemoteConnection:
     connect_timeout_s: float = 10.0
     read_timeout_s: float = 30.0
     stream_connect_timeout_s: float = 10.0
-    #: Non-secret parts of `remote.auth`: scheme, token_endpoint, tenant_code.
+    #: Non-secret parts of `remote.auth`: scheme, credential_env's NAME.
     auth: Tuple[Tuple[str, Any], ...] = ()
     #: The provider's own `remote.options`, already validated by its model.
     options: Any = None
 
-    # CREDENTIALS. repr=False so no log line that reprs a connection can leak
-    # them, and compare=False is deliberately NOT set -- two scopes with
+    # THE CREDENTIAL. repr=False so no log line that reprs a connection can
+    # leak it, and compare=False is deliberately NOT set -- two scopes with
     # different credentials must not share a cached client.
     origin_url: str = field(default="", repr=False)
-    secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     # Derived, never passed in -- see __post_init__.
     checksum: str = field(init=False, default="", compare=False)
@@ -70,11 +69,10 @@ class RemoteConnection:
             "stream_connect_timeout_s": self.stream_connect_timeout_s,
             "auth": sorted((k, str(v)) for k, v in self.auth),
             "options": _stable(self.options),
-            # The credentials' HASHES, not the credentials. Two scopes with
+            # The credential's HASH, not the credential. Two scopes with
             # different ones must not share a cached client, and a checksum is
             # not a secret store.
             "origin_sha": _sha(self.origin_url),
-            "secrets_sha": {k: _sha(v) for k, v in sorted(self.secrets.items())},
         }
         digest = hashlib.sha256(
             json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -139,12 +137,6 @@ def resolve_connection(settings, remote_spec, options: Any = None) -> RemoteConn
         "config row.",
     )
 
-    secrets: Dict[str, str] = {}
-    for field_name in ("identifier_env", "secret_env", "token_env"):
-        env_name = getattr(auth, field_name, None)
-        if env_name:
-            secrets[field_name] = os.getenv(env_name) or ""
-
     headers = dict(remote_spec.headers or {})
     user_agent = headers.pop("User-Agent", "") or headers.pop("user-agent", "")
 
@@ -158,21 +150,15 @@ def resolve_connection(settings, remote_spec, options: Any = None) -> RemoteConn
         connect_timeout_s=remote_spec.timeouts.connect_s,
         read_timeout_s=remote_spec.timeouts.read_s,
         stream_connect_timeout_s=remote_spec.timeouts.stream_connect_s,
-        # NAMES and non-secret settings only. The variable names are carried so
+        # NAMES and non-secret settings only. The variable name is carried so
         # a misconfiguration can name the variable an operator has to go and
         # set, which is the whole reason for the indirection.
         auth=(
             ("scheme", auth.scheme),
-            ("token_endpoint", auth.token_endpoint or ""),
-            ("tenant_code", auth.tenant_code or ""),
             ("credential_env", auth.credential_env),
-            ("identifier_env", auth.identifier_env or ""),
-            ("secret_env", auth.secret_env or ""),
-            ("token_env", auth.token_env or ""),
         ),
         options=options,
         origin_url=origin_url,
-        secrets=secrets,
     )
 
 

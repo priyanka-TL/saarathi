@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import ChatHistorySection from '../components/sidebar/ChatHistorySection.jsx';
 import Sidebar from '../components/sidebar/Sidebar.jsx';
+import { AuthProvider } from '../context/AuthContext.jsx';
 
 const never = () => false;
 
@@ -23,28 +24,32 @@ const section = (over = {}) => (
 );
 
 /**
- * The full rail. Sidebar pulls from no context and no router, so it renders
- * with plain props -- empty capabilities/agents keep AdvancedSection inert
- * without stubbing it.
+ * The full rail. Sidebar pulls from no router, so it renders with plain
+ * props plus AuthProvider -- empty capabilities/agents keep AdvancedSection
+ * inert without stubbing it. AuthProvider is needed because the rail now
+ * renders an AccountRow (logout control) that reads useAuth(), same as
+ * ChatPage does via App.jsx in production.
  */
 const sidebar = (over = {}) => (
-  <Sidebar
-    open
-    onClose={vi.fn()}
-    conversations={conversations}
-    activeConversationId="c1"
-    onSelectConversation={vi.fn()}
-    onNewChat={vi.fn()}
-    agents={[]}
-    capabilities={[]}
-    activeCard={null}
-    activeAgentKey={null}
-    onRunAction={vi.fn()}
-    onSelectAgent={vi.fn()}
-    isBusy={never}
-    toast={null}
-    {...over}
-  />
+  <AuthProvider>
+    <Sidebar
+      open
+      onClose={vi.fn()}
+      conversations={conversations}
+      activeConversationId="c1"
+      onSelectConversation={vi.fn()}
+      onNewChat={vi.fn()}
+      agents={[]}
+      capabilities={[]}
+      activeCard={null}
+      activeAgentKey={null}
+      onRunAction={vi.fn()}
+      onSelectAgent={vi.fn()}
+      isBusy={never}
+      toast={null}
+      {...over}
+    />
+  </AuthProvider>
 );
 
 describe('the Chat History disclosure', () => {

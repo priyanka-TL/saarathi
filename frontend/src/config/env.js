@@ -21,6 +21,8 @@
  * correct when the bundle is served from the API's own origin.
  */
 
+import { DEFAULT_AUTH_MODES, parseAuthModes } from '../utils/authModes';
+
 const runtimeConfig =
   (typeof window !== 'undefined' && window.__APP_CONFIG__) || {};
 
@@ -36,3 +38,23 @@ function readConfig(key) {
 
 /** What axios uses as its baseURL. Every request is built from this. */
 export const API_BASE_URL = readConfig('API_BASE_URL');
+
+/**
+ * Login/register/OTP go DIRECTLY to ELEVATE's user service from the browser
+ * -- never proxied through Saarthi's own backend, so ELEVATE's base URL and
+ * tenant id are config here, not a Saarthi API path. Saarthi's backend only
+ * ever validates the JWT this produces; it never issues or mints one.
+ * See src/api/elevateAuth.js.
+ */
+export const ELEVATE_BASE_URL = readConfig('ELEVATE_BASE_URL');
+export const ELEVATE_TENANT_ID = readConfig('ELEVATE_TENANT_ID') || 'saarthi';
+
+/**
+ * The STATIC default for which login modes LoginPage shows -- used before
+ * ELEVATE's branding response loads, and again if it fails or the tenant
+ * declares none. Once branding loads, its own `allowed_auth_mode` (see
+ * api/elevateAuth.js::extractBranding) takes over as the source of truth;
+ * this is only ever the fallback, never re-consulted after that.
+ */
+const configuredAuthModes = parseAuthModes(readConfig('AUTH_MODES'));
+export const AUTH_MODES = configuredAuthModes.length ? configuredAuthModes : DEFAULT_AUTH_MODES;

@@ -487,22 +487,23 @@ class TestTimedOutTurnRecovery:
         # reply, poll, or surface the timeout -- rather than about a mock.
         provider.supports_recovery = True
         provider.reconcile.side_effect = (
-            lambda remote, session_view, sent_text: reconcile(rows, sent_text)
+            lambda remote, session_view, sent_text, user: reconcile(rows, sent_text)
         )
         provider.is_complete.return_value = completed
 
         orch = _make_orch(provider=provider)
         session = _session_dto()
-        return orch, agent, session, provider
+        user = MagicMock(token="tok")
+        return orch, agent, session, provider, user
 
     def test_answered_turn_is_recovered_instead_of_surfacing_a_timeout(self):
         rows = [
             ChatRow(id=1, from_user=True, message=self.SENT),
             ChatRow(id=2, from_user=False, message=self.REPLY),
         ]
-        orch, agent, session, provider = self._orch_and_agent(rows)
+        orch, agent, session, provider, user = self._orch_and_agent(rows)
 
-        turn = orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout())
+        turn = orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user)
 
         assert turn is not None, "the reply Mitra already sent must not be thrown away"
         assert turn.text == self.REPLY
@@ -516,9 +517,9 @@ class TestTimedOutTurnRecovery:
             ChatRow(id=1, from_user=True, message=self.SENT),
             ChatRow(id=2, from_user=False, message=self.REPLY),
         ]
-        orch, agent, session, provider = self._orch_and_agent(rows)
+        orch, agent, session, provider, user = self._orch_and_agent(rows)
 
-        orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout())
+        orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user)
 
         for forbidden in ("send_and_await_turn", "send", "post"):
             assert not hasattr(provider, forbidden) or not getattr(provider, forbidden).called
@@ -527,14 +528,14 @@ class TestTimedOutTurnRecovery:
         """Mitra has the message but no answer yet -- the client must see the
         timeout and poll, not receive an empty turn."""
         rows = [ChatRow(id=1, from_user=True, message=self.SENT)]
-        orch, agent, session, _ = self._orch_and_agent(rows)
+        orch, agent, session, _, user = self._orch_and_agent(rows)
 
-        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout()) is None
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user) is None
 
     def test_not_delivered_lets_the_timeout_propagate(self):
-        orch, agent, session, _ = self._orch_and_agent([])
+        orch, agent, session, _, user = self._orch_and_agent([])
 
-        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout()) is None
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user) is None
 
     def test_completion_is_still_polled_so_a_finished_story_finalises(self):
         """completion_poll_every_turn normally runs inside the handler, which
@@ -544,24 +545,24 @@ class TestTimedOutTurnRecovery:
             ChatRow(id=1, from_user=True, message=self.SENT),
             ChatRow(id=2, from_user=False, message=self.REPLY),
         ]
-        orch, agent, session, _ = self._orch_and_agent(rows, completed=True)
+        orch, agent, session, _, user = self._orch_and_agent(rows, completed=True)
 
-        turn = orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout())
+        turn = orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user)
 
         assert turn.terminal is True
 
     def test_a_failing_recovery_never_masks_the_original_timeout(self):
         """Best-effort: if Mitra is unreachable the user must still get the
         timeout, not a confusing secondary error."""
-        orch, agent, session, provider = self._orch_and_agent([])
+        orch, agent, session, provider, user = self._orch_and_agent([])
         provider.recent_chat.side_effect = ProviderError("mitra unreachable")
 
-        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout()) is None
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user) is None
 
     def test_llm_agents_are_not_reconciled(self):
         """Only remote_flow has server-side state at Mitra to reconcile with."""
-        orch, agent, session, provider = self._orch_and_agent([])
+        orch, agent, session, provider, user = self._orch_and_agent([])
         agent.spec.agent_type = "llm"
 
-        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout()) is None
+        assert orch._recover_timed_out_turn(agent, session, self.SENT, ProviderTurnTimeout(), user) is None
         assert not provider.recent_chat.called

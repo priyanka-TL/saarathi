@@ -90,9 +90,9 @@ class RemoteFlowAgentHandler:
         )
 
         bot = self._provider.turn(
-            self._remote, sess, ctx.text, first_turn=is_first_turn,
+            self._remote, sess, ctx.text, ctx.user, first_turn=is_first_turn,
         )
-        done = self._provider.is_complete(self._remote, sess)
+        done = self._provider.is_complete(self._remote, sess, ctx.user)
 
         return AgentTurn(
             text=bot.text,

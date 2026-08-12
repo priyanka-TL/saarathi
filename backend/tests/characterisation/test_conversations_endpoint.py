@@ -3,9 +3,10 @@ the sidebar's recent-conversations list and resuming one into the chat pane.
 
 Real Flask app + real Postgres, matching this directory's established
 convention (see test_session_routes.py). Identity is controlled by
-monkeypatching Authenticator.authenticate (same pattern as
+monkeypatching Authenticator.authenticate directly (same pattern as
 tests/integration/test_config_versioning_lifecycle.py's admin_client
-fixture), so tests don't depend on a real LLM call just to resolve "who am I."
+fixture) rather than minting a real, ELEVATE_JWT_SECRET-verified bearer token,
+so tests don't depend on a real LLM call just to resolve "who am I."
 """
 from __future__ import annotations
 
@@ -86,15 +87,15 @@ def _seed_message(
 def as_user(monkeypatch):
     """Authenticate the test client as a fresh, controlled identity.
 
-    `get_current_user` reads only `Authenticator.authenticate()` -- identity is
-    resolved once from configuration, not per request (there is no login flow
-    upstream of this API that could supply a caller-specific token) -- so
-    patching that one method is sufficient.
+    Patches `Authenticator.authenticate()` directly -- simpler than minting a
+    real, ELEVATE_JWT_SECRET-verified bearer token per identity. The lambda
+    accepts and ignores a `token` argument, since `get_current_user` now always
+    passes one (None when the client sends no Authorization header).
     """
     def _patch(user: UserContext):
         monkeypatch.setattr(
             "app.services.identity.Authenticator.authenticate",
-            lambda self: user,
+            lambda self, token=None: user,
         )
         return user
     return _patch

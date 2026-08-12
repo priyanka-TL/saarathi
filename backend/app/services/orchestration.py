@@ -459,7 +459,7 @@ class OrchestrationService:
             # error, because nothing else will: the late frame is discarded by
             # _drain_stale() on the next turn, so an unrecovered reply desyncs
             # the interview even if the user does nothing at all.
-            turn = self._recover_timed_out_turn(agent, session_view, ctx_in.text, exc)
+            turn = self._recover_timed_out_turn(agent, session_view, ctx_in.text, exc, ctx_in.user)
             if turn is None:
                 raise
 
@@ -609,11 +609,11 @@ class OrchestrationService:
     # referenced from the numbered steps above.
     # ------------------------------------------------------------------
 
-    def _reconcile(self, agent, session_view, sent_text: str) -> Optional[Reconciliation]:
-        return self._finalizer.reconcile_turn(agent, session_view, sent_text)
+    def _reconcile(self, agent, session_view, sent_text: str, user) -> Optional[Reconciliation]:
+        return self._finalizer.reconcile_turn(agent, session_view, sent_text, user)
 
-    def _recover_timed_out_turn(self, agent, session_view, sent_text, exc):
-        return self._finalizer.recover_timed_out_turn(agent, session_view, sent_text, exc)
+    def _recover_timed_out_turn(self, agent, session_view, sent_text, exc, user):
+        return self._finalizer.recover_timed_out_turn(agent, session_view, sent_text, exc, user)
 
     def _record_session_follow_up(
         self, conversation_id, agent_id, user, request_id=None,
@@ -645,7 +645,7 @@ class OrchestrationService:
         if agent is None or not last_user_text:
             return ResumeResult(outcome=TurnOutcome.NOT_DELIVERED, session=session_view)
 
-        result = self._reconcile(agent, session_view, last_user_text)
+        result = self._reconcile(agent, session_view, last_user_text, user)
         if result is None:
             return ResumeResult(outcome=TurnOutcome.NOT_DELIVERED, session=session_view)
         if result.outcome is not TurnOutcome.ANSWERED:

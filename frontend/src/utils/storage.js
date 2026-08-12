@@ -61,3 +61,41 @@ export function writeVoiceLanguage(language) {
     /* storage unavailable; the choice simply won't survive a reload */
   }
 }
+
+/**
+ * The ELEVATE access token from login, and the small user summary alongside
+ * it. localStorage, like the voice language: a login is a preference about
+ * the PERSON, surviving a new tab and a reload -- not per-tab like the
+ * conversation id.
+ */
+export function readAuthToken() {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.authToken);
+  } catch {
+    return null;
+  }
+}
+
+export function readAuthUser() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.authUser);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Writes both together; clears both when `token` is falsy. */
+export function writeAuth(token, user) {
+  try {
+    if (token) {
+      localStorage.setItem(STORAGE_KEYS.authToken, token);
+      localStorage.setItem(STORAGE_KEYS.authUser, JSON.stringify(user ?? null));
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.authToken);
+      localStorage.removeItem(STORAGE_KEYS.authUser);
+    }
+  } catch {
+    /* storage unavailable; the session simply won't survive a reload */
+  }
+}

@@ -25,6 +25,10 @@ async function loadEnv({ runtime, build } = {}) {
 
 beforeEach(() => {
   vi.stubEnv('APPLICATION_API_BASE_URL', '');
+  // Same leak as API_BASE_URL: without this, a developer's real
+  // frontend/.env (currently APPLICATION_AUTH_MODES=otp) would decide what
+  // "unset" resolves to in every test below that doesn't override it.
+  vi.stubEnv('APPLICATION_AUTH_MODES', '');
 });
 
 afterEach(() => {
@@ -69,5 +73,30 @@ describe('API_BASE_URL resolution', () => {
       build: { APPLICATION_API_BASE_URL: '  http://127.0.0.1:8000/api/  ' },
     });
     expect(env.API_BASE_URL).toBe('http://127.0.0.1:8000/api/');
+  });
+});
+
+describe('AUTH_MODES resolution', () => {
+  it('defaults to both modes when nothing is configured anywhere', async () => {
+    const env = await loadEnv();
+    expect(env.AUTH_MODES).toEqual(['password', 'otp']);
+  });
+
+  it('honours a single configured mode', async () => {
+    const env = await loadEnv({ build: { APPLICATION_AUTH_MODES: 'otp' } });
+    expect(env.AUTH_MODES).toEqual(['otp']);
+  });
+
+  it('falls back to both on an unrecognised value, same as unset', async () => {
+    const env = await loadEnv({ build: { APPLICATION_AUTH_MODES: 'sms' } });
+    expect(env.AUTH_MODES).toEqual(['password', 'otp']);
+  });
+
+  it('lets the runtime config override the build-time value, same as API_BASE_URL', async () => {
+    const env = await loadEnv({
+      runtime: { AUTH_MODES: 'password' },
+      build: { APPLICATION_AUTH_MODES: 'otp' },
+    });
+    expect(env.AUTH_MODES).toEqual(['password']);
   });
 });

@@ -147,7 +147,9 @@ def _make_channel(fake: _FakeWebSocket, spec: Optional[_Spec] = None,
                   sess: Optional[_Session] = None):
     spec = spec or _Spec()
     provider = _StubProvider(_conn(), _Options(spec.handshake), fake)
-    return provider._new_channel(spec, sess or _Session())
+    # user=None: _StubProvider never overrides _access_token, so the base
+    # class's guest default (None) applies regardless of what's passed here.
+    return provider._new_channel(spec, sess or _Session(), None)
 
 
 # ---------------------------------------------------------------------------

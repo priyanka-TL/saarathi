@@ -36,10 +36,12 @@ from app.domain.agent_spec import AgentSpec, canonical_json
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 #: 0010 writes the original `remote` shape; 0013 rewrites it into the
-#: provider-neutral envelope. The database holds the second applied to the
-#: first, so validation and checksum assertions read THAT -- otherwise this
-#: suite would pin a shape the application no longer accepts.
+#: provider-neutral envelope; 0018 strips Saathi's now-retired token-minting
+#: auth fields. The database holds all three applied in sequence, so
+#: validation and checksum assertions read THAT -- otherwise this suite would
+#: pin a shape the application no longer accepts.
 _GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
+_SAATHI_AUTH_DROP = _VERSIONS / "0018_saathi_auth_drops_token_minting.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -59,8 +61,13 @@ def generalize():
 
 
 @pytest.fixture(scope="module")
-def seed(generalize):
-    """0010's seed, as 0013 leaves it.
+def saathi_auth_drop():
+    return _module(_SAATHI_AUTH_DROP, "_saathi_auth_drop_0018")
+
+
+@pytest.fixture(scope="module")
+def seed(generalize, saathi_auth_drop):
+    """0010's seed, as 0013 then 0018 leave it.
 
     Wrapped rather than read raw: `seed_agents()` is the SOURCE, and what the
     application ever sees is the migrated form. A test asserting on the source
@@ -76,6 +83,10 @@ def seed(generalize):
             if isinstance(agent.get("remote"), dict):
                 agent["agent_type"] = "remote_flow"
                 agent["remote"] = generalize._to_envelope(agent["remote"])
+                if agent["remote"].get("provider") == "saathi":
+                    agent["remote"]["auth"] = saathi_auth_drop.new_auth_block(
+                        agent["remote"]["auth"]
+                    )
             agents.append(agent)
         return agents
 

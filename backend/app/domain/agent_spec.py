@@ -237,20 +237,17 @@ class RemoteAuthSpec(BaseModel):
     `scheme` is a plain str, validated by the PROVIDER rather than here: which
     schemes exist is provider knowledge, and enumerating them in the pure domain
     layer would mean a new platform could not authenticate without editing this
-    file. `origin_header` is the only scheme a guest platform needs.
+    file. `origin_header` is the only scheme any provider needs today -- Saathi
+    used to mint its own per-user token from a `token_endpoint`/`identifier_env`/
+    `secret_env`/`tenant_code` block (schemes "elevate_login"/"static_token"),
+    but that credential now comes from the logged-in caller's own UserContext,
+    never from connection config, so those fields were removed rather than left
+    unused.
     """
     model_config = STRICT
 
     scheme: str = "origin_header"
     credential_env: str = Field(min_length=1)
-
-    # Used by schemes that mint or carry a per-user token. All three *_env
-    # fields name variables; none holds a value.
-    token_endpoint: Optional[str] = None
-    tenant_code:    Optional[str] = None
-    identifier_env: Optional[str] = None
-    secret_env:     Optional[str] = None
-    token_env:      Optional[str] = None
 
 
 class RemoteTimeoutsSpec(BaseModel):

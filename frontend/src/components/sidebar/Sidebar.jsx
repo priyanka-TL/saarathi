@@ -1,10 +1,27 @@
 import { cx } from '../../utils/cx';
+import { useAuth } from '../../context/AuthContext.jsx';
 import Toast from '../common/Toast.jsx';
-import { CloseIcon, PlusIcon } from '../icons';
+import { CloseIcon, LogoutIcon, PlusIcon } from '../icons';
 import AdvancedSection from './AdvancedSection';
 import BrandCard from './BrandCard';
 import ChatHistorySection from './ChatHistorySection';
 import LanguageSelect from './LanguageSelect';
+
+/** The logged-in user's name (or a fallback) plus a logout control. New
+ * chrome, so it renders below BrandCard rather than inside it -- BrandCard
+ * stays the static, ported header it always was. */
+function AccountRow() {
+  const { user, logout } = useAuth();
+  return (
+    <div className="account-row">
+      <span className="account-name">{user?.name || user?.phone || user?.email || 'Signed in'}</span>
+      <button type="button" className="account-logout-btn" onClick={logout}>
+        <LogoutIcon />
+        Logout
+      </button>
+    </div>
+  );
+}
 
 /**
  * The left rail.
@@ -78,6 +95,8 @@ export default function Sidebar({
       />
 
       <BrandCard />
+
+      <AccountRow />
 
       <div className="chat-history-placeholder">
         <button

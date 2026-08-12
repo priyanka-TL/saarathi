@@ -980,3 +980,265 @@ body {
     background: var(--primary-color);
     transform: none;
 }
+
+/* =========================================================================
+ * AUTH -- login and register pages.
+ *
+ * New screens, not a port of anything in the original Flask app, so there is
+ * no verbatim shape to match here. Built entirely from the existing custom
+ * properties (--bg-color, --card-bg, --border-color, --primary-color, etc.)
+ * so both pages follow the light/dark cascade for free, same as every other
+ * addition in this file.
+ * ====================================================================== */
+
+/*
+ * `#root { display: contents }` (above) means THIS is a direct flex item of
+ * `body` (style.css), not a normal block box -- and body's flex is row/
+ * `justify-content: flex-start` with no stretch on the main axis, so without
+ * an explicit width this shrinks to its own content and pins to the
+ * top-left instead of covering the viewport. `width: 100vw` is what
+ * `.app-container` already does for exactly this reason; matched here.
+ *
+ * `overflow-y: auto` (not `hidden`, unlike body) so a card taller than the
+ * viewport -- a small phone with the OTP field open and the keyboard up --
+ * scrolls instead of clipping.
+ */
+.auth-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100vw;
+    height: 100%;
+    min-height: 100vh;
+    min-height: 100dvh;
+    background: var(--bg-color);
+    padding: 24px;
+    box-sizing: border-box;
+    overflow-y: auto;
+}
+
+.auth-card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 32px 28px;
+    box-shadow: 0 8px 24px var(--shadow-color, rgba(0, 0, 0, 0.08));
+    /* Belt-and-braces alongside style.css's global `* { box-sizing:
+       border-box }` reset -- this file must stand on its own if that rule
+       is ever scoped differently. */
+    box-sizing: border-box;
+}
+
+/* Narrow phones: tighten the card's own padding rather than shrinking
+   .auth-page's -- 24px there is what keeps the card off the screen edge. */
+@media (max-width: 420px) {
+    .auth-card {
+        padding: 24px 18px;
+    }
+}
+
+.auth-brand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 4px;
+    margin-bottom: 24px;
+}
+
+.auth-brand-icon {
+    width: 46px;
+    height: 46px;
+    margin-bottom: 8px;
+}
+
+.auth-brand h1 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.auth-brand p {
+    font-size: 15px;
+    color: var(--text-secondary);
+    margin: 0;
+}
+
+.auth-mode-toggle {
+    display: flex;
+    gap: 6px;
+    background: var(--bg-color);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 4px;
+    margin-bottom: 20px;
+}
+
+.auth-mode-btn {
+    flex: 1;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.auth-mode-btn.active {
+    background: var(--primary-color);
+    color: #ffffff;
+}
+
+.auth-form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.auth-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 15px;
+    color: var(--text-secondary);
+}
+
+.auth-field input {
+    padding: 10px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-color);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 15px;
+}
+
+.auth-field input:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+}
+
+.auth-field input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.auth-submit-btn,
+.auth-secondary-btn {
+    padding: 11px 16px;
+    border-radius: 9999px;
+    border: none;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
+}
+
+.auth-submit-btn {
+    background: var(--primary-color);
+    color: #ffffff;
+}
+
+.auth-submit-btn:hover:not(:disabled) {
+    background: var(--primary-hover);
+}
+
+.auth-secondary-btn {
+    background: var(--bg-color);
+    color: var(--primary-color);
+    border: 1px solid var(--border-color);
+}
+
+.auth-secondary-btn:hover:not(:disabled) {
+    border-color: var(--primary-color);
+}
+
+.auth-submit-btn:disabled,
+.auth-secondary-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.auth-error {
+    font-size: 15px;
+    color: var(--accent-color);
+    background: var(--message-system, rgba(184, 61, 120, 0.1));
+    border-radius: 9px;
+    padding: 10px 12px;
+}
+
+.auth-success {
+    font-size: 15px;
+    color: var(--text-primary);
+    text-align: center;
+    margin: 0 0 20px;
+}
+
+.auth-switch {
+    margin: 20px 0 0;
+    text-align: center;
+    font-size: 15px;
+    color: var(--text-secondary);
+}
+
+.auth-switch a {
+    color: var(--primary-color);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.auth-switch a:hover {
+    text-decoration: underline;
+}
+
+/* =========================================================================
+ * Logged-in account row, sidebar -- sits under the brand card. New chrome,
+ * not a port, so it lives here rather than style.css.
+ * ====================================================================== */
+
+.account-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 4px;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 4px;
+}
+
+.account-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.account-logout-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 10px;
+    border-radius: 9999px;
+    border: 1px solid var(--border-color);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.account-logout-btn:hover {
+    color: var(--accent-color);
+    border-color: var(--accent-color);
+}

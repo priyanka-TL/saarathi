@@ -16,6 +16,10 @@ export const STORAGE_KEYS = {
   // about the PERSON, not the tab -- it should survive a new tab and a new
   // visit. See utils/storage.js.
   voiceLanguage: 'saarthi_voice_lang',
+  // Also localStorage: a login is a preference about the PERSON, and should
+  // survive a new tab and a reload exactly like the voice language does.
+  authToken: 'saarthi_auth_token',
+  authUser: 'saarthi_auth_user',
 };
 
 // --- layout --------------------------------------------------------------

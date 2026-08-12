@@ -76,11 +76,12 @@ def admin_client(flask_app, monkeypatch):
         tenant_code="t", orgs=(OrgMembership(org_id="o", org_code="o", roles=("admin",)),),
         active_org_id="o",
     )
-    # Identity is resolved once from configuration, not per request -- there is
-    # no login flow upstream of this API -- so patching `authenticate()` is
-    # sufficient.
+    # Patches Authenticator.authenticate() directly to force THIS admin
+    # identity regardless of the bearer token sent below (the lambda ignores
+    # it) -- simpler than minting a real, ELEVATE_JWT_SECRET-verified token.
     monkeypatch.setattr(
-        "app.services.identity.Authenticator.authenticate", lambda self: admin_user,
+        "app.services.identity.Authenticator.authenticate",
+        lambda self, token=None: admin_user,
     )
     return TestClient(
         flask_app,

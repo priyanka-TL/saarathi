@@ -22,9 +22,6 @@ from app.domain.agent_spec import RemoteFlowAgentSpec, RemoteSpec
 #: these, because a missing credential is a ProviderConfigError by design.
 MITRA_ORIGIN_ENV = "TEST_MITRA_ORIGIN_URL"
 SAATHI_ORIGIN_ENV = "TEST_SAATHI_ORIGIN_URL"
-SAATHI_EMAIL_ENV = "TEST_SAATHI_EMAIL"
-SAATHI_PASSWORD_ENV = "TEST_SAATHI_PASSWORD"
-SAATHI_TOKEN_ENV = "TEST_SAATHI_ACCESS_TOKEN"
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) "
@@ -36,12 +33,7 @@ DEFAULT_USER_AGENT = (
 def env_for(provider: str = "mitra") -> Dict[str, str]:
     """The environment variables the specs below name."""
     if provider == "saathi":
-        return {
-            SAATHI_ORIGIN_ENV: "https://saathi.test",
-            SAATHI_EMAIL_ENV: "someone@example.org",
-            SAATHI_PASSWORD_ENV: "hunter2",
-            SAATHI_TOKEN_ENV: "a-static-token",
-        }
+        return {SAATHI_ORIGIN_ENV: "https://saathi.test"}
     return {MITRA_ORIGIN_ENV: "https://mitra.test"}
 
 
@@ -49,20 +41,14 @@ def mitra_auth(**overrides: Any) -> Dict[str, Any]:
     return {"scheme": "origin_header", "credential_env": MITRA_ORIGIN_ENV, **overrides}
 
 
-def saathi_auth(scheme: str = "elevate_login", **overrides: Any) -> Dict[str, Any]:
-    auth: Dict[str, Any] = {
-        "scheme": scheme,
-        "credential_env": SAATHI_ORIGIN_ENV,
-        "token_endpoint": "https://elevate.test",
-        "tenant_code": "saathi",
-    }
-    if scheme == "static_token":
-        auth["token_env"] = SAATHI_TOKEN_ENV
-    else:
-        auth["identifier_env"] = SAATHI_EMAIL_ENV
-        auth["secret_env"] = SAATHI_PASSWORD_ENV
-    auth.update(overrides)
-    return auth
+def saathi_auth(**overrides: Any) -> Dict[str, Any]:
+    """Saathi's remote.auth is now IDENTICAL in shape to Mitra's: just the
+    Origin-header credential. It used to also carry a token-minting scheme
+    (elevate_login/static_token) -- removed along with app/providers/saathi/
+    auth.py, since the caller's own logged-in UserContext.token is the
+    credential now, never connection config.
+    """
+    return {"scheme": "origin_header", "credential_env": SAATHI_ORIGIN_ENV, **overrides}
 
 
 def remote_dict(
@@ -228,7 +214,7 @@ class FakeProvider:
             remote_bot_route=(remote.options or {}).get("bot_route"),
         )
 
-    def turn(self, remote, session_view, text, *, first_turn):
+    def turn(self, remote, session_view, text, user, *, first_turn):
         from app.providers.protocol import ProviderTurn
 
         self.calls.append("turn")
@@ -237,7 +223,7 @@ class FakeProvider:
             text=self.reply_text, options=list(self.reply_options), step=self.reply_step,
         )
 
-    def is_complete(self, remote, session_view):
+    def is_complete(self, remote, session_view, user):
         self.calls.append("is_complete")
         return self.complete
 
@@ -266,7 +252,7 @@ class FakeProvider:
         )
         return self.artifact_url
 
-    def reconcile(self, remote, session_view, sent_text):
+    def reconcile(self, remote, session_view, sent_text, user):
         self.calls.append("reconcile")
         self.reconcile_calls.append(sent_text)
         return self.reconciliation

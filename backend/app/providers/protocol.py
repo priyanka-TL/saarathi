@@ -105,11 +105,16 @@ class RemoteProvider(Protocol):
         identifiers. Called before every turn; idempotent after the first."""
         ...
 
-    def turn(self, remote, session_view, text: str, *, first_turn: bool) -> ProviderTurn:
-        """Send one user turn and return the reply."""
+    def turn(self, remote, session_view, text: str, user, *, first_turn: bool) -> ProviderTurn:
+        """Send one user turn and return the reply.
+
+        `user` is the caller's UserContext -- needed by a per-user platform to
+        authenticate the socket/REST calls this turn makes (see
+        SaathiProvider._access_token), ignored by a guest one (Mitra).
+        """
         ...
 
-    def is_complete(self, remote, session_view) -> bool:
+    def is_complete(self, remote, session_view, user) -> bool:
         """Whether the remote considers the conversation finished."""
         ...
 
@@ -122,7 +127,7 @@ class RemoteProvider(Protocol):
         """The artifact URL, or None if it is not generated yet."""
         ...
 
-    def reconcile(self, remote, session_view, sent_text: str) -> Optional[Reconciliation]:
+    def reconcile(self, remote, session_view, sent_text: str, user) -> Optional[Reconciliation]:
         """What became of `sent_text`. READ-ONLY -- never re-send."""
         ...
 
