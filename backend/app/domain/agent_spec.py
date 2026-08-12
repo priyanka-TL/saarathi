@@ -90,6 +90,17 @@ class RoutingSpec(BaseModel):
     #:
     #: See RouterService.select Gate 2.
     yields_to_keyword:    bool = False
+
+    #: The bar a YIELD decision must clear, set on the PINNED agent -- not on
+    #: the candidate being yielded to. `None` (the default) falls back to the
+    #: candidate's own `confidence_threshold`, i.e. today's behaviour.
+    #:
+    #: A candidate's `confidence_threshold` is tuned for cheap first-message
+    #: routing (Gate 4), where being wrong just means one extra turn. Reusing
+    #: that same low bar to interrupt an ALREADY-IN-PROGRESS pinned
+    #: conversation is a different, higher-stakes decision and deserves its
+    #: own, stricter threshold.
+    yield_confidence_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
     router_selectable:    bool  = True
     direct_selectable:    bool  = True
 

@@ -230,14 +230,24 @@ class RouterService:
             )
             return RouteDecision(winner, "keyword_yield", 1.0, 0, unpinned=True)
 
-        # 2. The classifier. Same invocation Gate 4 makes, but a miss means
-        #    STAY PINNED rather than fall through to the default agent.
+        # 2. The classifier. Same underlying call Gate 4 makes, but told it is
+        #    deciding whether to interrupt an ALREADY-PINNED conversation, and
+        #    a miss means STAY PINNED rather than fall through to the default
+        #    agent.
         try:
-            raw = self._invoke_router(ctx, candidates)
+            raw = self._invoke_router(ctx, candidates, pin=pin)
             parsed = json_repair.loads(raw)
             key = parsed.get("agent_key") if isinstance(parsed, dict) else None
             conf = float(parsed.get("confidence", 0)) if isinstance(parsed, dict) else 0.0
             a = self._registry.get_by_key_exact(key)
+            # THE PIN'S OWN BAR, NOT THE CANDIDATE'S. `confidence_threshold` is
+            # tuned for cheap first-message routing (Gate 4); interrupting a
+            # conversation already in progress is a higher-stakes call and, if
+            # the pinned agent sets `yield_confidence_threshold`, must clear
+            # that stricter bar instead.
+            threshold = (pin.spec.routing.yield_confidence_threshold
+                         if pin.spec.routing.yield_confidence_threshold is not None
+                         else (a.spec.routing.confidence_threshold if a else 1.0))
             # MEMBERSHIP IN `candidates`, not merely a registry hit. The
             # registry is global; `candidates` is what THIS caller may see. A
             # key the classifier returned for an agent outside that set --
@@ -246,7 +256,7 @@ class RouterService:
             if (a is not None
                     and any(c.key == a.key for c in candidates)
                     and a.spec.routing.router_selectable
-                    and conf >= a.spec.routing.confidence_threshold):
+                    and conf >= threshold):
                 logger.info(
                     "pin yielded on the classifier",
                     extra={"from_agent": pin.key, "to_agent": a.key, "confidence": conf},
@@ -364,13 +374,36 @@ class RouterService:
             for h in history
         ]
 
-    def _build_router_prompt(self, visible: List[RegisteredAgent]) -> str:
+    def _build_router_prompt(
+        self, visible: List[RegisteredAgent], pin: Optional[RegisteredAgent] = None,
+    ) -> str:
         default_agent = self._registry.default()
         lines = [
             "You are the router for the Saarthi assistant.",
             "Choose exactly one agent for the LATEST user message.",
             "Use the prior conversation for context -- a short reply such as a name",
             "or a number is usually a continuation of the previous agent's topic.",
+        ]
+        if pin is not None:
+            # YIELD MODE. This is not a fresh routing decision -- the user is
+            # already mid-conversation with `pin`, and the agents below are
+            # NOT told about `pin` because it was deliberately excluded from
+            # `candidates` (see _yield_from_pin). Naming it here is what lets
+            # the classifier tell "answering the current question" apart from
+            # "asking for something else" instead of always picking whichever
+            # visible agent is the closest topical match.
+            lines += [
+                "",
+                f'The user is currently mid-conversation with "{pin.name}": '
+                f"{pin.description}",
+                "Decide only whether the LATEST message is an explicit, unambiguous",
+                "request for one of the agents below, unrelated to that ongoing",
+                "conversation. A short or ambiguous reply -- a name, a number, an",
+                "acknowledgement, an answer to a quick-reply question -- is normally a",
+                "continuation of that conversation, not a request to leave it: return",
+                "low confidence for every agent below in that case.",
+            ]
+        lines += [
             "",
             "Agents:",
         ]
@@ -389,13 +422,19 @@ class RouterService:
             lines.append(f'If nothing fits, use "{default_agent.key}" with low confidence.')
         return "\n".join(lines)
 
-    def _router_messages(self, ctx: TurnContext, visible: List[RegisteredAgent]):
-        # Cache key is (registry version, visibility signature) -- NOT version
-        # alone. Two callers in different orgs must not share a cached prompt,
-        # or one will be offered an agent they cannot reach.
-        cache_key = (self._registry.version, tuple(sorted(a.key for a in visible)))
+    def _router_messages(
+        self, ctx: TurnContext, visible: List[RegisteredAgent],
+        pin: Optional[RegisteredAgent] = None,
+    ):
+        # Cache key is (registry version, visibility signature, pin) -- NOT
+        # version alone. Two callers in different orgs must not share a
+        # cached prompt, or one will be offered an agent they cannot reach;
+        # the pin key keeps Gate 4's cached prompt from being reused for a
+        # yield decision (a different prompt shape) and vice versa.
+        cache_key = (self._registry.version, tuple(sorted(a.key for a in visible)),
+                     pin.key if pin else None)
         if self._cache_key != cache_key:
-            self._cached_prompt = self._build_router_prompt(visible)
+            self._cached_prompt = self._build_router_prompt(visible, pin=pin)
             self._cache_key = cache_key
 
         return [
@@ -404,8 +443,11 @@ class RouterService:
             HumanMessage(content=ctx.text),
         ]
 
-    def _invoke_router(self, ctx: TurnContext, visible: List[RegisteredAgent]) -> str:
+    def _invoke_router(
+        self, ctx: TurnContext, visible: List[RegisteredAgent],
+        pin: Optional[RegisteredAgent] = None,
+    ) -> str:
         llm = self._llm_factory.get(self._router_model_spec())
-        messages = self._router_messages(ctx, visible)
+        messages = self._router_messages(ctx, visible, pin=pin)
         response = llm.invoke(messages)
         return _as_text(response)
