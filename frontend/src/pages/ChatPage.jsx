@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { resetConversation as resetConversationApi } from '../api/chat';
 import ChatInput from '../components/chat/ChatInput.jsx';
 import MessageList from '../components/chat/MessageList.jsx';
 import TypingIndicator from '../components/chat/TypingIndicator.jsx';
@@ -37,6 +38,8 @@ const HIDDEN_BANNER = {
 export default function ChatPage() {
   const {
     conversationId,
+    conversationIdRef,
+    setConversationId,
     isBusy,
     isBusyNow,
     currentAgentKeyRef,
@@ -64,11 +67,39 @@ export default function ChatPage() {
     writeVoiceLanguage(language);
   }, []);
 
+  /**
+   * The current conversation id, creating one if there is none yet.
+   *
+   * For voice: a recording has to be filed under a conversation, and a fresh
+   * tab has none until New Chat is clicked or a message is sent. Rather than
+   * hide the mic until then -- which made the first message, the one you would
+   * most want to speak, the one message you could not -- the conversation is
+   * created on demand.
+   *
+   * NOT `startNewConversation`, deliberately: that also resets the transcript
+   * to the greeting and clears flow/session state, which would be a bizarre
+   * side effect of pressing the mic. This only ensures an id exists. The
+   * server reuses an already-empty conversation, so it does not accumulate
+   * rows when someone starts and abandons several recordings.
+   */
+  const ensureConversation = useCallback(async () => {
+    if (conversationIdRef.current) return conversationIdRef.current;
+    try {
+      const { data } = await resetConversationApi();
+      const id = data?.conversation_id ?? null;
+      setConversationId(id);
+      return id;
+    } catch {
+      return null;
+    }
+  }, [conversationIdRef, setConversationId]);
+
   // The transcript REPLACES the draft rather than appending to it: it is the
   // whole of what the user just said, and appending would silently concatenate
   // two takes when someone re-records.
   const voice = useVoiceRecorder({
     conversationId,
+    ensureConversation,
     language: voiceLanguage,
     onTranscript: setDraft,
   });
@@ -360,14 +391,12 @@ export default function ChatPage() {
           toast={toast}
           voiceLanguage={voiceLanguage}
           onVoiceLanguageChange={setVoiceLanguage}
-          // `browserSupported`, NOT `supported`: the language picker is a stored
-          // preference that is meaningful before any chat exists, whereas
-          // `supported` also requires a conversationId -- which is null on a
-          // fresh tab, so using it hid the control on every load until the
-          // first message. `voiceDisabled` is out too: it only turns true
-          // mid-session after a 503, and the preference stays valid regardless.
-          // The mic button still uses `supported` (ChatInput), unchanged.
-          voiceAvailable={voice.browserSupported}
+          // `supported` alone -- can this browser record. It no longer implies
+          // an existing conversation (see useVoiceRecorder), so the picker and
+          // the mic ask the same question again and this is back to one flag.
+          // `voiceDisabled` stays out: it only turns true mid-session after a
+          // 503, and the stored language preference is valid regardless.
+          voiceAvailable={voice.supported}
         />
       }
       banner={<WorkflowBanner banner={banner} />}

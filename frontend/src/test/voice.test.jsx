@@ -235,36 +235,74 @@ describe('useVoiceRecorder', () => {
     await waitFor(() => expect(track.stop).toHaveBeenCalled());
   });
 
-  it('is unsupported without a conversation to attribute the recording to', () => {
-    stubMedia();
-    const { result } = renderRecorder({ conversationId: null });
-    expect(result.current.supported).toBe(false);
-  });
-
-  it('still reports browserSupported without a conversation', () => {
-    // THE TWO FLAGS ANSWER DIFFERENT QUESTIONS, and conflating them was a bug:
-    // the sidebar's language picker only needs "can this browser record", but it
-    // was gated on `supported`, which also requires a conversationId. Since that
-    // comes from sessionStorage it is null on every fresh tab, so the whole
-    // control vanished from the rail until the user had sent a message.
+  it('is supported WITHOUT a conversation, so the mic shows on a fresh tab', () => {
+    // THE BUG THIS FIXES. `supported` used to require `!!conversationId`, and
+    // ChatInput hides the mic when it is false. conversationId comes from
+    // sessionStorage, so on a fresh tab it is null -- the mic only appeared
+    // after a message had been typed and sent, making the first message the one
+    // message you could not speak.
     stubMedia();
 
     const { result } = renderRecorder({ conversationId: null });
 
-    expect(result.current.browserSupported).toBe(true);
-    expect(result.current.supported).toBe(false);
+    expect(result.current.supported).toBe(true);
   });
 
-  it('reports neither flag when the browser cannot record at all', async () => {
-    // The one real gate that remains for the picker. `supported` must stay
-    // false too, so the mic button's condition is provably unchanged.
+  it('is unsupported when the browser cannot record at all', async () => {
+    // The one real gate that remains.
     stubMedia();
     window.isSecureContext = false;
 
     const { result } = renderRecorder();
 
-    expect(result.current.browserSupported).toBe(false);
     expect(result.current.supported).toBe(false);
+  });
+
+  it('creates a conversation on demand and files the recording under it', async () => {
+    stubMedia();
+    requestUploadUrl.mockResolvedValue(ok({ uploadUrl: 'u', objectKey: 'k' }));
+    uploadRecording.mockResolvedValue('k');
+    transcribe.mockResolvedValue(ok({ transcript: 'hello' }));
+    const ensureConversation = vi.fn().mockResolvedValue('conv-new');
+
+    const { result } = renderRecorder({ conversationId: null, ensureConversation });
+    await record(result);
+
+    expect(ensureConversation).toHaveBeenCalled();
+    // Attributed to the id that was just created, NOT the null prop. The
+    // onstop closure captured that null, which is why the id is kept in a ref.
+    await waitFor(() =>
+      expect(requestUploadUrl).toHaveBeenCalledWith(
+        expect.objectContaining({ conversationId: 'conv-new' }),
+      ));
+  });
+
+  it('does not ask for a conversation when one already exists', async () => {
+    stubMedia();
+    requestUploadUrl.mockResolvedValue(ok({ uploadUrl: 'u', objectKey: 'k' }));
+    uploadRecording.mockResolvedValue('k');
+    transcribe.mockResolvedValue(ok({ transcript: 'hello' }));
+    const ensureConversation = vi.fn();
+
+    const { result } = renderRecorder({ ensureConversation });
+    await record(result);
+
+    expect(ensureConversation).not.toHaveBeenCalled();
+  });
+
+  it('refuses to open the microphone if no conversation can be created', async () => {
+    // BEFORE getUserMedia, deliberately: failing here costs a click, whereas
+    // failing after the user has spoken costs them the whole recording.
+    stubMedia();
+    const ensureConversation = vi.fn().mockResolvedValue(null);
+
+    const { result } = renderRecorder({ conversationId: null, ensureConversation });
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.isRecording).toBe(false);
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
   });
 
   it('treats an empty transcript as nothing heard', async () => {
