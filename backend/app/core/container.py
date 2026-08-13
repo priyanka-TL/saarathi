@@ -57,18 +57,46 @@ def build_container(settings: Settings) -> Container:
 
     llm_factory = LlmFactory()
 
+    # UNSET IS NOT AN ERROR, unlike the voice block below. Voice fails the boot
+    # when half-configured because answering upload-url and then failing at
+    # transcribe is worse than not starting; profile has no such pairing -- a
+    # deployment with no ELEVATE_BASE_URL simply has no Profile section, and the
+    # router turns None into 503 PROFILE_UNAVAILABLE. Raising here would take
+    # down every existing deployment on upgrade.
+    #
+    # BUILT BEFORE THE PROVIDER REGISTRY because the registry takes it: a
+    # provider bound to a bot that names the user in its output reads the
+    # caller's profile through this same client, rather than opening a second
+    # one against the same service.
+    elevate = None
+    if settings.elevate_base_url:
+        from app.integrations.elevate import ElevateUserClient
+
+        elevate = ElevateUserClient(
+            base_url=settings.elevate_base_url,
+            connect_timeout=settings.elevate_connect_timeout,
+            read_timeout=settings.elevate_read_timeout,
+        )
+    else:
+        logger.info(
+            "ELEVATE_BASE_URL is not set: /api/profile will answer 503 "
+            "PROFILE_UNAVAILABLE and the Profile section stays hidden."
+        )
+
     # A REGISTRY, not a client: base URL, timeouts, endpoint paths and the
     # credentials all resolve per agent and per tenant, so one shared client
     # would serve every scope the FIRST scope's endpoint. Nothing can be built
     # before an agent spec is in hand, which is why there is no default-scope
     # client and no per-provider block here.
     #
-    # ONE LINE, AND IT DOES NOT GROW. Providers self-register from their own
+    # STILL ONE LINE PER PLATFORM: ZERO. Providers self-register from their own
     # packages and PROVIDERS_ENABLED decides which of them this deployment
     # hands out, so onboarding a platform never edits the composition root.
+    # `profile_reader` is not a platform slot either -- it is one capability
+    # every provider may ask for and none is required to use.
     from app.providers.registry import ProviderRegistry
 
-    providers = ProviderRegistry(settings)
+    providers = ProviderRegistry(settings, profile_reader=elevate)
     logger.info(
         "remote providers ready",
         extra={
@@ -128,27 +156,6 @@ def build_container(settings: Settings) -> Container:
             tts_byte_limit=settings.voice_tts_byte_limit,
             asr_max_workers=settings.voice_asr_max_workers,
             ffmpeg_timeout_s=settings.voice_ffmpeg_timeout_s,
-        )
-
-    # UNSET IS NOT AN ERROR, unlike the voice block above. Voice fails the boot
-    # when half-configured because answering upload-url and then failing at
-    # transcribe is worse than not starting; profile has no such pairing -- a
-    # deployment with no ELEVATE_BASE_URL simply has no Profile section, and the
-    # router turns None into 503 PROFILE_UNAVAILABLE. Raising here would take
-    # down every existing deployment on upgrade.
-    elevate = None
-    if settings.elevate_base_url:
-        from app.integrations.elevate import ElevateUserClient
-
-        elevate = ElevateUserClient(
-            base_url=settings.elevate_base_url,
-            connect_timeout=settings.elevate_connect_timeout,
-            read_timeout=settings.elevate_read_timeout,
-        )
-    else:
-        logger.info(
-            "ELEVATE_BASE_URL is not set: /api/profile will answer 503 "
-            "PROFILE_UNAVAILABLE and the Profile section stays hidden."
         )
 
     deps = HandlerDeps(

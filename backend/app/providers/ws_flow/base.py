@@ -76,12 +76,30 @@ class BaseWsFlowProvider:
     #: here and the test to carry a parameter production never sets.
     ws_factory = websocket.WebSocket
 
-    def __init__(self, conn, pool) -> None:
+    def __init__(self, conn, pool, profile_reader=None) -> None:
         self._conn = conn
         self._pool = pool
         #: `remote.options` as this provider's own validated model. The registry
         #: parsed it before the connection was built, so it is typed by here.
         self.options = conn.options
+        #: Reads the caller's profile from the identity provider, given that
+        #: caller's own token: `read_profile(token) -> Mapping`. None when the
+        #: deployment has no identity provider configured.
+        #:
+        #: DUCK-TYPED, like `settings` in resolve_connection: app.providers must
+        #: not import app.integrations for a type it only calls one method on.
+        #:
+        #: OPTIONAL, AND UNUSED BY DEFAULT. A provider in this family that has
+        #: no reason to know who is talking simply never reads it -- the field
+        #: costs it nothing, and the alternative was a constructor signature
+        #: that differed per platform, which the registry cannot call
+        #: uniformly.
+        #:
+        #: NEVER HOLDS A TOKEN. One instance is cached per
+        #: (name, connection.checksum) and shared across every caller, so the
+        #: credential travels as a per-call argument -- the same rule
+        #: app/providers/saathi/rest.py states for its own.
+        self._profile_reader = profile_reader
         self._rest = self._build_rest()
 
     def __repr__(self) -> str:  # pragma: no cover - trivial

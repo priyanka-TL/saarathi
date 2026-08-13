@@ -14,7 +14,7 @@ logs, reprs or raises it.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from app.providers.errors import ProviderError
 from app.providers.recovery import ChatRow
@@ -33,18 +33,44 @@ class MitraRestClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def upsert_profile(self, email: str, latest_flow_used: str, company: str) -> str:
+    def upsert_profile(
+        self,
+        email: str,
+        latest_flow_used: str,
+        company: str,
+        extra: Optional[Dict[str, str]] = None,
+    ) -> str:
         """Create or retrieve this user's Mitra profile. Idempotent.
 
         `email` MUST be the derived email (user_id + JWT_EMAIL_SUFFIX): a
         different derivation creates a SECOND profile and splits the user's story
         history. `company` is per-agent, not a global.
+
+        `extra` carries additional Profile columns -- who the user is, rather
+        than which profile this is. Only agents with
+        `remote.options.send_user_profile` supply it; for everyone else the body
+        is byte-for-byte what it has always been, which is what keeps a second
+        agent on this same client unaffected.
+
+        THE THREE IDENTIFYING KEYS ARE WRITTEN LAST and therefore win. Mitra
+        resolves the profile by (email, company) and `extra` is assembled from a
+        different source, so letting it reach either key would move the write to
+        a DIFFERENT profile -- silently, since the response shape is identical.
+
+        BLANK VALUES ARE DROPPED, NOT SENT AS "". Mitra runs a NON-partial
+        serializer over an existing profile, so an omitted key keeps its stored
+        value while an empty string overwrites a good one with a blank.
         """
-        data = self._http.request(
-            "POST",
-            self.paths.profile,
-            json={"email": email, "latest_flow_used": latest_flow_used, "company": company},
+        payload: Dict[str, Any] = {
+            key: value
+            for key, value in (extra or {}).items()
+            if value is not None and str(value).strip()
+        }
+        payload.update(
+            {"email": email, "latest_flow_used": latest_flow_used, "company": company}
         )
+
+        data = self._http.request("POST", self.paths.profile, json=payload)
         # The response has ``id``; ``profileid`` is a legacy fallback key.
         profile_id = data.get("id") or data.get("profileid")
         if not profile_id:

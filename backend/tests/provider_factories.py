@@ -102,7 +102,7 @@ def remote_dict(
 _OPTION_FIELDS = frozenset({
     "bot_route", "company", "finalize_path", "finalize_as_guest",
     "completion_poll_every_turn", "ip_city", "ip_state", "ip_zip",
-    "handshake", "paths",
+    "handshake", "paths", "send_user_profile",
 })
 
 

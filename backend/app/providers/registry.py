@@ -150,13 +150,19 @@ class ProviderRegistry:
 
     _MAX = 64
 
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, profile_reader=None) -> None:
         discover()
         self._settings = settings
         self._enabled = enabled_names(settings)
         self._lock = threading.Lock()
         self._cache: Dict[Tuple[str, str], Any] = {}
         self._pools: Dict[str, ChannelPool] = {}
+        # Handed to every provider it builds. Duck-typed and optional, so a
+        # deployment with no identity provider configured -- and every test that
+        # builds a registry with one argument -- is unchanged. See
+        # BaseWsFlowProvider.__init__ for why it is a constructor argument
+        # rather than a per-call one.
+        self._profile_reader = profile_reader
 
     # ------------------------------------------------------------------
     # Introspection
@@ -218,7 +224,9 @@ class ProviderRegistry:
                     # Bounded and cleared wholesale at the limit, matching
                     # HandlerFactory.
                     self._cache.clear()
-                instance = cls(conn, self._pool_for(cls))
+                instance = cls(
+                    conn, self._pool_for(cls), profile_reader=self._profile_reader,
+                )
                 self._cache[key] = instance
             return instance
 

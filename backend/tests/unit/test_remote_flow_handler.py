@@ -47,14 +47,16 @@ from app.providers.transport.ws import BotTurn
 class _FakeRestClient:
     def __init__(self):
         self.upsert_profile_calls = []
+        self.upsert_profile_extras = []
         self.generate_session_calls = 0
         self.is_session_completed_calls = []
         self._profile_id = "profile-1"
         self._session_id = "remote-sess-1"
         self._completed = False
 
-    def upsert_profile(self, email, latest_flow_used, company):
+    def upsert_profile(self, email, latest_flow_used, company, extra=None):
         self.upsert_profile_calls.append((email, latest_flow_used, company))
+        self.upsert_profile_extras.append(extra)
         return self._profile_id
 
     def generate_session(self):

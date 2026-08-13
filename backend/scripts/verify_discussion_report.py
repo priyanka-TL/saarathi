@@ -50,12 +50,20 @@ CHAUPAL_KEYS = (
 
 
 def _connection_from_config() -> dict:
-    """The active capture_discussion agent's `remote.connection`.
+    """Where the active capture_discussion agent points, and as what.
 
     MITRA_BASE_URL and MITRA_USER_AGENT are not environment variables any more
     -- they are per agent and per tenant, so the only honest source is the same
     config row the app reads. Imported lazily so `--base-url` still works
     without a database.
+
+    READS THE POST-0013 SHAPE. This used to select
+    `config->'remote'->'connection'`, a sub-object migration 0013 dissolved:
+    `base_url` was promoted onto the envelope and `user_agent` became one of the
+    fixed `headers`. JSONB navigation to a missing key returns NULL rather than
+    failing, so the script did not break loudly -- it reported "no active
+    capture_discussion config" against a database that had one, and the only
+    way through was the --base-url escape hatch.
     """
     from sqlalchemy import text
 
@@ -65,7 +73,8 @@ def _connection_from_config() -> dict:
     try:
         row = session.execute(
             text("""
-                SELECT c.config->'remote'->'connection' AS conn
+                SELECT c.config->'remote'->>'base_url'            AS base_url,
+                       c.config->'remote'->'headers'->>'User-Agent' AS user_agent
                 FROM agent_configs c
                 JOIN agents a ON a.id = c.agent_id
                 WHERE a.key = 'capture_discussion'
@@ -76,12 +85,12 @@ def _connection_from_config() -> dict:
     finally:
         session.close()
 
-    if row is None or not row.conn:
+    if row is None or not row.base_url:
         sys.exit(
-            "no active capture_discussion config with a remote.connection block "
+            "no active capture_discussion config with a remote.base_url "
             "-- run `make migrate`, or pass --base-url"
         )
-    return row.conn
+    return {"base_url": row.base_url, "user_agent": row.user_agent}
 
 
 def _settings(base_url_override: str | None) -> tuple[str, dict[str, str]]:

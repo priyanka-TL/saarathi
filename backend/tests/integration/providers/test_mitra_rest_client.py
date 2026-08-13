@@ -152,6 +152,56 @@ def test_upsert_profile_sends_correct_payload():
     assert sent_body["email"] == "1355@shikshalokam.org"
     assert sent_body["latest_flow_used"] == "guest-mi-story"
     assert sent_body["company"] == "shikshalokamstaging"
+    # THE REGRESSION PIN FOR THE STORY FLOW. `extra` defaults to None, and a
+    # caller that passes nothing must produce the body this client has always
+    # sent -- exactly these three keys. Mitra answers 200 to a body with extra
+    # keys, so nothing downstream would catch a leak here.
+    assert set(sent_body) == {"email", "latest_flow_used", "company"}
+
+
+@resp_lib.activate
+def test_upsert_profile_sends_the_extra_fields_without_letting_them_win():
+    """`extra` carries who the caller is; the three keys above carry WHICH
+    profile this is. Mitra resolves the row by (email, company), so a collision
+    would move the write to a different profile -- and the response shape is
+    identical either way, so it would never surface.
+
+    Blank values are dropped rather than sent as "": Mitra runs a NON-partial
+    serializer over an existing profile, so an omitted key keeps its stored
+    value while an empty string overwrites a good one with a blank.
+    """
+    resp_lib.add(
+        resp_lib.POST,
+        f"{BASE_URL}/api/profile/",
+        json=_load("profile_upsert.json"),
+        status=200,
+    )
+
+    _client().upsert_profile(
+        email="1355@shikshalokam.org",
+        latest_flow_used="guest-discussion",
+        company="shikshalokamstaging",
+        extra={
+            "first_name": "Asha Devi",
+            "designation": "Head Teacher",
+            "org_associated": "GHS Ramnagar",
+            "location": "Bengaluru Rural, Karnataka",
+            # Both dropped, for the two different reasons above.
+            "email": "attacker@example.org",
+            "caste": "   ",
+        },
+    )
+
+    sent_body = json.loads(resp_lib.calls[0].request.body)
+    assert sent_body == {
+        "email": "1355@shikshalokam.org",
+        "latest_flow_used": "guest-discussion",
+        "company": "shikshalokamstaging",
+        "first_name": "Asha Devi",
+        "designation": "Head Teacher",
+        "org_associated": "GHS Ramnagar",
+        "location": "Bengaluru Rural, Karnataka",
+    }
 
 
 # ---------------------------------------------------------------------------

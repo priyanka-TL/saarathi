@@ -91,3 +91,17 @@ class MitraOptions(WsFlowOptions):
     # lives in MitraProvider.validate_config.
     finalize_path:     Optional[str] = DEFAULT_FINALIZE_V2_PATH
     finalize_as_guest: bool = False
+
+    # Whether the profile upsert carries the caller's ELEVATE profile alongside
+    # the (email, company) pair that identifies it.
+    #
+    # DEFAULTS TO FALSE, AND THAT IS THE ISOLATION. Two agents share this class
+    # -- `record_stories` and `capture_discussion` -- and a flag that defaulted
+    # to on would change the story flow's wire body without anyone editing its
+    # config. Only an agent that opts in sends anything extra.
+    #
+    # The opt-in is per-agent rather than global for the same reason `company`
+    # is: a guest interview on one bot may want the user named in its report
+    # while another deliberately stays anonymous, and that is a property of the
+    # bot the agent is bound to, not of the deployment.
+    send_user_profile: bool = False
