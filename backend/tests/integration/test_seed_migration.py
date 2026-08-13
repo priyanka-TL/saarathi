@@ -257,7 +257,10 @@ def test_each_delegated_agent_drives_its_own_bot():
     assert discussion.flow_name == "guest-discussion", (
         "the flow selects the MOM renderer; moving it renders a blank PDF"
     )
-    assert discussion.send_user_profile == "true"
+    assert discussion.send_user_profile == "false", (
+        "0020 turned this off: writing Profile.first_name makes Mitra skip to "
+        "the CHALLENGES step, and the skipped steps are what fill the MOM report"
+    )
 
     story = by_key["record_stories"]
     assert story.provider == "mitra"

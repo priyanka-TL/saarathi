@@ -25,13 +25,15 @@ _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 #: 0010 seeds the ORIGINAL shape; 0013 rewrites it into the provider-neutral
 #: envelope; 0019 moves this agent onto its own bot and opts it in to sending
-#: the caller's profile. What the database actually holds -- and therefore what
-#: the application validates -- is all three applied in sequence, so that is
-#: what these assertions read. Composing them beats restating the end state:
-#: a migration whose edit changes and a pin that does not would otherwise agree
-#: with each other and disagree with the database.
+#: the caller's profile; 0020 takes that opt-in back out. What the database
+#: actually holds -- and therefore what the application validates -- is all four
+#: applied in sequence, so that is what these assertions read. Composing them
+#: beats restating the end state: a migration whose edit changes and a pin that
+#: does not would otherwise agree with each other and disagree with the
+#: database.
 _GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
 _DISCUSSION_BOT = _VERSIONS / "0019_discussion_bot_route.py"
+_DROPS_USER_PROFILE = _VERSIONS / "0020_discussion_drops_user_profile.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -51,6 +53,7 @@ def _seed_specs() -> dict:
     seed = _load_migration("_seed_0010", _MIGRATION)
     generalize = _load_migration("_generalize_0013", _GENERALIZE)
     discussion_bot = _load_migration("_discussion_bot_0019", _DISCUSSION_BOT)
+    drops_profile = _load_migration("_drops_user_profile_0020", _DROPS_USER_PROFILE)
 
     agents = {}
     for agent in seed.seed_agents():
@@ -66,6 +69,13 @@ def _seed_specs() -> dict:
             == discussion_bot.OLD_BOT_ROUTE
         ):
             agent = discussion_bot.apply(agent)
+        # 0020's own predicate: only a config that opted IN gets opted back out.
+        if (
+            agent["key"] == drops_profile.AGENT_KEY
+            and agent.get("remote", {}).get("options", {}).get("send_user_profile")
+            is True
+        ):
+            agent = drops_profile.apply(agent)
         agents[agent["key"]] = agent
     return agents
 
@@ -139,17 +149,31 @@ def test_bot_route_and_company_are_stored_literals():
         assert "${" not in value
 
 
-def test_the_caller_is_named_to_mitra():
-    """A guest interview authenticates with `access_token: None`, so this flag
-    is the only channel through which Mitra learns who is talking. Without it
-    the MOM report's author line falls back to whatever name the transcript
-    happened to contain.
+def test_the_caller_is_NOT_named_to_mitra():
+    """THE REGRESSION PIN FOR THE SKIPPED INTERVIEW. Turning this back on
+    without a Mitra-side change breaks the report, and does it silently.
 
-    `record_stories` sits on the same provider and the same client and does NOT
-    set it -- see tests/unit/providers/test_mitra_profile_context.py for that
-    half.
+    The flag makes the profile upsert carry the caller's ELEVATE profile, which
+    means Saarthi writes `Profile.first_name`. Mitra reads a non-empty
+    first_name as "we already know this person" and starts the interview at the
+    CHALLENGES step instead of step 1
+    (chatbot/consumers/async_consumer.py::create_chat_session).
+
+    Steps 1-5 are what populate `story.other_params`, and other_params is where
+    mom_report.py::get_user_details reads EVERYTHING except the author --
+    location, organization, participants_count, discussion_date, district,
+    village, pri_member, school_representative. Observed live: a discussion
+    opened at current_step=6 with the autostart message recorded as the
+    CHALLENGES answer, and the report lost all of those sections. The flag
+    bought a reliable author line and cost four sections of the MOM report.
+
+    So it stays false until Mitra either exempts this bot from the skip or
+    falls back to the Profile for those fields. `record_stories` never opted in
+    at all -- see tests/unit/providers/test_mitra_profile_context.py, which
+    pins both the opted-in and opted-out wire bodies so the dormant code path
+    stays covered.
     """
-    assert _raw()["remote"]["options"]["send_user_profile"] is True
+    assert _raw()["remote"]["options"]["send_user_profile"] is False
 
 
 def test_finalize_is_v1_and_tokenless_because_only_that_renders_the_mom_report():
