@@ -26,7 +26,12 @@ import {
  * STATE MACHINE: idle -> recording -> transcribing -> idle. `stop()` is a no-op
  * outside `recording`, so a double click cannot land in a state with no exit.
  */
-export function useVoiceRecorder({ conversationId, language, onTranscript }) {
+export function useVoiceRecorder({
+  conversationId,
+  ensureConversation,
+  language,
+  onTranscript,
+}) {
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [error, setError] = useState(null);
@@ -39,6 +44,16 @@ export function useVoiceRecorder({ conversationId, language, onTranscript }) {
   // Set when the component unmounts mid-recording, so the async onstop handler
   // knows not to touch state that no longer exists.
   const abandonedRef = useRef(false);
+  /**
+   * The conversation this recording will be filed under, resolved at start().
+   *
+   * A REF, NOT THE PROP, because `recorder.onstop` captures the closure that
+   * existed when recording began. If start() had to CREATE the conversation,
+   * the `conversationId` prop inside that closure is still the null it was a
+   * moment ago -- the re-render happens, but the captured handler never sees
+   * it. Reading the ref at upload time sidesteps the stale capture entirely.
+   */
+  const uploadConversationIdRef = useRef(null);
 
   const cleanup = useCallback(() => {
     clearTimeout(timeoutRef.current);
@@ -84,7 +99,9 @@ export function useVoiceRecorder({ conversationId, language, onTranscript }) {
     setError(null);
     try {
       const presign = await requestUploadUrl({
-        conversationId,
+        // Resolved at start(); falls back to the prop for a recording that
+        // began when a conversation already existed.
+        conversationId: uploadConversationIdRef.current || conversationId,
         contentType: blob.type,
       });
       if (presign.status === 503) {
@@ -132,6 +149,29 @@ export function useVoiceRecorder({ conversationId, language, onTranscript }) {
       setError(COPY.micUnsupported);
       return;
     }
+
+    /**
+     * A recording needs a conversation to be filed under -- upload keys are
+     * `voice/{conversation_id}/...` and the backend checks ownership against
+     * that id. On a FRESH TAB there is none: `conversationId` comes from
+     * sessionStorage and is only set by New Chat or by the first sent message.
+     *
+     * So create one on demand. The mic used to be HIDDEN in this state
+     * instead, which meant voice was unusable until you had already typed and
+     * sent a text message -- the one message you would most want to speak.
+     *
+     * BEFORE getUserMedia, deliberately: failing here costs a click, whereas
+     * failing after the user has spoken costs them the whole recording.
+     */
+    let attributedTo = conversationId;
+    if (!attributedTo && ensureConversation) {
+      attributedTo = await ensureConversation();
+    }
+    if (!attributedTo) {
+      setError(COPY.micFailed);
+      return;
+    }
+    uploadConversationIdRef.current = attributedTo;
 
     let stream;
     try {
@@ -184,7 +224,7 @@ export function useVoiceRecorder({ conversationId, language, onTranscript }) {
     timeoutRef.current = setTimeout(() => {
       if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
     }, VOICE_MAX_RECORDING_MS);
-  }, [cleanup, handleRecordingStopped]);
+  }, [cleanup, conversationId, ensureConversation, handleRecordingStopped]);
 
   const stop = useCallback(() => {
     if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
@@ -196,18 +236,19 @@ export function useVoiceRecorder({ conversationId, language, onTranscript }) {
   }, [isRecording, start, stop]);
 
   /**
-   * TWO QUESTIONS, NOT ONE. These were a single `supported` flag, which
-   * conflated "this browser can record" with "we can record right now" -- and
-   * the sidebar's language picker, which only needs the first, was hidden by
-   * the second. `conversationId` is sessionStorage-backed and null on a fresh
-   * tab, so the picker vanished on every load until a message had been sent.
+   * ONE QUESTION: can this browser record at all?
    *
-   * `supported` keeps its exact previous meaning and value, so every existing
-   * consumer is unaffected -- notably ChatInput's `showMic`, which genuinely
-   * does need a conversation: upload keys are `voice/{conversation_id}/...` and
-   * the backend checks ownership against that id.
+   * This was briefly TWO flags -- `browserSupported` and a `supported` that
+   * also required `!!conversationId` -- while the mic button was gated on
+   * having a conversation. That gate was the bug: a fresh tab has no
+   * conversation, so the mic never appeared until the user had typed and sent
+   * a message, and the composer offered "Type here." instead of "Type or speak
+   * here." The recording is now attributed at start() by creating a
+   * conversation on demand, so nothing downstream needs the id up front and
+   * both consumers -- the mic and the sidebar's language picker -- are asking
+   * this same single question again.
    */
-  const browserSupported = isRecordingSupported() && isSecureContextForMedia();
+  const supported = isRecordingSupported() && isSecureContextForMedia();
 
   return {
     isRecording,
@@ -215,10 +256,7 @@ export function useVoiceRecorder({ conversationId, language, onTranscript }) {
     error,
     clearError: useCallback(() => setError(null), []),
     voiceDisabled,
-    // Can this browser record at all? Enough to offer the language preference.
-    browserSupported,
-    // Can we record right now? Also needs somewhere to attribute the recording.
-    supported: browserSupported && !!conversationId,
+    supported,
     start,
     stop,
     toggle,

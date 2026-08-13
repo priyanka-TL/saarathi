@@ -353,26 +353,42 @@ describe('updating the profile', () => {
     expect(getProfile).toHaveBeenCalledTimes(1);
   });
 
-  it('requires every mandatory field before it will send anything', async () => {
+  it('lets a partly-filled profile be saved without demanding every field', async () => {
+    // The fields are not required here: the popup is a prompt, not a gate, so
+    // someone can fill in what they know now and the rest later.
+    getProfile.mockResolvedValue(ok(INCOMPLETE, ['school_name', 'state']));
+    mount(<ProfileGate />);
+    await screen.findByRole('dialog');
+
+    await userEvent.type(screen.getByLabelText('School'), 'GHS Anekal');
+    await userEvent.click(screen.getByRole('button', { name: 'Save profile' }));
+
+    // Only the one they filled -- `state` is still blank and is left out.
+    await waitFor(() =>
+      expect(updateProfile).toHaveBeenCalledWith({ school_name: 'GHS Anekal' }));
+  });
+
+  it('makes no request at all when every field was left as it was', async () => {
     getProfile.mockResolvedValue(ok(INCOMPLETE, ['school_name', 'state']));
     mount(<ProfileGate />);
     await screen.findByRole('dialog');
 
     await userEvent.click(screen.getByRole('button', { name: 'Save profile' }));
 
-    expect(await screen.findByText('School is required.')).toBeTruthy();
-    expect(screen.getByText('State is required.')).toBeTruthy();
     expect(updateProfile).not.toHaveBeenCalled();
   });
 
   it('does not send a blank value that would erase a good one', async () => {
+    // Clearing a field is deliberately unsupported -- the backend rejects an
+    // empty value with 400 "must not be blank". Dropping it here means the
+    // user gets a no-op rather than a confusing error on an action that looks
+    // perfectly legitimate.
     await openForm();
 
     await userEvent.clear(screen.getByLabelText('Role'));
     await userEvent.click(screen.getByRole('button', { name: 'Save profile' }));
 
-    expect(await screen.findByText('Role is required.')).toBeTruthy();
-    expect(updateProfile).not.toHaveBeenCalled();
+    await waitFor(() => expect(updateProfile).not.toHaveBeenCalled());
   });
 
   it('stays open and explains itself when the save is rejected', async () => {

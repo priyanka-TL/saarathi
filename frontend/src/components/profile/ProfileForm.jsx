@@ -98,6 +98,14 @@ export default function ProfileForm({
     const changed = {};
     for (const { name } of FIELDS) {
       const value = values[name].trim();
+      // BLANKS ARE NEVER SENT. The fields are no longer required here, so a
+      // user can save with some still empty -- but an empty value must not go
+      // upstream: the backend rejects it outright with 400 "must not be blank"
+      // (clearing a field is deliberately unsupported, see clean_update), and
+      // that surfaces as a confusing error on an action the user thinks is
+      // legitimate. Leaving it out means an untouched empty field is simply
+      // not part of the update, which is what they meant.
+      if (!value) continue;
       if (value !== (profile?.[name] ?? '')) changed[name] = value;
     }
     if (!Object.keys(changed).length) {
