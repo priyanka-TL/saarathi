@@ -19,6 +19,7 @@ from app.providers.errors import (
     ProviderTurnTimeout,
 )
 from app.providers.connection import RemoteConnection
+from app.providers.transport.frames import TurnEnd
 from app.providers.transport.ws import WsChannel, UNREADABLE_TURN_MESSAGE
 from app.providers.ws_flow.base import BaseWsFlowProvider
 
@@ -591,3 +592,76 @@ def test_a_turn_with_no_documents_reports_none():
     turn = channel.send_and_await_turn("hi", timeout_s=2.0, idle_gap_s=0.5)
 
     assert turn.attachments == []
+
+
+# ---------------------------------------------------------------------------
+# How the turn ENDED, which is the difference between a slow provider and a
+# provider that never says it has finished.
+#
+# Both endings produce identical text, so nothing above this point can tell
+# them apart -- and they call for opposite fixes. A `finish_reason` turn is as
+# fast as the provider is; an `idle_gap` turn spent the whole configured gap
+# adding nothing, every single time, and no provider-side speedup removes it.
+# ---------------------------------------------------------------------------
+
+
+def test_a_turn_the_provider_finished_is_recorded_as_finish_reason():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("I am going to ", source="bot", finish_reason=None, step=1))
+    fake.queue_raw(0.0, _text_frame("tell you a story ", source="bot", finish_reason=None, step=2))
+    fake.queue_raw(0.0, _text_frame("about a fox.", source="bot", finish_reason="stop", step=3))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("go on", timeout_s=2.0, idle_gap_s=0.5)
+
+    assert turn.end_reason is TurnEnd.FINISH_REASON
+    assert turn.fragment_count == 3
+    assert turn.first_frame_ms is not None and turn.last_frame_ms is not None
+    assert turn.first_frame_ms <= turn.last_frame_ms
+
+
+def test_a_turn_flushed_by_the_backstop_is_recorded_as_idle_gap():
+    """The measurement that makes the 8-second backstop visible.
+
+    The provider answered promptly and then went quiet without ever saying it
+    was done. `last_frame_ms` is what proves the wait was wasted: the reply was
+    complete long before the channel stopped listening for more of it.
+    """
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("partial answer", source="bot", finish_reason=None))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    t0 = time.monotonic()
+    turn = channel.send_and_await_turn("go on", timeout_s=10.0, idle_gap_s=0.3)
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+    assert turn.text == "partial answer"
+    assert turn.end_reason is TurnEnd.IDLE_GAP
+    assert turn.fragment_count == 1
+    # The whole point: the answer was in hand ~300ms before the turn returned.
+    assert turn.last_frame_ms is not None
+    assert elapsed_ms - turn.last_frame_ms >= 250
+
+
+def test_a_turn_that_exhausts_the_whole_budget_is_recorded_as_turn_timeout():
+    """Distinguished from an idle-gap flush, because the remedies differ: this
+    one is a genuinely slow provider, not a missing end-of-turn signal."""
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("still thinking", source="bot", finish_reason=None))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    # idle_gap LONGER than the turn budget, so the overall deadline binds first.
+    turn = channel.send_and_await_turn("go on", timeout_s=0.3, idle_gap_s=5.0)
+
+    assert turn.text == "still thinking"
+    assert turn.end_reason is TurnEnd.TURN_TIMEOUT
+
+
+def test_a_turn_that_never_arrives_still_raises_rather_than_reporting_an_ending():
+    """Unchanged behaviour, pinned: measurement must not have turned a timeout
+    into an empty but 'successful' turn."""
+    fake = _FakeWebSocket()
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    with pytest.raises(ProviderTurnTimeout):
+        channel.send_and_await_turn("hello", timeout_s=0.2, idle_gap_s=0.1)

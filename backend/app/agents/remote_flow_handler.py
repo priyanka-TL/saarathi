@@ -81,7 +81,14 @@ class RemoteFlowAgentHandler:
         # It re-supplies `remote_bot_route` every turn, straight off this
         # tenant's scoped config, so a configuration change takes effect on the
         # next turn without an environment lookup.
-        init = self._provider.open_session(self._remote, ctx.session, ctx.user)
+        # THREE SEQUENTIAL REMOTE CALLS, TIMED SEPARATELY. `latency_ms` below
+        # covers all three, which made them indistinguishable: a turn recorded
+        # as five seconds could have been a five-second reply, or a two-second
+        # reply behind a three-second completion poll. Only the first is the
+        # provider being slow; the second is work on the critical path that the
+        # user's answer did not depend on.
+        with timing.stage("remote_open_session"):
+            init = self._provider.open_session(self._remote, ctx.session, ctx.user)
         sess = dataclasses.replace(
             ctx.session,
             remote_session_id=init.remote_session_id,
@@ -89,10 +96,15 @@ class RemoteFlowAgentHandler:
             remote_bot_route=init.remote_bot_route,
         )
 
+        # Not wrapped in a stage of its own: the provider splits this into
+        # `remote_acquire` and `remote_turn`, which is the distinction worth
+        # having, and a third enclosing stage would double-count both.
         bot = self._provider.turn(
             self._remote, sess, ctx.text, ctx.user, first_turn=is_first_turn,
         )
-        done = self._provider.is_complete(self._remote, sess, ctx.user)
+
+        with timing.stage("remote_completion_poll"):
+            done = self._provider.is_complete(self._remote, sess, ctx.user)
 
         return AgentTurn(
             text=bot.text,

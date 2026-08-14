@@ -38,7 +38,13 @@ from app.providers.errors import (
     ProviderRemoteError,
     ProviderTurnTimeout,
 )
-from app.providers.transport.frames import Attachment, BotTurn, Frame, ParsedOption
+from app.providers.transport.frames import (
+    Attachment,
+    BotTurn,
+    Frame,
+    ParsedOption,
+    TurnEnd,
+)
 
 logger = get_logger("provider_ws_channel")
 
@@ -212,8 +218,15 @@ class WsChannel:
             step: Optional[int] = None
             saw_control_payload = False
             heard_from_bot = False
-            deadline = time.monotonic() + timeout_s
-            last_rx = time.monotonic()
+            sent_at = time.monotonic()
+            deadline = sent_at + timeout_s
+            last_rx = sent_at
+
+            # Measurement only -- nothing below branches on these.
+            end_reason: Optional[TurnEnd] = None
+            first_frame_at: Optional[float] = None
+            last_frame_at: Optional[float] = None
+            fragment_count = 0
 
             while True:
                 if self._closed.is_set():
@@ -237,15 +250,22 @@ class WsChannel:
                 # the user-echo the server sends back immediately does not extend
                 # the window -- the old expression really was measuring from send
                 # time.
+                # Written as an explicit comparison rather than the `min()` this
+                # used to be, so the loop can record WHICH of the two budgets ran
+                # out. Same arithmetic, same winner; only `bound_by` is new.
                 remaining = deadline - time.monotonic()
+                bound_by = TurnEnd.TURN_TIMEOUT
                 if heard_from_bot:
-                    remaining = min(remaining, last_rx + idle_gap_s - time.monotonic())
+                    idle_remaining = last_rx + idle_gap_s - time.monotonic()
+                    if idle_remaining < remaining:
+                        remaining, bound_by = idle_remaining, TurnEnd.IDLE_GAP
 
                 if remaining <= 0:
                     # saw_control_payload: we DID hear from the provider, its
                     # frame was just unusable. Falling through to the re-prompt
                     # below is honest; "the request timed out" is not.
                     if chunks or saw_control_payload:
+                        end_reason = bound_by
                         break  # idle-gap (or timeout) flush
                     raise ProviderTurnTimeout(step=step)
 
@@ -261,6 +281,13 @@ class WsChannel:
 
                 last_rx = time.monotonic()
                 heard_from_bot = True
+                fragment_count += 1
+                if first_frame_at is None:
+                    first_frame_at = last_rx
+                # Tracked separately from `last_rx` even though they hold the
+                # same instant today: `last_rx` drives the idle gap, and a future
+                # reason to advance it must not silently move a measurement.
+                last_frame_at = last_rx
                 if f.control_payload:
                     # The provider leaked an internal LLM object instead of a
                     # reply. The parser has already stripped it down to whatever
@@ -285,6 +312,7 @@ class WsChannel:
                     # render the same file twice on a chunked turn.
                     attachments = f.attachments
                 if f.finish_reason:
+                    end_reason = TurnEnd.FINISH_REASON
                     break  # END OF TURN
 
             text_out = "".join(chunks)
@@ -296,8 +324,15 @@ class WsChannel:
                 # genuinely recovers the interview.
                 text_out = UNREADABLE_TURN_MESSAGE
 
+            def _since_send(at: Optional[float]) -> Optional[int]:
+                return None if at is None else int((at - sent_at) * 1000)
+
             return BotTurn(
                 text=text_out, options=options, attachments=attachments, step=step,
+                end_reason=end_reason,
+                first_frame_ms=_since_send(first_frame_at),
+                last_frame_ms=_since_send(last_frame_at),
+                fragment_count=fragment_count,
             )
         finally:
             self._turn_lock.release()

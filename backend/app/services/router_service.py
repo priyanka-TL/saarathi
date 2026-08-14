@@ -466,5 +466,12 @@ class RouterService:
     ) -> str:
         llm = self._llm_factory.get(self._router_model_spec())
         messages = self._router_messages(ctx, visible, pin=pin)
-        response = llm.invoke(messages)
+        # SEPARATE FROM THE SERVING AGENT'S "llm" STAGE. This call is routing
+        # overhead, not the answer the user is waiting for, and a pinned turn
+        # skips it entirely -- folding the two together would hide both facts.
+        # `pin` is set only on the yield path, which is the case where a pinned
+        # conversation pays for a classifier on every single turn.
+        timing.count("router_llm_calls")
+        with timing.stage("router_llm"):
+            response = llm.invoke(messages)
         return _as_text(response)

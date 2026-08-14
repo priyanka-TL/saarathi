@@ -29,6 +29,7 @@ from uuid import UUID
 
 import websocket
 
+from app.core import timing
 from app.core.logger import get_logger
 from app.providers.errors import ProviderChannelClosed, ProviderConfigError
 from app.providers.protocol import FinalizeResult, ProviderTurn, SessionInit
@@ -187,9 +188,14 @@ class BaseWsFlowProvider:
         def factory():
             return self._new_channel(remote, session_view, user)
 
-        ch = self._pool.acquire(session_view, self._conn, factory)
+        # SPLIT FROM THE TURN ITSELF. Acquiring can mean opening a socket and
+        # waiting out a handshake settle window, which is a different problem
+        # from a slow reply and used to be indistinguishable from one.
+        with timing.stage("remote_acquire"):
+            ch = self._pool.acquire(session_view, self._conn, factory)
         try:
-            bot = ch.send_and_await_turn(text, timeout_s, idle_gap_s)
+            with timing.stage("remote_turn"):
+                bot = ch.send_and_await_turn(text, timeout_s, idle_gap_s)
         except ProviderChannelClosed:
             # Exactly ONE re-establishment attempt -- not a general retry.
             # Re-sending a turn the platform already recorded would trigger its
@@ -201,8 +207,18 @@ class BaseWsFlowProvider:
             # SAME token for the rest of this turn -- there is nothing to
             # re-mint -- so a genuinely expired ELEVATE session fails again
             # here, cleanly, rather than "healing" silently.
-            ch = self._pool.reacquire(session_view, self._conn, factory)
-            bot = ch.send_and_await_turn(text, timeout_s, idle_gap_s)
+            with timing.stage("remote_acquire"):
+                ch = self._pool.reacquire(session_view, self._conn, factory)
+            # Recorded under the SAME stage name, which is why TurnTimings
+            # accumulates: a re-established turn genuinely spent both intervals
+            # waiting on this provider, and reporting only the second would
+            # understate the turn by however long the first one ran before the
+            # socket died.
+            with timing.stage("remote_turn"):
+                bot = ch.send_and_await_turn(text, timeout_s, idle_gap_s)
+            timing.detail("remote_reestablished", True)
+
+        self._record_turn_shape(bot)
 
         return ProviderTurn(
             text=bot.text,
@@ -210,6 +226,28 @@ class BaseWsFlowProvider:
             attachments=self._permitted_attachments(bot.attachments),
             step=bot.step,
         )
+
+    @staticmethod
+    def _record_turn_shape(bot) -> None:
+        """File how the turn ended onto the request's timing record.
+
+        FILED HERE RATHER THAN RETURNED. `ProviderTurn` and `AgentTurn` describe
+        what the user gets back; how long the socket sat idle before we gave up
+        waiting is not part of that, and threading four measurement fields
+        through two protocol dataclasses to reach a log line would make every
+        implementor of those protocols carry them.
+
+        `end_reason` is the field this whole exercise exists to produce. A turn
+        that ends `idle_gap` spent the configured gap -- eight seconds, by
+        default -- adding nothing, and no amount of provider-side speedup will
+        remove it; the fix is on the wire, not in the model.
+        """
+        if bot.end_reason is None:
+            return  # a transport that does not measure; nothing to say
+        timing.detail("ws_end_reason", bot.end_reason.value)
+        timing.detail("ws_first_frame_ms", bot.first_frame_ms)
+        timing.detail("ws_last_frame_ms", bot.last_frame_ms)
+        timing.detail("ws_fragments", bot.fragment_count)
 
     def _permitted_attachments(self, attachments) -> list:
         """Drop any download URL this connection is not allowed to surface.
