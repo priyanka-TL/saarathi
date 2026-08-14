@@ -67,8 +67,21 @@ const REGISTRATION_OTP_PATH = '/user/v1/account/registrationOtp';
 const REGISTER_PATH = '/user/v1/account/create';
 const BRANDING_PATH = '/user/v1/public/branding';
 
-export function sendLoginOtp({ phone, phone_code }) {
-  return call({ method: 'POST', url: REGISTRATION_OTP_PATH, data: { phone, phone_code } });
+/**
+ * Mint a login OTP, to a phone number OR an email address.
+ *
+ * ONE OF THE TWO, NEVER BOTH. `email` wins when supplied and `phone`/
+ * `phone_code` are then omitted entirely rather than sent as nulls: ELEVATE
+ * resolves the account from whichever identifying key is present, so sending an
+ * empty phone alongside an email is how a request ends up looking like a
+ * malformed phone lookup instead of an email one.
+ *
+ * `phone_code` travels only with a phone. It is meaningless for an address, and
+ * it is the field that would make ELEVATE read the request as phone-shaped.
+ */
+export function sendLoginOtp({ phone, phone_code, email }) {
+  const data = email ? { email } : { phone, phone_code };
+  return call({ method: 'POST', url: REGISTRATION_OTP_PATH, data });
 }
 
 export function sendRegistrationOtp({ phone, phone_code }) {
@@ -79,8 +92,20 @@ export function loginWithPassword({ identifier, password }) {
   return call({ method: 'POST', url: LOGIN_PATH, data: { identifier, password } });
 }
 
+/**
+ * Verify an OTP. `identifier` is a phone number OR an email address -- the same
+ * value `sendLoginOtp` minted against.
+ *
+ * `phone_code` IS OPTIONAL AND OMITTED FOR AN EMAIL, matching the send call:
+ * verifying an address against a phone-shaped request is how one half of the
+ * flow ends up disagreeing with the other. Written as an explicit key check
+ * rather than left to `undefined` so the body this posts is readable here,
+ * following `register` below.
+ */
 export function loginWithOtp({ identifier, otp, phone_code }) {
-  return call({ method: 'POST', url: LOGIN_PATH, data: { identifier, otp: Number(otp), phone_code } });
+  const data = { identifier, otp: Number(otp) };
+  if (phone_code) data.phone_code = phone_code;
+  return call({ method: 'POST', url: LOGIN_PATH, data });
 }
 
 export function register({ phone, phone_code, otp, name, password }) {

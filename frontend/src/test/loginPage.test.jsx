@@ -66,12 +66,12 @@ describe('LoginPage: password mode', () => {
     const user = userEvent.setup();
     renderLogin();
 
-    await user.type(screen.getByPlaceholderText(/9995385076/), '9995385076');
+    await user.type(screen.getByLabelText('Phone number / email'), '9876543210');
     await user.type(screen.getByLabelText('Password'), 'hunter2');
     await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
     await waitFor(() => expect(screen.getByTestId('probe')).toHaveTextContent('in:Asha'));
-    expect(loginWithPassword).toHaveBeenCalledWith({ identifier: '9995385076', password: 'hunter2' });
+    expect(loginWithPassword).toHaveBeenCalledWith({ identifier: '9876543210', password: 'hunter2' });
   });
 
   it('shows ELEVATE\'s own error message on failure', async () => {
@@ -81,7 +81,7 @@ describe('LoginPage: password mode', () => {
     const user = userEvent.setup();
     renderLogin();
 
-    await user.type(screen.getByPlaceholderText(/9995385076/), '9995385076');
+    await user.type(screen.getByLabelText('Phone number / email'), '9876543210');
     await user.type(screen.getByLabelText('Password'), 'wrong');
     await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
@@ -100,10 +100,10 @@ describe('LoginPage: OTP mode', () => {
     renderLogin();
 
     await user.click(screen.getByRole('tab', { name: 'OTP' }));
-    await user.type(screen.getByPlaceholderText(/9995385076/), '9995385076');
+    await user.type(screen.getByLabelText('Phone number / email'), '9876543210');
     await user.click(screen.getByRole('button', { name: 'Send OTP' }));
 
-    expect(sendLoginOtp).toHaveBeenCalledWith({ phone: '9995385076', phone_code: '+91' });
+    expect(sendLoginOtp).toHaveBeenCalledWith({ phone: '9876543210', phone_code: '+91' });
     await screen.findByLabelText('OTP');
 
     await user.type(screen.getByLabelText('OTP'), '123456');
@@ -111,7 +111,36 @@ describe('LoginPage: OTP mode', () => {
 
     await waitFor(() => expect(screen.getByTestId('probe')).toHaveTextContent('in:Rohan'));
     expect(loginWithOtp).toHaveBeenCalledWith({
-      identifier: '9995385076', otp: '123456', phone_code: '+91',
+      identifier: '9876543210', otp: '123456', phone_code: '+91',
+    });
+  });
+
+  it('sends the OTP to an EMAIL when one is typed, not to a phone', async () => {
+    /**
+     * The single field accepts either, and which was typed decides the request
+     * shape: an address must travel as `email` with no `phone_code` beside it,
+     * or ELEVATE reads the call as a phone lookup that happens to be malformed.
+     */
+    sendLoginOtp.mockResolvedValue({ ok: true, status: 200, data: {} });
+    const user = userEvent.setup();
+    renderLogin();
+
+    await user.click(screen.getByRole('tab', { name: 'OTP' }));
+    await user.type(screen.getByLabelText('Phone number / email'), 'asha@example.com');
+    await user.click(screen.getByRole('button', { name: 'Send OTP' }));
+
+    expect(sendLoginOtp).toHaveBeenCalledWith({ email: 'asha@example.com' });
+    await screen.findByLabelText('OTP');
+
+    // And the VERIFY must match the send: no phone_code on an email.
+    loginWithOtp.mockResolvedValue({
+      ok: true, status: 200, data: { token: 'jwt-3', user: { name: 'Asha' } },
+    });
+    await user.type(screen.getByLabelText('OTP'), '654321');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(loginWithOtp).toHaveBeenCalledWith({
+      identifier: 'asha@example.com', otp: '654321',
     });
   });
 });
@@ -141,7 +170,7 @@ describe('LoginPage: tenant branding', () => {
 describe('LoginPage: config-driven Password/OTP tabs', () => {
   it('shows both tabs by default (the static config mock)', async () => {
     renderLogin();
-    await screen.findByPlaceholderText(/9995385076/);
+    await screen.findByLabelText('Phone number / email');
     expect(screen.getByRole('tab', { name: 'Password' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'OTP' })).toBeInTheDocument();
   });
@@ -152,10 +181,13 @@ describe('LoginPage: config-driven Password/OTP tabs', () => {
 
     renderLogin();
 
-    await screen.findByLabelText('Phone number');
+    // Waits on the Send OTP button, not on the identifier label: the label is
+    // "Phone number / email" in BOTH modes now (either is accepted either
+    // way), so it no longer distinguishes them. The button does.
+    await screen.findByRole('button', { name: 'Send OTP' });
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Send OTP' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Phone number / email')).toBeInTheDocument();
   });
 
   it('hides the tabs and shows only the Password flow when the tenant allows just Password', async () => {
@@ -166,7 +198,7 @@ describe('LoginPage: config-driven Password/OTP tabs', () => {
 
     await screen.findByLabelText('Password');
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Phone or email')).toBeInTheDocument();
+    expect(screen.getByLabelText('Phone number / email')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Send OTP' })).not.toBeInTheDocument();
   });
 
@@ -191,7 +223,7 @@ describe('LoginPage: config-driven Password/OTP tabs', () => {
     renderLogin();
 
     await waitFor(() => expect(screen.queryByLabelText('Password')).not.toBeInTheDocument());
-    expect(screen.getByLabelText('Phone number')).toBeInTheDocument();
+    expect(screen.getByLabelText('Phone number / email')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send OTP' })).toBeInTheDocument();
   });
 });

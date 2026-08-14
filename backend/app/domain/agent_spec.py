@@ -64,10 +64,42 @@ class ModelSpec(BaseModel):
     max_tokens:  Optional[int] = Field(None, ge=1, le=32768)
     timeout_s:   float      = Field(30.0, gt=0, le=300)
 
+class IntentSpec(BaseModel):
+    """A verb x noun grid describing how a user asks for this agent.
+
+    THE COMPLEMENT TO `keywords`, not a replacement. A phrase list matches what
+    someone wrote; this matches what they meant, across a cross product too
+    large to enumerate. "I want to start a discussion" matches none of the
+    seeded discussion keywords, and adding phrases one at a time never converges
+    -- there are too many verbs and too many ways to space them from the noun.
+
+    Matched by `app.services.intent_match.intent_match`: one verb, then one
+    noun, verb BEFORE noun, within `max_distance` tokens. The ordering
+    requirement is what keeps this from being looser than the phrase matcher it
+    supplements -- see that function for why.
+
+    OPTIONAL, AND ABSENT MEANS SKIPPED. Every agent shipped before this field
+    existed carries no `intent` block and behaves exactly as it did; only an
+    agent that opts in is matched this way.
+    """
+    model_config = STRICT
+
+    verbs: List[str] = Field(default_factory=list)
+    nouns: List[str] = Field(default_factory=list)
+    #: Max tokens between the verb and its noun. Per-agent rather than a
+    #: constant because an agent whose nouns are common words ("story") wants a
+    #: tighter window than one whose nouns are rare ("chaupal").
+    max_distance: int = Field(4, ge=1, le=10)
+
+
 class RoutingSpec(BaseModel):
     model_config = STRICT
 
     keywords:             List[str] = Field(default_factory=list)
+
+    #: How this agent is asked for, beyond fixed phrases. See IntentSpec.
+    #: None means "no grid" -- the agent is matched on `keywords` alone.
+    intent:               Optional[IntentSpec] = None
     priority:             int   = Field(50, ge=0, le=100)
     pin_session:          bool  = False
     exit_keywords:        List[str] = Field(default_factory=lambda: ["/exit", "cancel", "stop"])

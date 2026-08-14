@@ -31,7 +31,7 @@ describe('elevateAuth: base URL guard', () => {
   it('refuses to call when ELEVATE_BASE_URL is unconfigured, rather than defaulting to same-origin', async () => {
     const { sendLoginOtp } = await loadElevateAuth({ baseUrl: '' });
 
-    const result = await sendLoginOtp({ phone: '9995385076', phone_code: '+91' });
+    const result = await sendLoginOtp({ phone: '9876543210', phone_code: '+91' });
 
     expect(result.ok).toBe(false);
     expect(result.data.message).toMatch(/ELEVATE_BASE_URL is not configured/);
@@ -43,5 +43,49 @@ describe('elevateAuth: base URL guard', () => {
     const result = await loginWithPassword({ identifier: 'x', password: 'y' });
 
     expect(result.data.message).toMatch(/APPLICATION_ELEVATE_BASE_URL/);
+  });
+});
+
+describe('elevateAuth: sendLoginOtp carries phone OR email, never both', () => {
+  /**
+   * The single login field accepts either, so this function decides which key
+   * ELEVATE is asked to resolve the account by. Sending an empty `phone`
+   * alongside an `email` is what would make an email request look like a
+   * malformed phone lookup.
+   */
+  async function capturePostBody(args) {
+    vi.resetModules();
+    vi.stubEnv('APPLICATION_ELEVATE_BASE_URL', 'https://elevate.example');
+    vi.stubEnv('APPLICATION_ELEVATE_TENANT_ID', 'saarthi');
+    delete window.__APP_CONFIG__;
+
+    const sent = {};
+    vi.doMock('axios', () => ({
+      default: {
+        create: () => ({
+          request: (config) => {
+            Object.assign(sent, config);
+            return Promise.resolve({ status: 200, data: {} });
+          },
+        }),
+      },
+    }));
+
+    const { sendLoginOtp } = await import('../api/elevateAuth');
+    await sendLoginOtp(args);
+    vi.doUnmock('axios');
+    return sent.data;
+  }
+
+  it('sends phone and phone_code for a phone number', async () => {
+    const body = await capturePostBody({ phone: '9876543210', phone_code: '+91' });
+    expect(body).toEqual({ phone: '9876543210', phone_code: '+91' });
+  });
+
+  it('sends ONLY email for an address -- no phone, no phone_code', async () => {
+    const body = await capturePostBody({ email: 'asha@example.com' });
+    expect(body).toEqual({ email: 'asha@example.com' });
+    expect(body).not.toHaveProperty('phone');
+    expect(body).not.toHaveProperty('phone_code');
   });
 });
