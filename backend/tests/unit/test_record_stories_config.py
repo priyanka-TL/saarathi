@@ -24,10 +24,14 @@ from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 #: 0010 seeds the ORIGINAL shape; 0013 rewrites it into the provider-neutral
-#: envelope. What the database actually holds -- and therefore what the
-#: application validates -- is the second applied to the first, so that is what
-#: these assertions read.
+#: envelope; 0023 moves this agent onto its own logged-in bot. What the database
+#: actually holds -- and therefore what the application validates -- is all
+#: three applied in sequence, so that is what these assertions read. Composing
+#: them beats restating the end state: a migration whose edit changes and a pin
+#: that does not would otherwise agree with each other and disagree with the
+#: database.
 _GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
+_STORY_BOT = _VERSIONS / "0023_story_bot_route.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -46,6 +50,7 @@ def _seed_specs() -> dict:
     """
     seed = _load_migration("_seed_0010", _MIGRATION)
     generalize = _load_migration("_generalize_0013", _GENERALIZE)
+    story_bot = _load_migration("_story_bot_0023", _STORY_BOT)
 
     agents = {}
     for agent in seed.seed_agents():
@@ -53,6 +58,14 @@ def _seed_specs() -> dict:
         if isinstance(agent.get("remote"), dict):
             agent["agent_type"] = "remote_flow"
             agent["remote"] = generalize._to_envelope(agent["remote"])
+        # 0023 touches exactly one agent, and the guard below is the migration's
+        # own predicate: it will not convert a row whose bot_route has drifted.
+        if (
+            agent["key"] == story_bot.AGENT_KEY
+            and agent.get("remote", {}).get("options", {}).get("bot_route")
+            == story_bot.OLD_BOT_ROUTE
+        ):
+            agent = story_bot.apply(agent)
         agents[agent["key"]] = agent
     return agents
 
@@ -114,11 +127,22 @@ def test_bot_route_and_company_are_stored_literals():
     """`remote.bot_route` / `remote.company` are plain stored fields, which is
     what lets a tenant-scoped agent_configs row override them.
 
+    The route is the one 0023 moved this agent to: `/guided_guest` was a GUEST
+    interview whose opening steps asked a logged-in user for their own name and
+    profile. `/saarthi_story_flow` is the bot Mitra's own resolver answers with
+    for the portal URL `?flow=saarthi_story_flow`, verified against QA:
+    GET /api/flow-connection-info/?flow_route=saarthi_story_flow returns
+    `{"bot_route": "/saarthi_story_flow"}`.
+
+    `flow_name` is asserted UNCHANGED alongside the moved route, for the same
+    reason the sibling agent's is: it selects the story renderer at
+    finalisation, and moving it renders a blank PDF with a 200 from every call.
+
     Also asserts they carry no `${VAR}` reference: that substitution is gone,
     so one left behind would be sent to Mitra verbatim as a company slug.
     """
     raw = _raw()["remote"]
-    assert raw["options"]["bot_route"] == "/guided_guest"
+    assert raw["options"]["bot_route"] == "/saarthi_story_flow"
     assert raw["options"]["company"] == "shikshalokamstaging"
     for value in (raw["options"]["bot_route"], raw["options"]["company"]):
         assert "${" not in value
@@ -126,6 +150,29 @@ def test_bot_route_and_company_are_stored_literals():
     remote = _load_spec().remote
     assert remote.provider == "mitra"
     assert remote.flow_name == "guest-mi-story"
+
+
+def test_this_agent_never_names_the_caller_to_mitra():
+    """THE regression pin for the sibling agent's report.
+
+    Mitra resolves a profile by (email, company), and this agent and
+    `capture_discussion` carry the SAME company and the same derived email --
+    so they share ONE Profile row. Mitra reads a non-empty `first_name` as "we
+    already know this person" and skips interview steps 1-5
+    (chatbot/consumers/async_consumer.py, create_chat_session), and those steps
+    are what populate `story.other_params`, where the minutes-of-meeting report
+    reads location, organization, participants_count, discussion_date,
+    district, village, pri_member and school_representative.
+
+    So opting THIS agent in would silently re-break Capture Discussion's
+    report -- the exact regression 0020 exists to undo. 0023 moves the route and
+    nothing else; the profile questions are removed on the Mitra side instead,
+    which costs the sibling nothing.
+
+    Enabling this safely needs its own `company` slug first, which isolates the
+    Profile row. Do not flip the flag on the shared one.
+    """
+    assert _raw()["remote"]["options"].get("send_user_profile") in (None, False)
 
 
 def test_finalize_path_is_v1_because_mitra_has_no_flow_row_for_this_flow():

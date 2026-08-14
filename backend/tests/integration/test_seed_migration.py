@@ -213,20 +213,27 @@ def test_the_seeded_configs_in_the_database_still_validate():
 
 
 def test_each_delegated_agent_drives_its_own_bot():
-    """THE REGRESSION PIN FOR MIGRATION 0019, read off the migrated database
-    rather than off any migration's source -- this is the one assertion that
-    sees what all nineteen actually produced, in order, and it is the same on a
-    fresh `make migrate` as on an upgraded live database.
+    """THE REGRESSION PIN FOR MIGRATIONS 0019 AND 0023, read off the migrated
+    database rather than off any migration's source -- this is the one assertion
+    that sees what all of them actually produced, in order, and it is the same
+    on a fresh `make migrate` as on an upgraded live database.
 
-    Three agents, three distinct bot routes, and 0019 was allowed to move
-    exactly one of them. A migration whose predicate is too broad does not fail
-    loudly: it points a working interview at a bot that answers, with different
-    questions.
+    Both delegated Mitra agents have now been moved onto their own dedicated
+    bot, one migration each: 0019 moved `capture_discussion` off the shared
+    /shikshalokam_chaupal, and 0023 moved `record_stories` off the guest
+    /guided_guest. Each was allowed to move exactly one of them, and the routes
+    must still be DISTINCT. A migration whose predicate is too broad does not
+    fail loudly: it points a working interview at a bot that answers, with
+    different questions.
 
-    `capture_discussion`'s flow_name is asserted UNCHANGED alongside its moved
-    route. Mitra's v1 /api/end-story/ branches on flow == 'guest-discussion' to
-    render the minutes-of-meeting report; any other value renders an empty
-    template into a valid, downloadable, COMPLETELY BLANK PDF and returns 200.
+    BOTH flow_names are asserted UNCHANGED alongside their moved routes, and
+    that pairing is the point of this test. The bot and the flow are separate
+    keys on separate Mitra tables: bot_route picks the CompanyBot, flow_name
+    picks the story branch at finalisation. Mitra's v1 /api/end-story/ branches
+    on flow == 'guest-discussion' to render the minutes-of-meeting report and
+    resolves 'guest-mi-story' from the SessionFlowName enum; any other value
+    renders an empty template into a valid, downloadable, COMPLETELY BLANK PDF
+    and returns 200.
     """
     session = SessionLocal()
     try:
@@ -264,10 +271,24 @@ def test_each_delegated_agent_drives_its_own_bot():
 
     story = by_key["record_stories"]
     assert story.provider == "mitra"
-    assert story.bot_route == "/guided_guest", "0019 must not have touched this"
-    assert story.flow_name == "guest-mi-story"
+    assert story.bot_route == "/saarthi_story_flow", (
+        "0023 moves this agent off the guest /guided_guest bot, whose opening "
+        "steps asked a logged-in user for their own name and profile"
+    )
+    assert story.flow_name == "guest-mi-story", (
+        "the flow selects the story renderer; moving it renders a blank PDF"
+    )
     assert story.send_user_profile is None, (
-        "the story flow never opted in; its profile upsert body is unchanged"
+        "the story flow never opted in, and 0023 kept it that way: this agent "
+        "shares one Mitra Profile row with capture_discussion -- same (email, "
+        "company) -- so writing first_name here would make the DISCUSSION skip "
+        "to CHALLENGES and empty its MOM report. That is 0020's regression"
+    )
+
+    assert discussion.bot_route != story.bot_route, (
+        "each delegated agent must drive its OWN bot -- a too-broad predicate "
+        "points a working interview at a bot that answers, with the wrong "
+        "questions"
     )
 
 
