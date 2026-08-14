@@ -355,6 +355,23 @@ class RouterService:
         """The registry snapshot is global; VISIBILITY is per-caller."""
         return [a for a in self._registry.routable() if a.spec.access.matches(user)]
 
+    #: Ceiling on the classifier's reply. It emits one small JSON verdict
+    #: (`{"agent_key": ..., "confidence": ...}`), so this is generous by an
+    #: order of magnitude and exists to bound the REQUEST, not the answer.
+    #:
+    #: WITHOUT IT THE ROUTER 402s ON A FUNDED ACCOUNT. Omitting max_tokens does
+    #: not mean "no limit" to OpenRouter -- it means "reserve credit for the
+    #: model's whole context window", so a request that will really emit ~30
+    #: tokens is priced at 65,536 and refused with
+    #: `code: 402, limit_source: openrouter_credits` while the balance is
+    #: healthy. Observed live: the same key, at the same moment, could afford
+    #: 60,029 tokens of the cheap chat model and only 3,121 of the pricier
+    #: router model -- remaining credit divided by each model's rate. The
+    #: router failing takes the whole turn down with it, because the fallback
+    #: agent is an LLM agent that 402s for the same reason, and /api/chat
+    #: answers 502.
+    ROUTER_MAX_TOKENS = 512
+
     def _router_model_spec(self) -> ModelSpec:
         # There is no YAML for "the router" -- it classifies, it doesn't answer.
         # Mirrors get_llm()'s own hardcoding (src/llm/__init__.py) and
@@ -364,7 +381,7 @@ class RouterService:
             provider="openrouter",
             name=config.OPENROUTER_MODEL,
             temperature=0.0,
-            max_tokens=None,
+            max_tokens=self.ROUTER_MAX_TOKENS,
             timeout_s=config.LLM_TIMEOUT,
         )
 
