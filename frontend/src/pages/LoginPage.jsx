@@ -24,6 +24,23 @@ import { AUTH_MODE } from '../utils/authModes';
 const PHONE_CODE = '+91';
 
 /**
+ * Whether what the user typed is an email address rather than a phone number.
+ *
+ * ONE FIELD ACCEPTS BOTH, in both modes, so something has to decide which key
+ * the OTP request carries -- see `sendLoginOtp`.
+ *
+ * `@` AND NOT A VALIDATING REGEX, deliberately. This is a routing question, not
+ * a validation one: the only job is telling two shapes apart, and a phone number
+ * never contains an `@`. A stricter pattern buys nothing here and can only
+ * misfire in the expensive direction -- rejecting a real address ELEVATE would
+ * have accepted, leaving the user unable to log in with no way to tell why.
+ * ELEVATE validates the address itself and its answer is the one that matters.
+ */
+function isEmailIdentifier(value) {
+  return value.includes('@');
+}
+
+/**
  * Logs a user in directly against ELEVATE -- Saarthi's own backend never sees
  * a password or an OTP, only the JWT this produces (see api/elevateAuth.js).
  *
@@ -95,14 +112,23 @@ export default function LoginPage() {
 
   const handleSendOtp = async (event) => {
     event.preventDefault();
-    if (!identifier.trim()) {
-      setError('Enter your phone number first.');
+    const value = identifier.trim();
+    if (!value) {
+      setError('Enter your phone number or email first.');
       return;
     }
     setBusy(true);
     setError('');
     try {
-      const response = await sendLoginOtp({ phone: identifier.trim(), phone_code: PHONE_CODE });
+      // An OTP goes to a phone OR an address, and which one decides the whole
+      // request shape -- `phone_code` must not travel with an email. The
+      // branch lives here rather than in the API module because this is the
+      // only place that knows the single field holds either.
+      const response = await sendLoginOtp(
+        isEmailIdentifier(value)
+          ? { email: value }
+          : { phone: value, phone_code: PHONE_CODE },
+      );
       if (!response.ok) {
         setError(extractMessage(response.data) || 'Could not send the OTP. Please try again.');
         return;
@@ -124,10 +150,19 @@ export default function LoginPage() {
     setBusy(true);
     setError('');
     try {
+      const value = identifier.trim();
+      // VERIFY THE SAME SHAPE THE OTP WAS MINTED AGAINST. `handleSendOtp`
+      // sends an address as `email` with no `phone_code`; carrying one back
+      // here would ask ELEVATE to verify an email against a phone-shaped
+      // request, and the half that fails would be the half the user sees.
       const response =
         mode === AUTH_MODE.PASSWORD
-          ? await loginWithPassword({ identifier: identifier.trim(), password })
-          : await loginWithOtp({ identifier: identifier.trim(), otp, phone_code: PHONE_CODE });
+          ? await loginWithPassword({ identifier: value, password })
+          : await loginWithOtp({
+              identifier: value,
+              otp,
+              ...(isEmailIdentifier(value) ? {} : { phone_code: PHONE_CODE }),
+            });
 
       if (!response.ok) {
         setError(extractMessage(response.data) || 'Login failed. Please check your details and try again.');
@@ -163,7 +198,11 @@ export default function LoginPage() {
             )}
           </div>
           <h1>{branding.name || 'Saarthi'}</h1>
-          <p>Sign in to continue</p>
+          {/* NAMES WHAT YOU SIGN IN WITH. One line for both modes, because
+              both accept either: password logs in on an identifier, and OTP is
+              minted to a phone or an address depending on which was typed
+              (`sendLoginOtp`). */}
+          <p>Sign in to continue with your phone number or email</p>
         </div>
 
         {showTabs && (
@@ -191,15 +230,29 @@ export default function LoginPage() {
 
         <form className="auth-form" onSubmit={handleSubmit}>
           <label className="auth-field">
-            {/* OTP mode is phone-only: ELEVATE's OTP-send endpoint
-                (registrationOtp, shared by login and signup) takes
-                phone/phone_code, no email variant. */}
-            <span>{mode === AUTH_MODE.PASSWORD ? 'Phone or email' : 'Phone number'}</span>
+            {/* THE SAME IN BOTH MODES, because both accept either. The OTP
+                endpoint (registrationOtp, shared by login and signup) takes an
+                email as readily as a phone -- `sendLoginOtp` picks the key off
+                what was typed. This label used to narrow to "Phone number" in
+                OTP mode and turned a supported way of signing in into one the
+                form appeared to forbid. */}
+            <span>Phone number / email</span>
             <input
               type="text"
               value={identifier}
               onChange={(e) => setIdentifier(e.target.value)}
-              placeholder={mode === AUTH_MODE.PASSWORD ? '9995385076 or you@example.com' : '9995385076'}
+              // MASKED, AND SYNTHETIC. Two separate reasons, both load-bearing:
+              //
+              //   masked     a placeholder is a hint, not a specimen to copy.
+              //              Showing ten complete digits invited exactly that.
+              //   synthetic  this started life as a real person's mobile
+              //              number. A placeholder ships in a bundle every
+              //              visitor downloads, so it must never be anyone's.
+              //
+              // The visible half still carries the shape a valid entry has -- an
+              // Indian mobile, ten digits, leading 9 -- which is what the hint
+              // is actually for. Keep both properties if this is ever changed.
+              placeholder="98765***** or you@example.com"
               autoComplete="username"
               disabled={busy}
             />

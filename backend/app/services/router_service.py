@@ -27,6 +27,7 @@ from app.core.logger import get_logger
 from app.repositories.conversations import ConversationRepository
 from app.repositories.messages import MessageRepository
 from app.repositories.sessions import AgentSessionRepository
+from app.services import intent_match as intent_match_lib
 from app.services.agent_registry import AgentRegistry, RegisteredAgent
 from app.services.session_service import SessionService
 
@@ -116,7 +117,7 @@ class RouterService:
         # GATE 3 -- deterministic keyword pre-route
         visible = self._visible(ctx.user)
         hits = [(a.spec.routing.priority, a) for a in visible
-                if self._kw_match(ctx.text, a.spec.routing.keywords)]
+                if self._kw_match(ctx.text, a)]
         if hits:
             return RouteDecision(max(hits, key=itemgetter(0))[1], "keyword", 1.0, 0)
 
@@ -184,15 +185,30 @@ class RouterService:
         slightly-ambiguous assistant turn onto General Support -- a worse bug
         than the one being fixed. Returning None means "stay pinned".
 
-        TWO STEPS, cheap first:
+        THREE STEPS, CHEAPEST FIRST, AND ONLY THE LAST COSTS A MODEL CALL:
 
-          1. keyword, deterministic and free -- the same substring match Gate 3
-             uses, over the same visibility-filtered candidates;
-          2. the classifier, only when no keyword matched. Needed because the
-             match is a plain substring test: the sentence that prompted this
-             work, "I wanted to capture a story", matches NONE of
-             record_stories' keywords ("capture story" is not in "capture a
-             story"), so a keyword-only rule would not have fixed it.
+          1. the deterministic matcher, free -- the same `_kw_match` Gate 3
+             uses, over the same visibility-filtered candidates. It matches
+             keyword phrases as ordered token subsequences AND the agent's
+             `routing.intent` grid;
+          1b. the ambiguity gate: if the message names none of the candidates'
+             subjects, it cannot be a request for one of them. Stay pinned,
+             no call;
+          2. the classifier, only for a message that mentions a candidate's
+             subject without matching it.
+
+        STEP 1B IS WHY THIS IS AFFORDABLE. Every step of this method used to
+        fall through to step 2, so a pinned conversation paid an OpenRouter
+        round trip -- serialised in front of the agent's own turn -- on every
+        single turn, including "yes" and "40 students". Those cannot be a
+        request to leave and now cost two set lookups.
+
+        STEP 1 USED TO BE A SUBSTRING TEST, and that is why step 2 had to carry
+        so much weight: the sentence that prompted this work, "I wanted to
+        capture a story", matched NONE of record_stories' keywords ("capture
+        story" is not in "capture a story"). The token matcher in
+        app/services/intent_match.py handles that case and its whole family
+        without a model, so step 2 now sees only genuine ambiguity.
 
         The pinned agent is excluded from the candidates throughout, so its own
         keywords cannot "switch" the conversation to itself and log a spurious
@@ -223,7 +239,7 @@ class RouterService:
 
         # 1. Deterministic, zero LLM calls.
         hits = [(a.spec.routing.priority, a) for a in candidates
-                if self._kw_match(ctx.text, a.spec.routing.keywords)]
+                if self._kw_match(ctx.text, a)]
         if hits:
             winner = max(hits, key=itemgetter(0))[1]
             logger.info(
@@ -231,6 +247,25 @@ class RouterService:
                 extra={"from_agent": pin.key, "to_agent": winner.key},
             )
             return RouteDecision(winner, "keyword_yield", 1.0, 0, unpinned=True)
+
+        # 1b. THE AMBIGUITY GATE, and the reason this method is no longer a
+        #     model call on every single turn of a pinned conversation.
+        #
+        #     A message that names none of the candidates' subjects cannot be
+        #     the "explicit, unambiguous request for one of the agents below"
+        #     the prompt at step 2 asks the classifier to look for -- so there
+        #     is nothing to decide, and STAY PINNED is already the answer.
+        #     Ordinary interview answers ("yes", "40 students", "attendance
+        #     dropped after the monsoon") are the bulk of every conversation and
+        #     all stop here, having cost two set lookups instead of an
+        #     OpenRouter round trip serialised in front of the agent's own turn.
+        #
+        #     BEFORE the classifier and AFTER the keyword pass, deliberately: a
+        #     message that already matched a phrase or an intent grid has been
+        #     decided and must not be re-examined, while one that reaches step 2
+        #     genuinely is ambiguous and still gets the model.
+        if not self._could_be_a_request_for(ctx.text, candidates):
+            return None
 
         # 2. The classifier. Same underlying call Gate 4 makes, but told it is
         #    deciding whether to interrupt an ALREADY-PINNED conversation, and
@@ -341,13 +376,87 @@ class RouterService:
         )
 
     # ------------------------------------------------------------------
-    # Gate 3 helper
+    # Gate 3 helper -- and the yield path's first step
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _kw_match(text: str, keywords: List[str]) -> bool:
-        lowered = text.lower()
-        return any(kw.lower() in lowered for kw in keywords)
+    def _kw_match(text: str, agent: "RegisteredAgent") -> bool:
+        """Whether this agent is deterministically asked for by `text`.
+
+        TWO MATCHERS, BOTH FREE. `keywords` as an order-preserving token
+        subsequence with filler-only gaps, then the agent's `routing.intent`
+        grid if it declares one. Either is enough.
+
+        THIS USED TO BE `kw.lower() in text.lower()`, and the substring test is
+        what made the LLM classifier necessary on so many turns: a single
+        inserted article defeated it, so "capture a story" missed the keyword
+        "capture story" and fell through to a model call. The docstring on
+        `_yield_from_pin` has cited that exact sentence as the reason the
+        classifier exists since the day it was written.
+
+        SIGNATURE CHANGED FROM (text, keywords) TO (text, agent) deliberately.
+        The intent grid lives on the same `routing` block as the keywords, and
+        passing the list alone meant every call site had to remember to consult
+        the grid separately -- which is the kind of thing that gets forgotten at
+        one of the two call sites and produces a routing difference nobody can
+        explain.
+
+        Precision, not recall, is the target. See app/services/intent_match.py.
+        """
+        routing = agent.spec.routing
+        if intent_match_lib.keywords_match(text, routing.keywords):
+            return True
+
+        intent = getattr(routing, "intent", None)
+        if intent is None:
+            return False
+        return intent_match_lib.intent_match(
+            intent_match_lib.tokens(text),
+            intent.verbs, intent.nouns, intent.max_distance,
+        )
+
+    @staticmethod
+    def _could_be_a_request_for(text: str, candidates: List["RegisteredAgent"]) -> bool:
+        """Whether `text` names ANY candidate agent's subject at all.
+
+        THE AMBIGUITY GATE, and the reason a pinned conversation no longer pays
+        for a model call every turn. A message that mentions none of the
+        candidates' nouns cannot be an "explicit, unambiguous request for one of
+        the agents below" -- which is precisely what the yield prompt asks the
+        classifier to look for -- so there is nothing to decide and the call is
+        skipped. Ordinary interview answers ("yes", "40 students", "attendance
+        dropped after the monsoon") are the bulk of every conversation and all
+        land here.
+
+        THE NOUNS COME FROM THE INTENT GRID, FALLING BACK TO THE KEYWORDS. An
+        agent with no `routing.intent` block still has to be reachable, so its
+        keyword tokens stand in -- minus filler, which would otherwise make
+        "a" a subject and open the gate on every sentence in English.
+
+        BIASED TO SAYING YES, unlike every other matcher here. A false positive
+        costs one LLM call, which is exactly what happens today; a false
+        negative silently declines to consider a yield the classifier would have
+        allowed. The asymmetry is the opposite of `_kw_match`'s because the
+        decision is the opposite: this one only decides whether to ASK.
+        """
+        msg_tokens = intent_match_lib.tokens(text)
+        if not msg_tokens:
+            return False
+
+        for agent in candidates:
+            routing = agent.spec.routing
+            intent = getattr(routing, "intent", None)
+            if intent is not None and intent_match_lib.mentions_any(
+                msg_tokens, intent.nouns,
+            ):
+                return True
+            # No grid: the agent's keywords are the only statement of its
+            # subject matter available.
+            if intent_match_lib.mentions_any(
+                msg_tokens, intent_match_lib.subject_tokens(routing.keywords),
+            ):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Gate 4: visibility, prompt cache, LLM invocation
