@@ -2,3 +2,4 @@ graphify-out*
 .DS_Store
 Claude*
 .claude*
+backend/docs/agent-gene*
