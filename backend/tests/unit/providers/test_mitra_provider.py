@@ -35,12 +35,14 @@ class _FakeRest:
         self.finalize_calls = []
         self.get_report_calls = []
         self.profile_calls = []
+        self.profile_extras = []
         self.story_id = "9931"
         self.report_url = None
         self.report_error = None
 
-    def upsert_profile(self, email, latest_flow_used, company):
+    def upsert_profile(self, email, latest_flow_used, company, extra=None):
         self.profile_calls.append((email, latest_flow_used, company))
+        self.profile_extras.append(extra)
         return "profile-1"
 
     def generate_session(self):
@@ -73,6 +75,7 @@ class _Session:
 class _User:
     email = "someone@example.org"
     token = "the-real-token"
+    display_name = "Asha Devi"
 
 
 @pytest.fixture(autouse=True)
@@ -80,13 +83,14 @@ def _origin(monkeypatch):
     monkeypatch.setenv(MITRA_ORIGIN_ENV, "https://origin.test")
 
 
-def _provider(rest, remote):
+def _provider(rest, remote, profile_reader=None):
     provider = MitraProvider.__new__(MitraProvider)
     options = MitraOptions(**remote.options)
     provider._conn = resolve_connection(_Settings(), remote, options)
     provider._pool = None
     provider.options = options
     provider._rest = rest
+    provider._profile_reader = profile_reader
     return provider
 
 

@@ -35,6 +35,7 @@ from app.providers.mitra.provider import MitraProvider
 from app.providers.mitra.spec import MitraOptions
 from tests.provider_factories import MITRA_ORIGIN_ENV, remote_dict
 from app.providers.errors import ProviderChannelClosed, ProviderTurnTimeout
+from app.providers.protocol import CompletionPoll
 from app.providers.ws_flow.frames import ParsedOption
 from app.providers.transport.ws import BotTurn
 
@@ -47,23 +48,31 @@ from app.providers.transport.ws import BotTurn
 class _FakeRestClient:
     def __init__(self):
         self.upsert_profile_calls = []
+        self.upsert_profile_extras = []
         self.generate_session_calls = 0
         self.is_session_completed_calls = []
+        self.known_counts = []
         self._profile_id = "profile-1"
         self._session_id = "remote-sess-1"
         self._completed = False
+        self._count = 7
 
-    def upsert_profile(self, email, latest_flow_used, company):
+    def upsert_profile(self, email, latest_flow_used, company, extra=None):
         self.upsert_profile_calls.append((email, latest_flow_used, company))
+        self.upsert_profile_extras.append(extra)
         return self._profile_id
 
     def generate_session(self):
         self.generate_session_calls += 1
         return self._session_id
 
-    def is_session_completed(self, session_id):
+    def is_session_completed(self, session_id, known_count=None):
+        # Records the CACHED COUNT it was given as well as the session id: the
+        # count is what turns a two-request poll into one, so a regression that
+        # stopped threading it through would otherwise be invisible here.
         self.is_session_completed_calls.append(session_id)
-        return self._completed
+        self.known_counts.append(known_count)
+        return CompletionPoll(done=self._completed, count=self._count)
 
     def finalize(self, *args, **kwargs):
         raise AssertionError("RemoteFlowAgentHandler must never call finalize()")
@@ -160,7 +169,9 @@ def _remote_spec(**overrides) -> RemoteFlowAgentSpec:
     )
 
 
-def _session(remote_session_id: Optional[str] = None, step: int = 0) -> AgentSessionView:
+def _session(
+    remote_session_id: Optional[str] = None, step: int = 0, state_data: Optional[dict] = None,
+) -> AgentSessionView:
     return AgentSessionView(
         id=uuid.uuid4(),
         conversation_id=uuid.uuid4(),
@@ -176,7 +187,7 @@ def _session(remote_session_id: Optional[str] = None, step: int = 0) -> AgentSes
         result_ref=None,
         report_url=None,
         error=None,
-        state_data={},
+        state_data={} if state_data is None else state_data,
     )
 
 
@@ -431,6 +442,91 @@ def test_incomplete_session_returns_not_terminal_and_awaiting_user():
 
     assert turn.terminal is False
     assert turn.session_delta.state == SessionState.awaiting_user
+
+
+# ---------------------------------------------------------------------------
+# The completion poll's cached row count: two HTTP calls per turn become one
+# ---------------------------------------------------------------------------
+#
+# The provider learns a row count while polling and hands it back as an OPAQUE
+# patch; the handler remembers it on the session and the provider reads it again
+# next turn to seek straight to the tail. These tests cover the handler's half:
+# it must merge rather than overwrite, and it must not look inside the patch.
+
+
+def test_the_polls_row_count_is_remembered_on_the_session():
+    """The round trip that removes an HTTP call from every remote turn. Without
+    this the provider is handed no `known_count` next turn and pays the two-call
+    cold path forever -- which is the behaviour, and the ~350 ms, this replaced.
+    """
+    rest = _FakeRestClient()
+    rest._count = 42
+    channel = _FakeChannel([BotTurn(text="ok", options=[], step=1)])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    turn = handler.handle(_ctx("go", session=_session(remote_session_id="already-set")))
+
+    assert turn.session_delta.state_data == {"mitra": {"chat_count": 42}}
+
+
+def test_a_remembered_count_is_handed_back_to_the_provider_next_turn():
+    rest = _FakeRestClient()
+    channel = _FakeChannel([BotTurn(text="ok", options=[], step=1)])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    handler.handle(_ctx("go", session=_session(
+        remote_session_id="already-set",
+        state_data={"mitra": {"chat_count": 18}},
+    )))
+
+    assert rest.known_counts == [18]
+
+
+def test_the_cache_does_not_trample_other_session_state():
+    """A MERGE, NOT AN ASSIGNMENT. `SessionService.apply` writes `state_data`
+    wholesale, so returning the provider's patch alone would silently delete
+    every other key the column holds."""
+    rest = _FakeRestClient()
+    rest._count = 9
+    channel = _FakeChannel([BotTurn(text="ok", options=[], step=1)])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    turn = handler.handle(_ctx("go", session=_session(
+        remote_session_id="already-set",
+        state_data={"something_else": {"kept": True}, "mitra": {"chat_count": 2}},
+    )))
+
+    assert turn.session_delta.state_data == {
+        "something_else": {"kept": True},
+        "mitra": {"chat_count": 9},
+    }
+
+
+@pytest.mark.parametrize("stored", [
+    {"mitra": {"chat_count": "18"}},   # a string where an int belongs
+    {"mitra": {"chat_count": -1}},     # a negative offset
+    {"mitra": {"chat_count": True}},   # a bool, which int() would happily accept
+    {"mitra": "not-a-dict"},
+    {"mitra": {}},
+    {},
+])
+def test_a_malformed_cache_is_treated_as_absent(stored):
+    """A bad cache must cost a round trip, NEVER a wrong `terminal`. A wrong
+    False leaves the interview unfinalised with no report and no way for the user
+    to recover; a wrong True ends it early."""
+    rest = _FakeRestClient()
+    channel = _FakeChannel([BotTurn(text="ok", options=[], step=1)])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    handler.handle(_ctx("go", session=_session(
+        remote_session_id="already-set", state_data=stored,
+    )))
+
+    assert rest.known_counts == [None]
 
 
 def test_completion_poll_every_turn_false_never_polls():

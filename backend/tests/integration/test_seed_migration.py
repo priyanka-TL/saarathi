@@ -212,6 +212,65 @@ def test_the_seeded_configs_in_the_database_still_validate():
         _adapter.validate_python(row.config)
 
 
+def test_each_delegated_agent_drives_its_own_bot():
+    """THE REGRESSION PIN FOR MIGRATION 0019, read off the migrated database
+    rather than off any migration's source -- this is the one assertion that
+    sees what all nineteen actually produced, in order, and it is the same on a
+    fresh `make migrate` as on an upgraded live database.
+
+    Three agents, three distinct bot routes, and 0019 was allowed to move
+    exactly one of them. A migration whose predicate is too broad does not fail
+    loudly: it points a working interview at a bot that answers, with different
+    questions.
+
+    `capture_discussion`'s flow_name is asserted UNCHANGED alongside its moved
+    route. Mitra's v1 /api/end-story/ branches on flow == 'guest-discussion' to
+    render the minutes-of-meeting report; any other value renders an empty
+    template into a valid, downloadable, COMPLETELY BLANK PDF and returns 200.
+    """
+    session = SessionLocal()
+    try:
+        rows = session.execute(
+            text("""
+                SELECT a.key,
+                       c.config->'remote'->>'provider'                AS provider,
+                       c.config->'remote'->>'flow_name'               AS flow_name,
+                       c.config->'remote'->'options'->>'bot_route'    AS bot_route,
+                       c.config->'remote'->'options'->>'send_user_profile'
+                                                                      AS send_user_profile
+                  FROM agents a
+                  JOIN agent_configs c ON c.agent_id = a.id
+                 WHERE c.is_active
+                   AND c.tenant_id = 'default' AND c.organization_id = 'default'
+                   AND a.key IN ('capture_discussion', 'record_stories')
+            """)
+        ).fetchall()
+    finally:
+        session.close()
+
+    by_key = {r.key: r for r in rows}
+    assert set(by_key) == {"capture_discussion", "record_stories"}
+
+    discussion = by_key["capture_discussion"]
+    assert discussion.provider == "mitra"
+    assert discussion.bot_route == "/saarthi_discussion_flow"
+    assert discussion.flow_name == "guest-discussion", (
+        "the flow selects the MOM renderer; moving it renders a blank PDF"
+    )
+    assert discussion.send_user_profile == "false", (
+        "0020 turned this off: writing Profile.first_name makes Mitra skip to "
+        "the CHALLENGES step, and the skipped steps are what fill the MOM report"
+    )
+
+    story = by_key["record_stories"]
+    assert story.provider == "mitra"
+    assert story.bot_route == "/guided_guest", "0019 must not have touched this"
+    assert story.flow_name == "guest-mi-story"
+    assert story.send_user_profile is None, (
+        "the story flow never opted in; its profile upsert body is unchanged"
+    )
+
+
 def test_capability_membership_is_seeded_on_the_first_run():
     """THE ORDERING BUG THIS MIGRATION EXISTS TO PREVENT.
 

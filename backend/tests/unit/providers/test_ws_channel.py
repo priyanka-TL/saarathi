@@ -19,6 +19,7 @@ from app.providers.errors import (
     ProviderTurnTimeout,
 )
 from app.providers.connection import RemoteConnection
+from app.providers.transport.frames import TurnEnd
 from app.providers.transport.ws import WsChannel, UNREADABLE_TURN_MESSAGE
 from app.providers.ws_flow.base import BaseWsFlowProvider
 
@@ -591,3 +592,130 @@ def test_a_turn_with_no_documents_reports_none():
     turn = channel.send_and_await_turn("hi", timeout_s=2.0, idle_gap_s=0.5)
 
     assert turn.attachments == []
+
+
+# ---------------------------------------------------------------------------
+# How the turn ENDED, which is the difference between a slow provider and a
+# provider that never says it has finished.
+#
+# Both endings produce identical text, so nothing above this point can tell
+# them apart -- and they call for opposite fixes. A `finish_reason` turn is as
+# fast as the provider is; an `idle_gap` turn spent the whole configured gap
+# adding nothing, every single time, and no provider-side speedup removes it.
+# ---------------------------------------------------------------------------
+
+
+def test_a_turn_the_provider_finished_is_recorded_as_finish_reason():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("I am going to ", source="bot", finish_reason=None, step=1))
+    fake.queue_raw(0.0, _text_frame("tell you a story ", source="bot", finish_reason=None, step=2))
+    fake.queue_raw(0.0, _text_frame("about a fox.", source="bot", finish_reason="stop", step=3))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("go on", timeout_s=2.0, idle_gap_s=0.5)
+
+    assert turn.end_reason is TurnEnd.FINISH_REASON
+    assert turn.fragment_count == 3
+    assert turn.first_frame_ms is not None and turn.last_frame_ms is not None
+    assert turn.first_frame_ms <= turn.last_frame_ms
+
+
+def test_a_turn_flushed_by_the_backstop_is_recorded_as_idle_gap():
+    """The measurement that makes the 8-second backstop visible.
+
+    The provider answered promptly and then went quiet without ever saying it
+    was done. `last_frame_ms` is what proves the wait was wasted: the reply was
+    complete long before the channel stopped listening for more of it.
+    """
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("partial answer", source="bot", finish_reason=None))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    t0 = time.monotonic()
+    turn = channel.send_and_await_turn("go on", timeout_s=10.0, idle_gap_s=0.3)
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+    assert turn.text == "partial answer"
+    assert turn.end_reason is TurnEnd.IDLE_GAP
+    assert turn.fragment_count == 1
+    # The whole point: the answer was in hand ~300ms before the turn returned.
+    assert turn.last_frame_ms is not None
+    assert elapsed_ms - turn.last_frame_ms >= 250
+
+
+def test_a_turn_that_exhausts_the_whole_budget_is_recorded_as_turn_timeout():
+    """Distinguished from an idle-gap flush, because the remedies differ: this
+    one is a genuinely slow provider, not a missing end-of-turn signal."""
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("still thinking", source="bot", finish_reason=None))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    # idle_gap LONGER than the turn budget, so the overall deadline binds first.
+    turn = channel.send_and_await_turn("go on", timeout_s=0.3, idle_gap_s=5.0)
+
+    assert turn.text == "still thinking"
+    assert turn.end_reason is TurnEnd.TURN_TIMEOUT
+
+
+def test_a_turn_that_never_arrives_still_raises_rather_than_reporting_an_ending():
+    """Unchanged behaviour, pinned: measurement must not have turned a timeout
+    into an empty but 'successful' turn."""
+    fake = _FakeWebSocket()
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    with pytest.raises(ProviderTurnTimeout):
+        channel.send_and_await_turn("hello", timeout_s=0.2, idle_gap_s=0.1)
+
+
+# ---------------------------------------------------------------------------
+# The provider's own `finish_reason` STRING, kept rather than merely tested
+# ---------------------------------------------------------------------------
+#
+# WHY CARRY A VALUE NOTHING BRANCHES ON. `WsChannel` tests this field for
+# truthiness only, so every distinct value a platform might send has so far been
+# collapsed to "the turn ended" and thrown away. That matters because the
+# per-turn completion poll -- an HTTP round trip on the critical path of every
+# turn -- exists to discover something the socket may already be saying:
+# `ws_flow/frames.py` lists `session_end` among the envelope types this family
+# knows. If a platform distinguishes end-of-TURN from end-of-SESSION here, the
+# poll is redundant and can go entirely rather than merely being halved.
+#
+# So it is RECORDED, not acted on. Deciding from it today would be guessing;
+# observing it in real traffic for a few days is not.
+
+
+def test_the_finish_reason_string_is_carried_onto_the_turn():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("done", source="bot", finish_reason="stop"))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("go", timeout_s=5.0, idle_gap_s=1.0)
+
+    assert turn.end_reason is TurnEnd.FINISH_REASON
+    assert turn.finish_reason == "stop"
+
+
+def test_an_unfamiliar_finish_reason_is_preserved_verbatim():
+    """THE ONE THIS EXISTS FOR. A value other than "stop" is exactly the
+    observation that would let the completion poll be removed -- so it must reach
+    the log unchanged, not be normalised into a known set."""
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("done", source="bot", finish_reason="session_end"))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("go", timeout_s=5.0, idle_gap_s=1.0)
+
+    assert turn.finish_reason == "session_end"
+
+
+def test_a_turn_that_ended_on_the_idle_gap_carries_no_finish_reason():
+    """None, not "" and not "idle_gap": the field means "what the platform said",
+    and the platform said nothing. `end_reason` is where our own verdict lives."""
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("partial", source="bot", finish_reason=None))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("go", timeout_s=5.0, idle_gap_s=0.2)
+
+    assert turn.end_reason is TurnEnd.IDLE_GAP
+    assert turn.finish_reason is None

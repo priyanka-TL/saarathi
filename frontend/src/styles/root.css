@@ -554,7 +554,7 @@ body {
  * consistent with why every card keeps its 1px var(--border-color) outline
  * regardless.
  *
- * `@media (min-width: 769px)` GUARDS THE MOBILE DRAWER. Below 768px style.css
+ * `@media (min-width: 1025px)` GUARDS THE MOBILE DRAWER. Below 1024px style.css
  * turns .sidebar into a fixed slide-in panel on `var(--panel-bg-strong)`
  * (95% white -- a deliberate near-opaque scrim, not the rail colour). Without
  * this guard, `:root .sidebar` at (0,2,0) would outrank that rule regardless
@@ -562,7 +562,7 @@ body {
  * a real, if 5%, divergence from a DIFFERENT shipped design than the one this
  * change targets.
  */
-@media (min-width: 769px) {
+@media (min-width: 1025px) {
     :root:not([data-theme="dark"]) .sidebar {
         background: #ffffff;
     }
@@ -589,8 +589,8 @@ body {
  * change above it in this file, does not vary by theme, so there is nothing
  * to exclude dark mode from.
  *
- * Same `@media (min-width: 769px)` guard as 1c, and for the same reason: below
- * 768px `.sidebar` is style.css's fixed-320px slide-in drawer (:1093), a
+ * Same `@media (min-width: 1025px)` guard as 1c, and for the same reason: below
+ * 1024px `.sidebar` is style.css's fixed-320px slide-in drawer (:1093), a
  * different layout mode entirely -- "1/4 of the window" was scoped to
  * desktop, and an unguarded rule would also resize that drawer.
  *
@@ -598,7 +598,7 @@ body {
  * at 3440px). No max-width was requested here, so none is added -- add one
  * (e.g. `max-width: 480px`) if that reads too wide once you see it.
  */
-@media (min-width: 769px) {
+@media (min-width: 1025px) {
     .sidebar {
         width: 25%;
     }
@@ -960,7 +960,7 @@ body {
  * only needs to give back width -- while staying at the 44px minimum touch
  * target, which is why this shrinks to 44 and not further.
  */
-@media (max-width: 768px) {
+@media (max-width: 1024px) {
     .mic-btn {
         width: 44px;
         height: 44px;
@@ -1023,7 +1023,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 100vw;
+    width: 100%;
     height: 100%;
     min-height: 100vh;
     min-height: 100dvh;
@@ -1322,6 +1322,12 @@ body {
     margin: 16px 0 24px;
 }
 
+@media (max-width: 600px) {
+    .profile-details-list {
+        grid-template-columns: 1fr;
+    }
+}
+
 .profile-detail-item {
     display: flex;
     align-items: center;
@@ -1331,6 +1337,14 @@ body {
 /* Ensure long text like School (3rd item) spans both columns */
 .profile-detail-item:nth-child(3) {
     grid-column: 1 / -1;
+}
+
+@media (max-width: 600px) {
+
+    /* No need to span since there's only 1 column, reset to default */
+    .profile-detail-item:nth-child(3) {
+        grid-column: auto;
+    }
 }
 
 .profile-detail-icon {
@@ -1440,6 +1454,12 @@ body {
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
 }
 
+@media (max-width: 480px) {
+    .modal-panel {
+        padding: 16px;
+    }
+}
+
 .modal-panel:focus {
     /* Focus lands here on open purely to anchor the keyboard, so the ring would
      * be noise -- the heading and fields are what the user reads. */
@@ -1528,7 +1548,7 @@ body {
     min-width: 0;
 }
 
-@media (max-width: 380px) {
+@media (max-width: 480px) {
     .profile-form-row {
         flex-direction: column;
     }

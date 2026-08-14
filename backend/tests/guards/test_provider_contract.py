@@ -7,13 +7,17 @@ a platform someone adds in a hurry.
 """
 from __future__ import annotations
 
+import ast
 import inspect
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
 
 from app.providers import registry as provider_registry
-from app.providers.protocol import RemoteProvider
+from app.providers.protocol import CompletionCheck, CompletionPoll, RemoteProvider
+
+APP = Path(__file__).resolve().parents[2] / "app"
 
 #: The methods the core actually calls. Kept as a literal list rather than read
 #: off the Protocol, so that deleting a method from the Protocol cannot silently
@@ -117,6 +121,97 @@ def test_registering_a_lax_options_model_is_refused() -> None:
 
     with pytest.raises(RuntimeError, match="extra"):
         provider_registry.register_provider(LaxProvider)
+
+
+# ---------------------------------------------------------------------------
+# `is_complete` answers with an OBJECT, and an object is always truthy
+# ---------------------------------------------------------------------------
+#
+# THE FAILURE THIS PREVENTS, because it is not a small one. `is_complete` used
+# to return a bool and now returns a `CompletionCheck`, so that the row count it
+# learned can be cached and the next turn's poll can cost one HTTP round trip
+# instead of two. A dataclass instance is ALWAYS truthy, so any surviving
+# `if provider.is_complete(...)` / `bool(... and provider.is_complete(...))`
+# reads as "the interview is finished" on its FIRST turn -- which finalises it,
+# produces a report from nothing, and ends the conversation before it began.
+#
+# It is silent: no exception, no log, HTTP 200. Only the guard below catches it.
+
+
+def _is_complete_calls(tree: ast.AST):
+    """Every `<something>.is_complete(...)` CALL in a module (not definitions)."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "is_complete":
+            yield node
+
+
+def _boolean_context_nodes(tree: ast.AST) -> set:
+    """Every expression this module evaluates for its TRUTH.
+
+    Deliberately precise rather than broad: `x if cond else y` puts only `cond`
+    in a boolean context, and only `not` does among the unary operators. A guard
+    that over-reported would eventually be relaxed by whoever hit the false
+    positive, which is the same as not having it.
+    """
+    contexts: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.While, ast.IfExp, ast.Assert)):
+            contexts.add(node.test)
+        elif isinstance(node, ast.BoolOp):
+            contexts.update(node.values)
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            contexts.add(node.operand)
+        elif isinstance(node, ast.comprehension):
+            contexts.update(node.ifs)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "bool"
+        ):
+            contexts.update(node.args)
+    return contexts
+
+
+def test_no_caller_truthiness_tests_the_completion_check() -> None:
+    """Reads `.done`, never the object. See the block comment above."""
+    offences: list[str] = []
+
+    for path in sorted(APP.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        contexts = _boolean_context_nodes(tree)
+        for call in _is_complete_calls(tree):
+            if call in contexts:
+                offences.append(
+                    f"{path.relative_to(APP.parent)}:{call.lineno} -- "
+                    "is_complete()'s result used as a boolean"
+                )
+
+    assert not offences, (
+        "is_complete() returns a CompletionCheck, which is ALWAYS truthy, so "
+        "this reports EVERY turn as terminal and finalises an interview on its "
+        "first turn. Read `.done`. Offending call sites:\n  "
+        + "\n  ".join(offences)
+    )
+
+
+def test_a_completion_check_is_truthy_even_when_it_says_not_done() -> None:
+    """The trap itself, made executable, so the guard above has a stated reason
+    rather than being folklore."""
+    check = CompletionCheck(done=False)
+
+    assert bool(check) is True, "if this ever becomes False the guard can relax"
+    assert check.done is False
+
+
+def test_a_completion_poll_is_truthy_even_when_it_says_not_done() -> None:
+    """Same trap one layer down, where the REST clients answer."""
+    poll = CompletionPoll(done=False, count=0)
+
+    assert bool(poll) is True
+    assert poll.done is False
 
 
 def test_duplicate_registration_is_refused() -> None:

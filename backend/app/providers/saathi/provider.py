@@ -37,7 +37,7 @@ from typing import ClassVar, Optional, Sequence, Tuple
 
 from app.core.logger import get_logger
 from app.providers.errors import ProviderAuthError
-from app.providers.protocol import SessionInit
+from app.providers.protocol import CompletionPoll, SessionInit
 from app.providers.registry import register_provider
 from app.providers.saathi.frames import quick_reply_chips
 from app.providers.saathi.rest import SaathiRestClient
@@ -142,8 +142,12 @@ class SaathiProvider(BaseWsFlowProvider):
     # Per-user credential seam for REST calls the base class makes generically
     # ------------------------------------------------------------------
 
-    def _is_session_completed(self, session_id: str, user) -> bool:
-        return self._rest.is_session_completed(session_id, self._access_token(user))
+    def _is_session_completed(
+        self, session_id: str, user, known_count: Optional[int] = None,
+    ) -> CompletionPoll:
+        return self._rest.is_session_completed(
+            session_id, self._access_token(user), known_count=known_count,
+        )
 
     def _recent_chat(self, session_id: str, profile_id: str, user):
         return self._rest.recent_chat(session_id, profile_id, self._access_token(user))

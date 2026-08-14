@@ -81,7 +81,14 @@ class RemoteFlowAgentHandler:
         # It re-supplies `remote_bot_route` every turn, straight off this
         # tenant's scoped config, so a configuration change takes effect on the
         # next turn without an environment lookup.
-        init = self._provider.open_session(self._remote, ctx.session, ctx.user)
+        # THREE SEQUENTIAL REMOTE CALLS, TIMED SEPARATELY. `latency_ms` below
+        # covers all three, which made them indistinguishable: a turn recorded
+        # as five seconds could have been a five-second reply, or a two-second
+        # reply behind a three-second completion poll. Only the first is the
+        # provider being slow; the second is work on the critical path that the
+        # user's answer did not depend on.
+        with timing.stage("remote_open_session"):
+            init = self._provider.open_session(self._remote, ctx.session, ctx.user)
         sess = dataclasses.replace(
             ctx.session,
             remote_session_id=init.remote_session_id,
@@ -89,10 +96,15 @@ class RemoteFlowAgentHandler:
             remote_bot_route=init.remote_bot_route,
         )
 
+        # Not wrapped in a stage of its own: the provider splits this into
+        # `remote_acquire` and `remote_turn`, which is the distinction worth
+        # having, and a third enclosing stage would double-count both.
         bot = self._provider.turn(
             self._remote, sess, ctx.text, ctx.user, first_turn=is_first_turn,
         )
-        done = self._provider.is_complete(self._remote, sess, ctx.user)
+
+        with timing.stage("remote_completion_poll"):
+            check = self._provider.is_complete(self._remote, sess, ctx.user)
 
         return AgentTurn(
             text=bot.text,
@@ -111,7 +123,7 @@ class RemoteFlowAgentHandler:
                 # find the session already in 'finalizing' and fail to claim it.
                 # The session would then be stuck there forever: no code path
                 # ever revisits it, and the real end-of-flow call never fires.
-                # `terminal=done` below is the only signal the orchestrator
+                # `terminal=check.done` below is the only signal the orchestrator
                 # needs.
                 state=SessionState.awaiting_user,
                 remote_session_id=sess.remote_session_id,
@@ -119,7 +131,29 @@ class RemoteFlowAgentHandler:
                 remote_flow=self._remote.flow_name,
                 remote_bot_route=sess.remote_bot_route,
                 step=bot.step,
+                state_data=self._merged_state_data(sess, check.state_data),
             ),
             latency_ms=timing.elapsed_ms(t0),
-            terminal=done,
+            # `.done`, NEVER the object. `CompletionCheck` is a dataclass and so
+            # always truthy; `terminal=check` would end every interview on its
+            # first turn.
+            terminal=check.done,
         )
+
+    @staticmethod
+    def _merged_state_data(sess, patch):
+        """This session's `state_data` with the provider's patch laid over it.
+
+        A MERGE, NOT AN ASSIGNMENT. `SessionService.apply` writes `state_data`
+        wholesale when the delta carries one, so returning the patch alone would
+        silently drop every other key the column holds. Returning None when there
+        is no patch leaves the column untouched, which is the same rule every
+        other optional field on `SessionDelta` follows.
+
+        OPAQUE. The patch's contents are the provider's own cache format and are
+        not read here -- `app.agents` may not know which platform it is talking
+        to, let alone how that platform paginates.
+        """
+        if not patch:
+            return None
+        return {**(getattr(sess, "state_data", None) or {}), **patch}

@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 import requests
 from requests import Session as HTTPSession
 
+from app.core import timing
 from app.providers.errors import (
     ProviderError,
     ProviderHTTPError,
@@ -195,18 +196,25 @@ class RestTransport:
         if extra_headers:
             headers.update(extra_headers)
 
+        # TIMED HERE, NOT IN request(), because this is the one place every
+        # outbound call passes through -- including the 401 replay above, which
+        # is a second network round trip that request() would have hidden inside
+        # a single measurement. `stage` accumulates and `count` increments, so a
+        # replayed call shows up as two calls and the sum of both waits.
+        timing.count("provider_http_calls")
         try:
-            return self._session.request(
-                method,
-                url,
-                json=json,
-                params=params,
-                headers=headers,
-                timeout=self._timeout,
-                # Redirects are unexpected; following one would replay the
-                # credentials at whatever host the redirect names.
-                allow_redirects=False,
-            )
+            with timing.stage("provider_http"):
+                return self._session.request(
+                    method,
+                    url,
+                    json=json,
+                    params=params,
+                    headers=headers,
+                    timeout=self._timeout,
+                    # Redirects are unexpected; following one would replay the
+                    # credentials at whatever host the redirect names.
+                    allow_redirects=False,
+                )
         except requests.exceptions.RequestException as exc:
             # Do NOT include `url`: query params echo a session id.
             raise ProviderError(

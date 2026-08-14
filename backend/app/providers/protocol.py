@@ -49,6 +49,63 @@ class SessionInit:
 
 
 @dataclass(frozen=True)
+class CompletionCheck:
+    """The answer to "has the remote finished?", plus what to remember.
+
+    A RESULT OBJECT RATHER THAN A BARE BOOL, and the reason is the second field.
+    Answering this question costs a paginated round trip -- the platform's
+    transcript endpoint offers only `limit`/`offset` and honours no ordering
+    parameter (verified against the live API), so "read the last row" means
+    learning `count` first and then seeking to it. That was two HTTP calls on
+    every single turn.
+
+    `state_data` is how it becomes one: the provider hands back an OPAQUE patch
+    to remember on the session, and reads it again next turn to seek straight to
+    roughly the right place. The handler merges it WITHOUT INTERPRETING IT --
+    the provider owns its own cache format, and `app.agents` is forbidden from
+    knowing a platform's name, let alone its pagination.
+
+    NEVER TEST THIS OBJECT FOR TRUTHINESS. A dataclass instance is always truthy,
+    so `if provider.is_complete(...)` would read as "finished" on every turn and
+    finalise the interview on the first one. Read `.done`.
+    """
+
+    done: bool
+    #: Opaque to every caller. Merged into `agent_sessions.state_data` when
+    #: present; None means "nothing to remember from this check".
+    state_data: Optional[dict] = None
+
+
+@dataclass(frozen=True)
+class CompletionPoll:
+    """What one poll of a platform's transcript endpoint learned.
+
+    THE LAYER BELOW `CompletionCheck`, and the split is deliberate. A REST client
+    answers in the terms it actually works in -- "is the last row COMPLETED, and
+    how many rows are there now" -- and the provider translates that into the
+    protocol-level `CompletionCheck`, whose cache is opaque. So pagination stays
+    a platform's own business and never reaches `app.agents`, which the
+    `.importlinter` contracts forbid from knowing a platform exists.
+
+    Shared rather than declared twice because both platforms today are the SAME
+    Django app behind different routes (`saathi/spec.py`), so `count` means the
+    same thing to both. It lives here for the same reason `ChatRow` lives in
+    `recovery.py`: a result shape two peer packages both return, owned by
+    neither. A platform whose transcript endpoint works differently returns its
+    own type -- nothing here requires this one.
+
+    `count` IS THE CACHE. It is fed back as the next poll's `known_count`, and
+    it comes from the response envelope rather than from anything inferred, so a
+    stale value costs an extra round trip and never a wrong answer.
+
+    READ `.done`, NEVER THE OBJECT -- see `CompletionCheck` for the trap.
+    """
+
+    done: bool
+    count: int
+
+
+@dataclass(frozen=True)
 class ProviderTurn:
     """One completed exchange with the remote platform."""
 
@@ -114,8 +171,12 @@ class RemoteProvider(Protocol):
         """
         ...
 
-    def is_complete(self, remote, session_view, user) -> bool:
-        """Whether the remote considers the conversation finished."""
+    def is_complete(self, remote, session_view, user) -> CompletionCheck:
+        """Whether the remote considers the conversation finished.
+
+        Returns a `CompletionCheck`, not a bool -- read `.done`. See that class
+        for why, and for the trap a bare truthiness check falls into.
+        """
         ...
 
     def finalize(self, remote, session_view, user) -> FinalizeResult:

@@ -81,7 +81,9 @@ class _FakeProvider:
         return reconcile(list(self.chat_rows), sent_text)
 
     def is_complete(self, remote, session_view, user):
-        return False
+        from app.providers.protocol import CompletionCheck
+
+        return CompletionCheck(done=False)
 
     def close_channel(self, conversation_id):
         self.close_calls.append(conversation_id)

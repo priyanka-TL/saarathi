@@ -185,3 +185,62 @@ First triage question if it fails: does `other_params` contain `location`? If
 not, the discussion finalised through v2's generic pipeline
 (`save_generic_story` treats `location` as a Story column and never copies it
 into `other_params`), and no PDF fix will help until the endpoint is corrected.
+
+### 10. A Capture Discussion opens mid-interview (wrong first question)
+
+Symptom: the interview does not start at the beginning. The bot's first reply is
+a later question (SOLUTIONS, say), and the user's opening message has been
+recorded with `stage: CHALLENGES` instead of being answered.
+
+**Cause is on Mitra's side, and it is triggered by data, not by config.**
+`create_chat_session` in `chatbot/consumers/async_consumer.py` starts the session
+at the CHALLENGES step whenever the Mitra `Profile` has a non-empty
+`first_name`:
+
+```python
+step_number = 1
+if profile and profile.first_name and profile.first_name != '':
+    challenges_step = CompanyStateMachine.objects.get(
+        company_bot=..., name="CHALLENGES")
+    step_number = challenges_step.step
+```
+
+That is reasonable for a logged-in portal user, whose name Mitra already knows.
+It is wrong for Saarthi's guest interview, because steps 1-5 are what populate
+`story.other_params` -- `location`, `organization`, `participants_count`,
+`discussion_date`, `district`, `village`, `pri_member`,
+`school_representative`. Skip them and the MOM report loses those sections
+(see §9 for what a healthy `other_params` looks like).
+
+Diagnose:
+
+```bash
+# 1. Which step did the session actually open at? Anything but 1 is the bug.
+curl -sH "Origin: $MITRA_ORIGIN_URL" \
+  "$MITRA_BASE_URL/api/chatsession/?session=<mitra_session_id>"
+
+# 2. Does the Mitra profile carry a first_name?
+curl -sH "Origin: $MITRA_ORIGIN_URL" \
+  "$MITRA_BASE_URL/api/profileuser/?email=<user_id>@shikshalokam.org"
+```
+
+Fix, in this order -- **both halves are required**:
+
+1. Confirm `remote.options.send_user_profile` is `false` for `capture_discussion`,
+   so Saarthi stops writing the field. Migration 0020 set it; verify with the
+   query in §6.
+2. **Clear the value Mitra already stored.** The skip reads the stored profile,
+   not what the last upsert sent, so step 1 alone changes nothing for a user who
+   has already run one discussion:
+
+   ```bash
+   curl -X PATCH "$MITRA_BASE_URL/api/profileuser/<profile_id>/" \
+        -H "Origin: $MITRA_ORIGIN_URL" -H "Content-Type: application/json" \
+        -d '{"first_name": ""}'
+   ```
+
+   `ProfileRetrieveUpdateDestroyView` is a `RetrieveUpdateAPIView`, so PATCH is
+   partial -- `designation`, `location` and `org_associated` are untouched and
+   should be left alone; none of them triggers the skip.
+
+An in-flight session cannot be repaired; abandon it and start a new discussion.

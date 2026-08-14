@@ -102,7 +102,7 @@ def remote_dict(
 _OPTION_FIELDS = frozenset({
     "bot_route", "company", "finalize_path", "finalize_as_guest",
     "completion_poll_every_turn", "ip_city", "ip_state", "ip_zip",
-    "handshake", "paths",
+    "handshake", "paths", "send_user_profile",
 })
 
 
@@ -191,6 +191,11 @@ class FakeProvider:
 
         #: What is_complete() reports, and what turn() replies.
         self.complete = False
+        #: The opaque cache patch is_complete() hands back, and the `state_data`
+        #: it was shown on each call -- the two halves of the round trip that
+        #: turns a two-request completion poll into one.
+        self.completion_cache: Any = None
+        self.is_complete_calls: list = []
         self.reply_text = "bot reply"
         self.reply_options: list = []
         self.reply_step: Optional[int] = None
@@ -224,8 +229,14 @@ class FakeProvider:
         )
 
     def is_complete(self, remote, session_view, user):
+        from app.providers.protocol import CompletionCheck
+
         self.calls.append("is_complete")
-        return self.complete
+        self.is_complete_calls.append(getattr(session_view, "state_data", None))
+        # A REAL `CompletionCheck`, not a bool, because a fake that answers with
+        # a bool would let a caller's `if provider.is_complete(...)` pass here and
+        # finalise every interview in production.
+        return CompletionCheck(done=self.complete, state_data=self.completion_cache)
 
     def finalize(self, remote, session_view, user):
         from app.providers.protocol import FinalizeResult

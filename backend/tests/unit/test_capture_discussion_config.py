@@ -24,10 +24,16 @@ from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 #: 0010 seeds the ORIGINAL shape; 0013 rewrites it into the provider-neutral
-#: envelope. What the database actually holds -- and therefore what the
-#: application validates -- is the second applied to the first, so that is what
-#: these assertions read.
+#: envelope; 0019 moves this agent onto its own bot and opts it in to sending
+#: the caller's profile; 0020 takes that opt-in back out. What the database
+#: actually holds -- and therefore what the application validates -- is all four
+#: applied in sequence, so that is what these assertions read. Composing them
+#: beats restating the end state: a migration whose edit changes and a pin that
+#: does not would otherwise agree with each other and disagree with the
+#: database.
 _GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
+_DISCUSSION_BOT = _VERSIONS / "0019_discussion_bot_route.py"
+_DROPS_USER_PROFILE = _VERSIONS / "0020_discussion_drops_user_profile.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -46,6 +52,8 @@ def _seed_specs() -> dict:
     """
     seed = _load_migration("_seed_0010", _MIGRATION)
     generalize = _load_migration("_generalize_0013", _GENERALIZE)
+    discussion_bot = _load_migration("_discussion_bot_0019", _DISCUSSION_BOT)
+    drops_profile = _load_migration("_drops_user_profile_0020", _DROPS_USER_PROFILE)
 
     agents = {}
     for agent in seed.seed_agents():
@@ -53,6 +61,21 @@ def _seed_specs() -> dict:
         if isinstance(agent.get("remote"), dict):
             agent["agent_type"] = "remote_flow"
             agent["remote"] = generalize._to_envelope(agent["remote"])
+        # 0019 touches exactly one agent, and the guard below is the migration's
+        # own predicate: it will not convert a row whose bot_route has drifted.
+        if (
+            agent["key"] == discussion_bot.AGENT_KEY
+            and agent.get("remote", {}).get("options", {}).get("bot_route")
+            == discussion_bot.OLD_BOT_ROUTE
+        ):
+            agent = discussion_bot.apply(agent)
+        # 0020's own predicate: only a config that opted IN gets opted back out.
+        if (
+            agent["key"] == drops_profile.AGENT_KEY
+            and agent.get("remote", {}).get("options", {}).get("send_user_profile")
+            is True
+        ):
+            agent = drops_profile.apply(agent)
         agents[agent["key"]] = agent
     return agents
 
@@ -92,13 +115,21 @@ def test_pin_session_is_true():
 
 
 def test_bot_route_and_company_are_stored_literals():
-    """These three are how the interview lands on the SAME company bot the
-    Mitra portal's chaupal socket uses: both consumers resolve it as
+    """These three are how the interview lands on the right Mitra bot: the
+    consumer resolves it as
     CompanyBot.objects.get(company=profile.company, route=bot_route), so
-    bot_route (-> /shikshalokam_chaupal) and company (-> the company slug)
-    together pick the bot, and flow_name selects the story branch at
-    finalisation. Nothing else in Mitra's story or PDF path distinguishes
-    Saarthi's socket from the portal's.
+    bot_route and company (-> the company slug) together pick the bot, while
+    flow_name selects the story branch at finalisation.
+
+    THE ROUTE AND THE FLOW MOVED SEPARATELY, AND ONLY ONE OF THEM MOVED.
+    Migration 0019 took this agent off /shikshalokam_chaupal -- a bot shared
+    with the Mitra web portal and the WhatsApp service -- and onto its own.
+    `flow_name` deliberately did NOT follow: Mitra's v1 /api/end-story/ branches
+    on flow == 'guest-discussion' to render the minutes-of-meeting report, and
+    any other value falls through to a generic path that renders an empty
+    template into a valid, downloadable, COMPLETELY BLANK PDF -- 200 from every
+    call, nothing logged. That asymmetry is the whole reason both halves are
+    pinned here rather than just the one that changed.
 
     They are plain stored fields rather than the old `*_env` indirection, which
     is what lets a tenant-scoped agent_configs row point this agent at its own
@@ -112,10 +143,37 @@ def test_bot_route_and_company_are_stored_literals():
     # NOT the story bot route. These two agents differ by exactly one route and
     # one flow name, and swapping either sends the interview to the wrong Mitra
     # bot with no error -- just the wrong questions.
-    assert raw["options"]["bot_route"] == "/shikshalokam_chaupal"
+    assert raw["options"]["bot_route"] == "/saarthi_discussion_flow"
     assert raw["options"]["company"] == "shikshalokamstaging"
     for value in (raw["options"]["bot_route"], raw["options"]["company"]):
         assert "${" not in value
+
+
+def test_the_caller_is_NOT_named_to_mitra():
+    """THE REGRESSION PIN FOR THE SKIPPED INTERVIEW. Turning this back on
+    without a Mitra-side change breaks the report, and does it silently.
+
+    The flag makes the profile upsert carry the caller's ELEVATE profile, which
+    means Saarthi writes `Profile.first_name`. Mitra reads a non-empty
+    first_name as "we already know this person" and starts the interview at the
+    CHALLENGES step instead of step 1
+    (chatbot/consumers/async_consumer.py::create_chat_session).
+
+    Steps 1-5 are what populate `story.other_params`, and other_params is where
+    mom_report.py::get_user_details reads EVERYTHING except the author --
+    location, organization, participants_count, discussion_date, district,
+    village, pri_member, school_representative. Observed live: a discussion
+    opened at current_step=6 with the autostart message recorded as the
+    CHALLENGES answer, and the report lost all of those sections. The flag
+    bought a reliable author line and cost four sections of the MOM report.
+
+    So it stays false until Mitra either exempts this bot from the skip or
+    falls back to the Profile for those fields. `record_stories` never opted in
+    at all -- see tests/unit/providers/test_mitra_profile_context.py, which
+    pins both the opted-in and opted-out wire bodies so the dormant code path
+    stays covered.
+    """
+    assert _raw()["remote"]["options"]["send_user_profile"] is False
 
 
 def test_finalize_is_v1_and_tokenless_because_only_that_renders_the_mom_report():

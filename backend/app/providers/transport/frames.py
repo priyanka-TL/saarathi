@@ -94,11 +94,68 @@ class Frame:
     control_payload: bool = False
 
 
+class TurnEnd(str, Enum):
+    """WHY a turn stopped being awaited. See `BotTurn.end_reason`.
+
+    A `str` mixin so it lands in a log line and a JSON field as its own value
+    rather than as `TurnEnd.IDLE_GAP`.
+
+      FINISH_REASON -- the provider said it was done. The only clean ending.
+      IDLE_GAP      -- fragments simply stopped arriving and the idle-gap
+                       backstop flushed what had accumulated. The turn's text is
+                       usable, but EVERY such turn paid the full gap in wall
+                       clock for nothing, so a high rate here is a defect in the
+                       provider's end-of-turn signalling, not a slow model.
+      TURN_TIMEOUT  -- the whole turn budget ran out with content in hand.
+    """
+
+    FINISH_REASON = "finish_reason"
+    IDLE_GAP = "idle_gap"
+    TURN_TIMEOUT = "turn_timeout"
+
+
 @dataclass(frozen=True)
 class BotTurn:
-    """The result of one `WsChannel.send_and_await_turn` call."""
+    """The result of one `WsChannel.send_and_await_turn` call.
+
+    The four measurement fields exist because the turn's total duration alone
+    could not distinguish "the provider thought for nine seconds" from "the
+    provider answered in one second and we then sat out an eight-second idle
+    gap". Those call for opposite fixes, and the second is invisible without
+    `end_reason`.
+    """
 
     text: str
     options: List[ParsedOption] = field(default_factory=list)
     attachments: List[Attachment] = field(default_factory=list)
     step: Optional[int] = None
+
+    #: Defaulted so a construction that does not measure -- a test fake, a
+    #: provider that never adopts this transport -- stays valid.
+    end_reason: Optional[TurnEnd] = None
+    #: Milliseconds from sending the turn to the FIRST bot frame. The provider's
+    #: real think time; the closest thing to a time-to-first-token we can see.
+    first_frame_ms: Optional[int] = None
+    #: Milliseconds from sending the turn to the LAST bot frame. The difference
+    #: between this and the turn's total is time spent waiting for nothing.
+    last_frame_ms: Optional[int] = None
+    #: How many bot frames the reply arrived in. 1 means the provider is not
+    #: streaming to us, which is what makes an idle-gap ending likely.
+    fragment_count: int = 0
+
+    #: The provider's own `finish_reason` STRING, from the frame that ended the
+    #: turn. None when the turn ended some other way.
+    #:
+    #: WHY CARRY A VALUE WE DO NOT BRANCH ON. `WsChannel` tests this field for
+    #: truthiness only, so every distinct value the platform might send has so far
+    #: been collapsed to "the turn ended" and thrown away. That matters because
+    #: the per-turn completion poll -- two HTTP round trips, every turn, on the
+    #: critical path -- exists precisely to discover something the socket may
+    #: already be saying: `ws_flow/frames.py` lists `session_end` among the
+    #: envelope types this family knows, and the legacy parser hardcodes
+    #: `finish_reason="stop"` for one shape. If the platform distinguishes
+    #: end-of-TURN from end-of-SESSION here, the poll is redundant and can go.
+    #:
+    #: So this is recorded, not acted on. Deciding from it would be guessing;
+    #: observing it for a few days is not.
+    finish_reason: Optional[str] = None

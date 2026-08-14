@@ -14,12 +14,21 @@ logs, reprs or raises it.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from app.providers.errors import ProviderError
+from app.providers.protocol import CompletionPoll
 from app.providers.recovery import ChatRow
 from app.providers.transport.http import RestTransport
 from app.providers.mitra.spec import MitraPaths
+
+#: Mitra's DRF LimitOffsetPagination page size. NOT a tuning knob -- it is what
+#: the server does, and asking for more returns this many anyway. Named because
+#: two methods below depend on the value being the real one: `recent_chat`'s
+#: docstring explains why a bare GET returns the OLDEST rows, and
+#: `is_session_completed` uses a full page as its over-seek window, which only
+#: reaches the tail from a stale offset if this is not smaller than the server's.
+PAGE_SIZE = 100
 
 
 class MitraRestClient:
@@ -33,18 +42,44 @@ class MitraRestClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def upsert_profile(self, email: str, latest_flow_used: str, company: str) -> str:
+    def upsert_profile(
+        self,
+        email: str,
+        latest_flow_used: str,
+        company: str,
+        extra: Optional[Dict[str, str]] = None,
+    ) -> str:
         """Create or retrieve this user's Mitra profile. Idempotent.
 
         `email` MUST be the derived email (user_id + JWT_EMAIL_SUFFIX): a
         different derivation creates a SECOND profile and splits the user's story
         history. `company` is per-agent, not a global.
+
+        `extra` carries additional Profile columns -- who the user is, rather
+        than which profile this is. Only agents with
+        `remote.options.send_user_profile` supply it; for everyone else the body
+        is byte-for-byte what it has always been, which is what keeps a second
+        agent on this same client unaffected.
+
+        THE THREE IDENTIFYING KEYS ARE WRITTEN LAST and therefore win. Mitra
+        resolves the profile by (email, company) and `extra` is assembled from a
+        different source, so letting it reach either key would move the write to
+        a DIFFERENT profile -- silently, since the response shape is identical.
+
+        BLANK VALUES ARE DROPPED, NOT SENT AS "". Mitra runs a NON-partial
+        serializer over an existing profile, so an omitted key keeps its stored
+        value while an empty string overwrites a good one with a blank.
         """
-        data = self._http.request(
-            "POST",
-            self.paths.profile,
-            json={"email": email, "latest_flow_used": latest_flow_used, "company": company},
+        payload: Dict[str, Any] = {
+            key: value
+            for key, value in (extra or {}).items()
+            if value is not None and str(value).strip()
+        }
+        payload.update(
+            {"email": email, "latest_flow_used": latest_flow_used, "company": company}
         )
+
+        data = self._http.request("POST", self.paths.profile, json=payload)
         # The response has ``id``; ``profileid`` is a legacy fallback key.
         profile_id = data.get("id") or data.get("profileid")
         if not profile_id:
@@ -61,37 +96,91 @@ class MitraRestClient:
             raise ProviderError("generate_session: response missing 'sessionid' key")
         return str(session_id)
 
-    def is_session_completed(self, session_id: str) -> bool:
+    def is_session_completed(
+        self, session_id: str, known_count: Optional[int] = None,
+    ) -> CompletionPoll:
         """Whether the last CompanyChat row reports COMPLETED.
 
         The per-turn `finish_reason` on the WebSocket is NOT this signal -- it
         fires at the end of every bot turn. Only this poll is authoritative.
 
-        PAGINATED, for the same reason `recent_chat` below is. A bare GET
-        returns the FIRST page, so `results[-1]` is the last row of page one --
-        not the last row of the conversation. Past the page size the status
-        being read is an OLD row's, and the session can never be seen to
-        complete: no artifact, the session stuck open, nothing logged. Masked
-        today only because a flow finishes well inside one page.
+        PAGINATED, and it cannot be avoided. A bare GET returns the FIRST page,
+        so `results[-1]` is the last row of page one -- not the last row of the
+        conversation. Past the page size the status being read is an OLD row's,
+        and the session can never be seen to complete: no artifact, the session
+        stuck open, nothing logged.
 
-        Two requests, like `recent_chat`: one to learn `count`, one to fetch the
-        true tail.
+        AN ORDERING PARAMETER WOULD MAKE THIS TRIVIAL, AND THERE ISN'T ONE.
+        Verified against the live API: `ordering=-id`, `-created`, `-created_at`,
+        `-timestamp` and `-pk` are all ignored -- every one returns row 0 while
+        the true tail sits at `offset = count - 1`. So the last row is not
+        directly addressable, and this used to cost TWO round trips every turn:
+        one to learn `count`, one to seek to it. Measured at ~350 ms, on the
+        critical path, on every turn of every interview.
+
+        ONE REQUEST, BY OVER-SEEKING FROM THE LAST KNOWN COUNT. `known_count` is
+        whatever this method returned last turn. Seeking to `known_count - 1`
+        with a FULL PAGE of limit lands at-or-before the tail and sweeps up
+        everything appended since -- so `results[-1]` is the true tail even
+        though the offset was stale, which it always is (this platform appends
+        roughly two rows per turn).
+
+        SELF-VERIFYING, which is what makes a stale cache safe rather than
+        merely likely-to-work: the response carries its own `count`, so
+        `offset + len(results) == count` PROVES the tail was reached. When it
+        does not -- more than a page appended since, or a cache from another
+        session -- this re-seeks with the fresh count and pays the second call it
+        used to pay every time. A stale cache costs a round trip; it never
+        yields a wrong answer.
+
+        FALLS BACK TO THE OLD TWO-CALL PATH WITH NO CACHE. `offset=0` with a full
+        page would drag the whole transcript back (measured: 37 KB / 459 ms on a
+        20-row session, i.e. WORSE than the two small calls), so a first poll
+        asks for `count` cheaply and seeks, exactly as before.
         """
-        head = self._http.request(
-            "GET", self.paths.chat, params={"session": session_id, "limit": 1},
-        )
-        count = int(head.get("count") or 0)
-        if count == 0:
-            return False
+        offset = max(0, known_count - 1) if known_count else None
 
-        tail = self._http.request(
-            "GET", self.paths.chat,
-            params={"session": session_id, "limit": 1, "offset": count - 1},
-        )
-        results = tail.get("results", [])
+        if offset is None:
+            # No cache: learn `count` with a one-row page, then seek.
+            head = self._http.request(
+                "GET", self.paths.chat, params={"session": session_id, "limit": 1},
+            )
+            count = int(head.get("count") or 0)
+            if count == 0:
+                return CompletionPoll(done=False, count=0)
+            offset = count - 1
+
+        page = self._page(session_id, offset)
+        count = int(page.get("count") or 0)
+        if count == 0:
+            return CompletionPoll(done=False, count=0)
+
+        results = page.get("results") or []
+        if offset + len(results) != count:
+            # The cache was too far behind to reach the tail in one page. Seek
+            # again with the count this response just told us.
+            page = self._page(session_id, count - 1)
+            results = page.get("results") or []
+            count = int(page.get("count") or count)
+
         if not results:
-            return False
-        return results[-1].get("status") == "COMPLETED"
+            return CompletionPoll(done=False, count=count)
+        return CompletionPoll(
+            done=results[-1].get("status") == "COMPLETED", count=count,
+        )
+
+    def _page(self, session_id: str, offset: int) -> dict:
+        """One page of the transcript from `offset`, a full page wide.
+
+        `PAGE_SIZE` rather than 1 is what lets a stale offset still reach the
+        tail: the rows appended since the cached count was taken are in the same
+        response. The payload stays small in the steady state because only a
+        handful of rows sit past the offset (measured: ~2.2 KB / 159 ms).
+        """
+        return self._http.request(
+            "GET", self.paths.chat,
+            params={"session": session_id, "limit": PAGE_SIZE, "offset": offset},
+        )
 
     def recent_chat(
         self, session_id: str, profile_id: str, tail: int = 10,

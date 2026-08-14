@@ -45,6 +45,7 @@ from app.services.turn_finalization import (
 from app.agents.factory import HandlerFactory
 from app.providers.errors import ProviderError, ProviderTurnTimeout
 from app.providers.recovery import Reconciliation, TurnOutcome
+from app.core import timing
 from app.core.logger import get_logger
 
 logger = get_logger("orchestration")
@@ -326,28 +327,24 @@ class OrchestrationService:
             locale=getattr(ctx_in.user, "locale", "en"),
         )
 
-    def _router_history(self, conv) -> List[Any]:
-        """Recent history for the ROUTER, read against the default agent's memory.
-
-        Which agent will serve this turn is precisely what routing has not
-        decided yet, so the default agent's window is the only one available.
-        Empty when there is no default agent at all.
-        """
-        default = self._registry.default()
-        if default is None:
-            return []
-        return self._messages.recent(conv.id, default.spec.memory)
+    # `_router_history` used to live here and is deliberately gone: it now
+    # belongs to RouterService, which is the only thing that ever wanted it and
+    # the only thing that can tell whether this turn needs it at all. See
+    # RouterService._history.
 
     def handle_turn(self, ctx_in: TurnInput) -> TurnResult:
         # 1. get_or_create conv
-        conv = self._conversations.get_or_create(ctx_in.conversation_id, ctx_in.user)
+        with timing.stage("conv_lookup"):
+            conv = self._conversations.get_or_create(ctx_in.conversation_id, ctx_in.user)
 
         # 1b. CLAIM THE TURN, covering the handler call too. Step 2's row lock
         # is released by the commit at step 8, BEFORE the handler runs, so two
         # concurrent posts would both reach the platform -- answer destruction.
         # Claimed before the user message is written, so a refused turn leaves
         # nothing behind.
-        if not self._try_lock_conversation(conv.id):
+        with timing.stage("turn_lock"):
+            locked = self._try_lock_conversation(conv.id)
+        if not locked:
             raise ConcurrentTurnError(conv.id)
         try:
             return self._handle_turn_locked(ctx_in, conv)
@@ -392,7 +389,8 @@ class OrchestrationService:
 
     def _handle_turn_locked(self, ctx_in: TurnInput, conv) -> TurnResult:
         # 2/3/3b. seq under a row lock, the user message, and the title.
-        self._record_user_message(ctx_in, conv)
+        with timing.stage("record_user_message"):
+            self._record_user_message(ctx_in, conv)
 
         # 4. route (v2: 5 gates)
         #
@@ -400,12 +398,20 @@ class OrchestrationService:
         # agent's memory spec -- which agent will serve the turn is exactly what
         # routing has not decided yet, so the default's window is the only one
         # available. No session: routing is what determines the session.
+        # HISTORY IS NOT READ HERE. RouterService fetches it itself, and only on
+        # the two paths that build a classifier prompt -- see
+        # RouterService._history. Reading it eagerly here cost every turn a
+        # ten-row SELECT to feed a prompt that a pinned, explicit or
+        # keyword-routed turn never builds.
         ctx_partial = self._turn_context(
             ctx_in, conv,
-            history=self._router_history(conv),
+            history=[],
             session=None,
         )
-        decision = self._router.select(conv, ctx_partial, explicit_key=ctx_in.agent_key)
+        # Covers all five gates, so it includes the pin lookup a pinned turn
+        # does. `router_llm` inside it is the part that only Gate 4 pays.
+        with timing.stage("router"):
+            decision = self._router.select(conv, ctx_partial, explicit_key=ctx_in.agent_key)
         agent = decision.agent
 
         # 4b. Resolve the agent for THIS caller's tenant/organization.
@@ -415,12 +421,14 @@ class OrchestrationService:
         # "can one tenant be served another's configuration?". A no-op, and one
         # indexed lookup, for a tenant that has customised nothing.
         turn_tenant_id, turn_organization_id = scope_for_user(ctx_in.user)
-        agent = self._registry.resolve_for_scope(
-            self._db, agent, turn_tenant_id, turn_organization_id,
-        )
+        with timing.stage("agent_resolve"):
+            agent = self._registry.resolve_for_scope(
+                self._db, agent, turn_tenant_id, turn_organization_id,
+            )
 
         # 5. enforce limits
-        self._rate_limits.check(conv.id, ctx_in.user, agent.spec.limits)
+        with timing.stage("rate_limits"):
+            self._rate_limits.check(conv.id, ctx_in.user, agent.spec.limits)
 
         # 6. Open the session -- which IS the pin. The unique index makes that
         #    row the single answer to "which agent is driving this
@@ -430,16 +438,19 @@ class OrchestrationService:
         #    agent: it is abandoned, and its socket must go with it or the
         #    pool hands the new agent a channel still authenticated against the
         #    old remote session. That is how one conversation spans agents.
-        session_view = self._sessions.open_for(
-            conv.id, agent, on_displace=self._close_remote_channel,
-            actor=ctx_in.user.user_id,
-        )
+        with timing.stage("session_open"):
+            session_view = self._sessions.open_for(
+                conv.id, agent, on_displace=self._close_remote_channel,
+                actor=ctx_in.user.user_id,
+            )
 
         # 7. assemble history
-        history = self._messages.recent(conv.id, agent.spec.memory)
-        
+        with timing.stage("agent_history"):
+            history = self._messages.recent(conv.id, agent.spec.memory)
+
         # 8. COMMIT <- releases the lock
-        self._db.commit()
+        with timing.stage("commit_pre_handler"):
+            self._db.commit()
 
         # 9. handler.handle
         handler = self._handlers.build(agent.spec, agent.checksum)
@@ -452,14 +463,22 @@ class OrchestrationService:
 
 
         try:
-            turn = handler.handle(ctx)
+            # The TOTAL for the agent's own work. Its breakdown -- remote_turn,
+            # remote_completion_poll, llm -- is recorded inside the handler, so
+            # the difference between this and the sum of those is the handler's
+            # own overhead, and should be near zero.
+            with timing.stage("handler"):
+                turn = handler.handle(ctx)
         except ProviderTurnTimeout as exc:
             # A timeout does NOT mean the turn failed -- it means we stopped
             # listening. Ask the provider what actually happened before surfacing an
             # error, because nothing else will: the late frame is discarded by
             # _drain_stale() on the next turn, so an unrecovered reply desyncs
             # the interview even if the user does nothing at all.
-            turn = self._recover_timed_out_turn(agent, session_view, ctx_in.text, exc, ctx_in.user)
+            with timing.stage("timeout_recovery"):
+                turn = self._recover_timed_out_turn(
+                    agent, session_view, ctx_in.text, exc, ctx_in.user,
+                )
             if turn is None:
                 raise
 
@@ -468,7 +487,11 @@ class OrchestrationService:
             session_view = self._sessions.apply(session_view, turn.session_delta)
         finalization = None
         if turn.terminal and session_view:
-            finalization = self._finalize_claiming(session_view, agent, ctx_in.user)
+            # Only on the last turn of an interview, but it is a remote round
+            # trip plus a report fetch, so the turn a user perceives as "the one
+            # that hung" is often this one rather than a slow reply.
+            with timing.stage("finalize"):
+                finalization = self._finalize_claiming(session_view, agent, ctx_in.user)
             session_view = finalization.session
 
         # 11. persist the agent message
@@ -478,10 +501,17 @@ class OrchestrationService:
         # from the row, and anything not on it is unreachable afterwards.
         attachments_dict = [a.__dict__ for a in turn.attachments] if turn.attachments else None
         
+        # Read ONCE, here, and used for both the row below and the log line at
+        # step 13. `current()` hands back the same mutable record either way, so
+        # two reads could not disagree -- but one name makes it obvious that the
+        # stored row and the logged line describe the same turn.
+        turn_timings = timing.current()
+
+        persist = timing.Stopwatch()
         msg = self._messages.insert(
-            conv.id, 
+            conv.id,
             self._conversations.next_seq_for_update(conv.id),
-            role="assistant", 
+            role="assistant",
             content=turn.text,
             agent_id=agent.id,
             agent_session_id=session_view.id if session_view else None,
@@ -495,6 +525,16 @@ class OrchestrationService:
             latency_ms=turn.latency_ms,
             error=turn.error,
             request_id=ctx_in.request_id,
+            # The WebSocket turn diagnostics, straight off this request's timing
+            # record. Read from there rather than threaded through
+            # ProviderTurn/AgentTurn on purpose: those describe what the USER
+            # gets back, and how long a socket sat idle before we stopped waiting
+            # is not part of that. Every implementor of those protocols would
+            # otherwise have to carry four measurement fields.
+            #
+            # None outside a request (a handler driven directly by a unit test),
+            # which the repository treats as "nothing to record".
+            ws=turn_timings.details if turn_timings else None,
             actor=ctx_in.user.user_id,
         )
 
@@ -540,6 +580,12 @@ class OrchestrationService:
         else:
             self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
         self._db.commit()
+        # Steps 11 through 13 as one number: the assistant row, the follow-up,
+        # the tool traces and the closing commit. Measured with a Stopwatch
+        # rather than a `with` block because it spans three numbered steps that
+        # must not be re-indented -- the ordering comments between them are
+        # load-bearing.
+        timing.record("persist", persist.ms)
 
         # ONE line per completed turn, all fields, no interpolation -- the
         # pipeline previously logged only its failures, so "which agent, what
@@ -559,6 +605,17 @@ class OrchestrationService:
                 "model": turn.model,
                 "latency_ms": turn.latency_ms,
                 "tool_call_count": len(turn.tool_traces),
+                # The breakdown behind `latency_ms`. Nested rather than
+                # flattened into a field each: JSONFormatter promotes every
+                # `extra` key to the top level, and a stage set that varies by
+                # agent type would give every turn a different log SCHEMA.
+                #
+                # Empty dicts when nothing recorded -- a handler exercised
+                # outside a request has no accumulator, and the keys should
+                # still be present so a consumer never has to test for them.
+                "stages": turn_timings.stages if turn_timings else {},
+                "counts": turn_timings.counts if turn_timings else {},
+                "ws": turn_timings.details if turn_timings else {},
             },
         )
 
