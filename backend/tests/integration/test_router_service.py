@@ -806,3 +806,122 @@ def test_a_yield_never_lands_on_the_DEFAULT_agent():
         assert decision.agent.key == "saathi"
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# History is read only when a classifier prompt is actually built
+# ---------------------------------------------------------------------------
+#
+# It used to be read EAGERLY by the orchestrator, before `select()` was even
+# called, so every turn paid a ten-row SELECT plus ten model validations. Only
+# Gate 4 and the yield classifier consume it: Gate 1, Gate 2-pinned, an exit
+# keyword and Gate 3 all resolve without it -- and Gate 2-pinned is the
+# steady-state path for every capability conversation, the one the code
+# advertises as "ZERO LLM calls" while nonetheless paying for a query to feed a
+# prompt it never built.
+
+
+class _CountingMessageRepo:
+    """Wraps the real repository and counts `recent()` calls.
+
+    A COUNTER RATHER THAN A STUB, because the assertion worth making is "not
+    called at all" and a stub returning `[]` would pass whether the query ran or
+    not. The real one is delegated to so the Gate 4 case still gets real rows.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self.calls = 0
+
+    def recent(self, conversation_id, memory):
+        self.calls += 1
+        return self._real.recent(conversation_id, memory)
+
+
+def _router_with_counted_history(session, registry, fake_llm):
+    svc = RouterService(session, registry, _FakeLlmFactory(fake_llm))
+    counter = _CountingMessageRepo(svc._messages)
+    svc._messages = counter
+    return svc, counter
+
+
+def test_a_pinned_turn_reads_no_history_at_all():
+    """THE STEADY-STATE PATH. Every turn of every capability conversation after
+    the first resolves here, and it builds no prompt -- so the history read was
+    pure cost on the hottest route in the app."""
+    session = SessionLocal()
+    try:
+        agent = _make_agent(session, "record_stories", is_default=False,
+                            routing=RoutingSpec(pin_session=True, exit_keywords=["/exit"]))
+        default_agent = _make_agent(session, "general_support", is_default=True)
+        conv = _new_conversation(session)
+        session.commit()
+
+        fake_llm = _FakeLlm()
+        registry = _build_registry([agent, default_agent])
+        svc, counter = _router_with_counted_history(session, registry, fake_llm)
+
+        AgentSessionRepository(session).create_pending(conv.id, uuid.UUID(agent.id))
+        session.commit()
+
+        decision = svc.select(SimpleNamespace(id=conv.id), _ctx("Priya"), explicit_key=None)
+
+        assert decision.reason == "pinned"
+        assert counter.calls == 0, "a pinned turn read history it cannot use"
+        assert len(fake_llm.calls) == 0
+    finally:
+        session.close()
+
+
+def test_an_explicitly_selected_agent_reads_no_history():
+    """Gate 1. The caller named the agent; there is nothing to classify."""
+    session = SessionLocal()
+    try:
+        agent = _make_agent(session, "record_stories")
+        default_agent = _make_agent(session, "general_support", is_default=True)
+        conv = _new_conversation(session)
+        session.commit()
+
+        svc, counter = _router_with_counted_history(
+            session, _build_registry([agent, default_agent]), _FakeLlm(),
+        )
+
+        decision = svc.select(
+            SimpleNamespace(id=conv.id), _ctx("anything"), explicit_key="record_stories",
+        )
+
+        assert decision.agent.key == "record_stories"
+        assert counter.calls == 0
+    finally:
+        session.close()
+
+
+def test_the_classifier_still_gets_its_history_window():
+    """The other half. Deferring must not mean DROPPING -- Gate 4's prompt is
+    history-aware, and a router that suddenly saw an empty conversation would
+    route differently while every latency test still passed."""
+    session = SessionLocal()
+    try:
+        agent = _make_agent(session, "record_stories")
+        default_agent = _make_agent(session, "general_support", is_default=True)
+        conv = _new_conversation(session)
+        session.commit()
+
+        fake_llm = _FakeLlm()
+        fake_llm.queue('{"agent_key": "record_stories", "confidence": 0.95}')
+        svc, counter = _router_with_counted_history(
+            session, _build_registry([agent, default_agent]), fake_llm,
+        )
+
+        decision = svc.select(
+            SimpleNamespace(id=conv.id), _ctx("tell my story", conversation_id=conv.id),
+            explicit_key=None,
+        )
+
+        assert decision.reason in ("llm", "classifier", "default"), decision.reason
+        assert counter.calls == 1, (
+            "Gate 4 builds a history-aware prompt -- it must still read history, "
+            "exactly once"
+        )
+    finally:
+        session.close()

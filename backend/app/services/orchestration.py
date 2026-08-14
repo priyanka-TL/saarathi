@@ -327,17 +327,10 @@ class OrchestrationService:
             locale=getattr(ctx_in.user, "locale", "en"),
         )
 
-    def _router_history(self, conv) -> List[Any]:
-        """Recent history for the ROUTER, read against the default agent's memory.
-
-        Which agent will serve this turn is precisely what routing has not
-        decided yet, so the default agent's window is the only one available.
-        Empty when there is no default agent at all.
-        """
-        default = self._registry.default()
-        if default is None:
-            return []
-        return self._messages.recent(conv.id, default.spec.memory)
+    # `_router_history` used to live here and is deliberately gone: it now
+    # belongs to RouterService, which is the only thing that ever wanted it and
+    # the only thing that can tell whether this turn needs it at all. See
+    # RouterService._history.
 
     def handle_turn(self, ctx_in: TurnInput) -> TurnResult:
         # 1. get_or_create conv
@@ -405,15 +398,14 @@ class OrchestrationService:
         # agent's memory spec -- which agent will serve the turn is exactly what
         # routing has not decided yet, so the default's window is the only one
         # available. No session: routing is what determines the session.
-        # `router_history` is its own stage because it is a SECOND history read
-        # in the same turn -- step 7 reads it again against the serving agent's
-        # window -- and the question of whether that duplication costs anything
-        # should be answerable from a log line rather than argued about.
-        with timing.stage("router_history"):
-            router_history = self._router_history(conv)
+        # HISTORY IS NOT READ HERE. RouterService fetches it itself, and only on
+        # the two paths that build a classifier prompt -- see
+        # RouterService._history. Reading it eagerly here cost every turn a
+        # ten-row SELECT to feed a prompt that a pinned, explicit or
+        # keyword-routed turn never builds.
         ctx_partial = self._turn_context(
             ctx_in, conv,
-            history=router_history,
+            history=[],
             session=None,
         )
         # Covers all five gates, so it includes the pin lookup a pinned turn
@@ -509,6 +501,12 @@ class OrchestrationService:
         # from the row, and anything not on it is unreachable afterwards.
         attachments_dict = [a.__dict__ for a in turn.attachments] if turn.attachments else None
         
+        # Read ONCE, here, and used for both the row below and the log line at
+        # step 13. `current()` hands back the same mutable record either way, so
+        # two reads could not disagree -- but one name makes it obvious that the
+        # stored row and the logged line describe the same turn.
+        turn_timings = timing.current()
+
         persist = timing.Stopwatch()
         msg = self._messages.insert(
             conv.id,
@@ -527,6 +525,16 @@ class OrchestrationService:
             latency_ms=turn.latency_ms,
             error=turn.error,
             request_id=ctx_in.request_id,
+            # The WebSocket turn diagnostics, straight off this request's timing
+            # record. Read from there rather than threaded through
+            # ProviderTurn/AgentTurn on purpose: those describe what the USER
+            # gets back, and how long a socket sat idle before we stopped waiting
+            # is not part of that. Every implementor of those protocols would
+            # otherwise have to carry four measurement fields.
+            #
+            # None outside a request (a handler driven directly by a unit test),
+            # which the repository treats as "nothing to record".
+            ws=turn_timings.details if turn_timings else None,
             actor=ctx_in.user.user_id,
         )
 
@@ -579,8 +587,6 @@ class OrchestrationService:
         # load-bearing.
         timing.record("persist", persist.ms)
 
-        timings = timing.current()
-
         # ONE line per completed turn, all fields, no interpolation -- the
         # pipeline previously logged only its failures, so "which agent, what
         # model, how long" was answerable only from the database.
@@ -607,9 +613,9 @@ class OrchestrationService:
                 # Empty dicts when nothing recorded -- a handler exercised
                 # outside a request has no accumulator, and the keys should
                 # still be present so a consumer never has to test for them.
-                "stages": timings.stages if timings else {},
-                "counts": timings.counts if timings else {},
-                "ws": timings.details if timings else {},
+                "stages": turn_timings.stages if turn_timings else {},
+                "counts": turn_timings.counts if turn_timings else {},
+                "ws": turn_timings.details if turn_timings else {},
             },
         )
 

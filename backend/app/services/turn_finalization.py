@@ -133,13 +133,22 @@ class TurnFinalizer:
         # The completion poll normally runs inside the handler, which never got
         # that far. Without this a conversation that COMPLETED during the
         # timeout would never finalise.
+        # `.done`, NEVER the returned object. `is_complete` answers with a
+        # `CompletionCheck`, and a dataclass instance is always truthy -- the old
+        # `bool(provider is not None and provider.is_complete(...))` here would
+        # report every recovered turn as terminal and finalise the interview.
+        #
+        # The refreshed count this check carries is deliberately NOT written back
+        # on the delta below: this path exists because a turn timed out, so the
+        # session's own state is what should survive. A cache left one turn
+        # behind is exactly what the over-seek is built to absorb.
         done = False
         try:
             provider = self._provider_for(agent)
-            done = bool(
-                provider is not None
-                and provider.is_complete(agent.spec.remote, session_view, user)
-            )
+            if provider is not None:
+                done = provider.is_complete(
+                    agent.spec.remote, session_view, user,
+                ).done
         except Exception as poll_error:  # noqa: BLE001
             logger.warning("turn recovery: completion poll failed: %s", poll_error)
 

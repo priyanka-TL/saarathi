@@ -32,7 +32,13 @@ import websocket
 from app.core import timing
 from app.core.logger import get_logger
 from app.providers.errors import ProviderChannelClosed, ProviderConfigError
-from app.providers.protocol import FinalizeResult, ProviderTurn, SessionInit
+from app.providers.protocol import (
+    CompletionCheck,
+    CompletionPoll,
+    FinalizeResult,
+    ProviderTurn,
+    SessionInit,
+)
 from app.providers.recovery import Reconciliation, reconcile
 from app.providers.transport.frames import Attachment
 from app.providers.transport.http import url_is_permitted
@@ -248,6 +254,13 @@ class BaseWsFlowProvider:
         timing.detail("ws_first_frame_ms", bot.first_frame_ms)
         timing.detail("ws_last_frame_ms", bot.last_frame_ms)
         timing.detail("ws_fragments", bot.fragment_count)
+        # Logged only -- NOT persisted, and not read by anything. It is here to
+        # answer one question from real traffic: does this platform ever say
+        # anything other than "stop"? If it signals end-of-session, the per-turn
+        # completion poll is redundant. Until that is observed, acting on it
+        # would be a guess.
+        if bot.finish_reason:
+            timing.detail("ws_finish_reason", bot.finish_reason)
 
     def _permitted_attachments(self, attachments) -> list:
         """Drop any download URL this connection is not allowed to surface.
@@ -294,19 +307,67 @@ class BaseWsFlowProvider:
             )
         return kept
 
-    def is_complete(self, remote, session_view, user) -> bool:
-        if not self.options.completion_poll_every_turn:
-            return False
-        if not session_view.remote_session_id:
-            return False
-        return bool(self._is_session_completed(session_view.remote_session_id, user))
+    def is_complete(self, remote, session_view, user) -> CompletionCheck:
+        """Whether the platform considers this conversation finished.
 
-    def _is_session_completed(self, session_id: str, user) -> bool:
+        RETURNS AN OBJECT, AND THE `bool()` THAT USED TO WRAP THIS IS GONE ON
+        PURPOSE. `CompletionCheck` is a dataclass instance and therefore always
+        truthy, so re-introducing a truthiness test here -- or in the handler --
+        reads as "finished" on the FIRST turn of every interview and finalises
+        it. Read `.done`. The protocol docstring says the same thing from the
+        other side.
+
+        THE SECOND FIELD IS WHY THIS COSTS ONE ROUND TRIP INSTEAD OF TWO. The
+        platform's transcript endpoint honours no ordering parameter, so the last
+        row is not directly addressable and had to be found by learning `count`
+        and then seeking to it. Handing the count back to the session, and
+        supplying it again next turn, replaces the first of those two calls with
+        something already known -- see the REST client for the over-seek that
+        makes a stale count safe.
+
+        NAMESPACED UNDER `self.name`, which the subclass declares. This layer
+        still knows no platform's name (three `.importlinter` contracts and a
+        guard test enforce that); it knows only that two providers must not
+        collide in one session's `state_data`.
+        """
+        if not self.options.completion_poll_every_turn:
+            return CompletionCheck(done=False)
+        if not session_view.remote_session_id:
+            return CompletionCheck(done=False)
+
+        poll = self._is_session_completed(
+            session_view.remote_session_id, user,
+            known_count=self._cached_count(session_view),
+        )
+        return CompletionCheck(
+            done=poll.done, state_data={self.name: {"chat_count": poll.count}},
+        )
+
+    def _cached_count(self, session_view) -> Optional[int]:
+        """Last turn's row count, or None when there is nothing usable.
+
+        DEFENSIVE ON EVERY HOP, because `state_data` is free-form JSONB that
+        other code may also write: a missing key, a non-dict namespace, a string
+        where an int belongs and a negative number all mean the same thing here
+        -- no cache -- and all degrade to the two-call path rather than to a bad
+        seek. A malformed cache must never be able to produce a wrong `terminal`.
+        """
+        namespace = (getattr(session_view, "state_data", None) or {}).get(self.name)
+        if not isinstance(namespace, dict):
+            return None
+        count = namespace.get("chat_count")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        return count
+
+    def _is_session_completed(
+        self, session_id: str, user, known_count: Optional[int] = None,
+    ) -> CompletionPoll:
         """A hook, not a direct `self._rest` call: Mitra's REST surface needs no
         per-user credential and SaathiRestClient's does (`_access_token`'s
         counterpart for REST rather than the socket) -- override where it does.
         """
-        return self._rest.is_session_completed(session_id)
+        return self._rest.is_session_completed(session_id, known_count=known_count)
 
     def reconcile(self, remote, session_view, sent_text: str, user) -> Optional[Reconciliation]:
         """READ-ONLY. Never re-sends -- see app/providers/recovery.py."""

@@ -104,7 +104,7 @@ class RemoteFlowAgentHandler:
         )
 
         with timing.stage("remote_completion_poll"):
-            done = self._provider.is_complete(self._remote, sess, ctx.user)
+            check = self._provider.is_complete(self._remote, sess, ctx.user)
 
         return AgentTurn(
             text=bot.text,
@@ -123,7 +123,7 @@ class RemoteFlowAgentHandler:
                 # find the session already in 'finalizing' and fail to claim it.
                 # The session would then be stuck there forever: no code path
                 # ever revisits it, and the real end-of-flow call never fires.
-                # `terminal=done` below is the only signal the orchestrator
+                # `terminal=check.done` below is the only signal the orchestrator
                 # needs.
                 state=SessionState.awaiting_user,
                 remote_session_id=sess.remote_session_id,
@@ -131,7 +131,29 @@ class RemoteFlowAgentHandler:
                 remote_flow=self._remote.flow_name,
                 remote_bot_route=sess.remote_bot_route,
                 step=bot.step,
+                state_data=self._merged_state_data(sess, check.state_data),
             ),
             latency_ms=timing.elapsed_ms(t0),
-            terminal=done,
+            # `.done`, NEVER the object. `CompletionCheck` is a dataclass and so
+            # always truthy; `terminal=check` would end every interview on its
+            # first turn.
+            terminal=check.done,
         )
+
+    @staticmethod
+    def _merged_state_data(sess, patch):
+        """This session's `state_data` with the provider's patch laid over it.
+
+        A MERGE, NOT AN ASSIGNMENT. `SessionService.apply` writes `state_data`
+        wholesale when the delta carries one, so returning the patch alone would
+        silently drop every other key the column holds. Returning None when there
+        is no patch leaves the column untouched, which is the same rule every
+        other optional field on `SessionDelta` follows.
+
+        OPAQUE. The patch's contents are the provider's own cache format and are
+        not read here -- `app.agents` may not know which platform it is talking
+        to, let alone how that platform paginates.
+        """
+        if not patch:
+            return None
+        return {**(getattr(sess, "state_data", None) or {}), **patch}

@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.core import timing
 from app.core.container import Container
 from app.core.logger import get_logger
 from app.dependencies.body import json_body_silent, json_body_strict
@@ -42,6 +43,40 @@ logger = get_logger("api.chat")
 router = APIRouter(tags=["chat"])
 
 
+def _log_request_completed(agent_key, total: timing.Stopwatch) -> None:
+    """The second, smaller half of a turn's observability.
+
+    A SEPARATE EVENT RATHER THAN MORE FIELDS ON `"turn completed"`, and the
+    reason is ordering, not taste. `"turn completed"` is emitted inside
+    `OrchestrationService.handle_turn`, which RETURNS before this router builds
+    the response -- so the response stage does not exist yet when that line is
+    written. Moving the existing event later would let the two join up, but it is
+    pinned by `tests/integration/test_turn_observability.py` and it belongs where
+    it is: it describes the TURN, and a turn really has ended by then.
+
+    So: two lines per request, joined by `request_id`, which every log record
+    already carries from `RequestIDMiddleware`. `total_ms` is the number the user
+    actually waited, and `total_ms - latency_ms` on the other line is everything
+    the turn's own measurement structurally could not see.
+
+    Only on the success path, deliberately. An error path returns an envelope
+    that already logs, and a failed request's `response` stage measures nothing
+    anyone would act on.
+    """
+    timings = timing.current()
+    logger.info(
+        "request completed",
+        extra={
+            "agent_key": agent_key,
+            "total_ms": total.ms,
+            # Nested for the same reason `"turn completed"` nests its own: the
+            # JSON formatter promotes every `extra` key to the top level, and a
+            # varying key set would give every request a different log SCHEMA.
+            "stages": timings.stages if timings else {},
+        },
+    )
+
+
 @router.post("/api/chat", response_model=None)
 def chat(
     data: Optional[Dict[str, Any]] = Depends(json_body_strict),
@@ -52,6 +87,12 @@ def chat(
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     """Handle one incoming chat message."""
+    # THE WHOLE REQUEST, not the orchestrated turn. `"turn completed"` reports
+    # `latency_ms` from inside `handle_turn`, which by construction cannot
+    # include the work on either side of it -- so a gap between what the server
+    # thought a turn cost and what the user waited had nowhere to show up.
+    total = timing.Stopwatch()
+
     # `"message" in data`, NOT truthiness: an empty string is a valid message
     # and must reach the orchestrator (pinned by test_chat_errors.py).
     if not data or "message" not in data:
@@ -83,36 +124,56 @@ def chat(
             autostart=bool(data.get("autostart")),
         )
 
+        # Everything before the orchestrator: body validation, the uuid parse and
+        # the dependency chain that already ran to get here. Expected to be a
+        # handful of milliseconds -- recorded so that "expected" is a reading
+        # rather than an assumption.
+        timing.record("request", total.ms)
+
         res = orch.handle_turn(ctx_in)
-        svc = ConversationService(db)
 
-        session_payload = None
-        if res.session is not None:
-            session_payload = serialize_session_summary(res.session, res.agent.key)
+        # AFTER `"turn completed"` HAS ALREADY BEEN LOGGED. `handle_turn` emits
+        # that line and returns, so this stage cannot appear on it -- which is
+        # why the separate event below exists. `flow_payload` alone is three
+        # queries, one of them a `distinct_agent_sequence` scan of the
+        # conversation, and it runs on every single turn.
+        with timing.stage("response"):
+            svc = ConversationService(db)
 
-        return json_response({
-            "agent_name": res.agent.name,
-            "response": res.turn.text,
-            "status": "success",
-            "flow": svc.flow_payload(res.conversation.id),
-            "conversation_id": str(res.conversation.id),
-            "agent_key": res.agent.key,
-            "agent_type": res.agent.spec.agent_type,
-            "options": [{"id": o.id, "label": o.label, "value": o.value} for o in res.turn.options],
-            # Downloadable documents this turn produced. ALWAYS PRESENT, empty
-            # for a turn that produced none -- a key that appears and disappears
-            # is harder for a client to consume than an empty list.
-            "attachments": [
-                {
-                    "file_name": a.file_name,
-                    "format": a.format,
-                    "media_type": a.media_type,
-                    "url": a.url,
-                }
-                for a in res.turn.attachments
-            ],
-            "session": session_payload,
-        })
+            session_payload = None
+            if res.session is not None:
+                session_payload = serialize_session_summary(res.session, res.agent.key)
+
+            response = json_response({
+                "agent_name": res.agent.name,
+                "response": res.turn.text,
+                "status": "success",
+                "flow": svc.flow_payload(res.conversation.id),
+                "conversation_id": str(res.conversation.id),
+                "agent_key": res.agent.key,
+                "agent_type": res.agent.spec.agent_type,
+                "options": [
+                    {"id": o.id, "label": o.label, "value": o.value}
+                    for o in res.turn.options
+                ],
+                # Downloadable documents this turn produced. ALWAYS PRESENT,
+                # empty for a turn that produced none -- a key that appears and
+                # disappears is harder for a client to consume than an empty
+                # list.
+                "attachments": [
+                    {
+                        "file_name": a.file_name,
+                        "format": a.format,
+                        "media_type": a.media_type,
+                        "url": a.url,
+                    }
+                    for a in res.turn.attachments
+                ],
+                "session": session_payload,
+            })
+
+        _log_request_completed(res.agent.key, total)
+        return response
     except ConcurrentTurnError:
         # A double-submit. 409 and NOT an automatic retry: re-sending is what
         # merges two user messages into one upstream and destroys an answer.

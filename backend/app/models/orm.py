@@ -506,6 +506,20 @@ class ConversationMessage(AuditMixin, Base):
     error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     request_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # How a turn DELEGATED over a WebSocket ended, and when its fragments
+    # arrived. All NULL for an `llm` agent, for every user row, and for a turn
+    # recovered from a timeout rather than heard -- so `ws_end_reason IS NOT NULL`
+    # is what selects the turns this telemetry describes.
+    #
+    # `latency_ms` alone cannot separate "the platform thought for nine seconds"
+    # from "it answered in one and we then waited out an eight-second idle gap".
+    # `ws_end_reason` is the field that can, and `latency_ms - ws_last_frame_ms`
+    # is what the second case cost. See migration 0022.
+    ws_end_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ws_first_frame_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ws_last_frame_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ws_fragments: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     __table_args__ = (
         UniqueConstraint("conversation_id", "seq", name="uq_conversation_messages_seq"),
         CheckConstraint("seq > 0", name="seq"),
@@ -517,6 +531,24 @@ class ConversationMessage(AuditMixin, Base):
         CheckConstraint("COALESCE(latency_ms, 0) >= 0", name="latency"),
         CheckConstraint("route_confidence IS NULL OR (route_confidence >= 0 AND route_confidence <= 1)",
                         name="confidence"),
+        # The three values TurnEnd can produce. Pinned so a typo in a future
+        # writer fails at the row rather than becoming a fourth category in the
+        # reporting query. Must stay in step with
+        # app.providers.transport.frames.TurnEnd and migration 0022.
+        CheckConstraint(
+            "ws_end_reason IS NULL OR "
+            "ws_end_reason IN ('finish_reason', 'idle_gap', 'turn_timeout')",
+            name="ws_end_reason"),
+        CheckConstraint(
+            "(ws_end_reason IS NULL AND ws_first_frame_ms IS NULL "
+            " AND ws_last_frame_ms IS NULL AND ws_fragments IS NULL) "
+            "OR role = 'assistant'",
+            name="ws_only_assistant"),
+        CheckConstraint(
+            "COALESCE(ws_first_frame_ms, 0) >= 0 "
+            "AND COALESCE(ws_last_frame_ms, 0) >= 0 "
+            "AND COALESCE(ws_fragments, 0) >= 0",
+            name="ws_timings"),
         Index("ix_conversation_messages_conversation_seq", "conversation_id", "seq"),
         Index("ix_conversation_messages_agent_time", "agent_id", sa.text("created_at DESC")),
         Index("ix_conversation_messages_request", "request_id",

@@ -14,7 +14,7 @@ errors.
 """
 from dataclasses import dataclass
 from operator import itemgetter
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 import json_repair
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -25,6 +25,7 @@ from app.exceptions.domain import AgentNotFound
 from app.core import timing
 from app.core.logger import get_logger
 from app.repositories.conversations import ConversationRepository
+from app.repositories.messages import MessageRepository
 from app.repositories.sessions import AgentSessionRepository
 from app.services.agent_registry import AgentRegistry, RegisteredAgent
 from app.services.session_service import SessionService
@@ -74,6 +75,7 @@ class RouterService:
         self._llm_factory = llm_factory
         self._sessions_repo = AgentSessionRepository(session)
         self._conversations = ConversationRepository(session)
+        self._messages = MessageRepository(session)
         self._session_service = SessionService(session)
 
         self._cache_key = None
@@ -456,9 +458,37 @@ class RouterService:
 
         return [
             SystemMessage(content=self._cached_prompt),
-            *self._history_messages(ctx.history[-6:]),  # HISTORY-AWARE
+            *self._history_messages(self._history(ctx)),  # HISTORY-AWARE
             HumanMessage(content=ctx.text),
         ]
+
+    def _history(self, ctx: TurnContext) -> List[Any]:
+        """Recent history for the router, READ ONLY WHEN A CLASSIFIER RUNS.
+
+        This is reached from `_invoke_router` and nowhere else, which is the
+        entire point. It used to be read eagerly by the orchestrator before
+        `select()` was even called, so every turn paid a ten-row SELECT plus ten
+        model validations -- while only Gate 4 and the yield classifier consume
+        it. Gate 1, Gate 2 (pinned), an exit keyword and Gate 3 all resolve
+        without it, and Gate 2-pinned is the steady-state path for every
+        capability conversation: the one the code advertises as "ZERO LLM calls",
+        which was nonetheless paying for a query to feed a prompt it never built.
+
+        Deferring is safe here and not merely convenient: routing runs inside the
+        turn's transaction under the conversation advisory lock, and nothing
+        between the old read point and this one writes a message -- so the rows
+        returned are identical, only fetched later and less often.
+
+        AGAINST THE DEFAULT AGENT'S MEMORY SPEC. Which agent will serve the turn
+        is precisely what routing has not decided yet, so the default's window is
+        the only one available. Empty when there is no default agent at all.
+
+        Sliced to the last 6 messages, which is all the prompt has ever used.
+        """
+        default = self._registry.default()
+        if default is None:
+            return []
+        return self._messages.recent(ctx.conversation_id, default.spec.memory)[-6:]
 
     def _invoke_router(
         self, ctx: TurnContext, visible: List[RegisteredAgent],

@@ -229,21 +229,44 @@ def test_generate_session_returns_session_id():
 # 3. is_session_completed
 # ---------------------------------------------------------------------------
 
+def _cold_poll(session: str, fixture: str) -> None:
+    """Register the two responses a poll with NO cached count makes.
+
+    The cold path is unchanged from what it always did -- learn `count` from a
+    one-row page, then seek to `count - 1` -- because `offset=0` with a full page
+    would drag the whole transcript back, which measured WORSE than two small
+    calls. What changed is the second call's `limit`: a full page rather than 1,
+    which is what lets a WARM cache land at-or-before the tail and still sweep it
+    up. See the cache tests further down.
+    """
+    body = _load(fixture)
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/", json=body, status=200,
+        match=[resp_lib.matchers.query_param_matcher(
+            {"session": session, "limit": "1"})],
+    )
+    # What the server really returns for that seek: the rows from `count - 1`
+    # onward, which is the single tail row -- not the whole first page again.
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": body["count"], "results": body["results"][-1:]},
+        status=200,
+        match=[resp_lib.matchers.query_param_matcher(
+            {"session": session, "limit": "100",
+             "offset": str(body["count"] - 1)})],
+    )
+
+
 @resp_lib.activate
 def test_is_session_completed_false_when_in_progress():
     """Per §1.3 / §1.8: finish_reason on WS is NOT the completion signal.
     Only results[-1].status == 'COMPLETED' counts.
     """
-    resp_lib.add(
-        resp_lib.GET,
-        f"{BASE_URL}/api/companychat/",
-        json=_load("companychat_in_progress.json"),
-        status=200,
-    )
+    _cold_poll("mitra-session-abc123", "companychat_in_progress.json")
 
     result = _client().is_session_completed("mitra-session-abc123")
 
-    assert result is False
+    assert result.done is False
     # Verify correct query param was sent
     assert "session=mitra-session-abc123" in resp_lib.calls[0].request.url
     _assert_origin_sent(resp_lib.calls[0])
@@ -251,16 +274,25 @@ def test_is_session_completed_false_when_in_progress():
 
 @resp_lib.activate
 def test_is_session_completed_true_when_completed():
-    resp_lib.add(
-        resp_lib.GET,
-        f"{BASE_URL}/api/companychat/",
-        json=_load("companychat_completed.json"),
-        status=200,
-    )
+    _cold_poll("mitra-session-abc123", "companychat_completed.json")
 
     result = _client().is_session_completed("mitra-session-abc123")
 
-    assert result is True
+    assert result.done is True
+
+
+@resp_lib.activate
+def test_the_poll_reports_the_row_count_for_the_next_turns_cache():
+    """THE SECOND FIELD IS THE WHOLE POINT OF THE RESULT OBJECT. It is fed back
+    as the next poll's `known_count`, which is what removes a round trip from
+    every remote turn. It must come from the response envelope -- an inferred or
+    guessed count is what would make a stale cache dangerous rather than merely
+    slow."""
+    _cold_poll("mitra-session-abc123", "companychat_completed.json")
+
+    result = _client().is_session_completed("mitra-session-abc123")
+
+    assert result.count == 4
 
 
 @resp_lib.activate
@@ -275,7 +307,7 @@ def test_is_session_completed_false_on_empty_results():
 
     result = _client().is_session_completed("mitra-session-abc123")
 
-    assert result is False
+    assert result.done is False
 
 
 # ---------------------------------------------------------------------------
@@ -822,10 +854,10 @@ def test_is_session_completed_reads_past_the_first_page():
         resp_lib.GET, f"{BASE_URL}/api/companychat/",
         json={"count": 250, "results": [{"id": 250, "status": "COMPLETED"}]},
         status=200, match=[resp_lib.matchers.query_param_matcher(
-            {"session": "s1", "limit": "1", "offset": "249"})],
+            {"session": "s1", "limit": "100", "offset": "249"})],
     )
 
-    assert _client().is_session_completed("s1") is True
+    assert _client().is_session_completed("s1").done is True
 
 
 @resp_lib.activate
@@ -840,10 +872,10 @@ def test_is_session_completed_is_false_when_the_true_last_row_is_not_complete():
         resp_lib.GET, f"{BASE_URL}/api/companychat/",
         json={"count": 3, "results": [{"id": 3, "status": "IN_PROGRESS"}]},
         status=200, match=[resp_lib.matchers.query_param_matcher(
-            {"session": "s1", "limit": "1", "offset": "2"})],
+            {"session": "s1", "limit": "100", "offset": "2"})],
     )
 
-    assert _client().is_session_completed("s1") is False
+    assert _client().is_session_completed("s1").done is False
 
 
 @resp_lib.activate
@@ -854,5 +886,116 @@ def test_is_session_completed_short_circuits_on_an_empty_transcript():
         json={"count": 0, "results": []}, status=200,
     )
 
-    assert _client().is_session_completed("s1") is False
+    assert _client().is_session_completed("s1").done is False
     assert len(resp_lib.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# The cached count: two HTTP round trips per turn become one
+# ---------------------------------------------------------------------------
+
+
+@resp_lib.activate
+def test_a_warm_cache_reaches_the_tail_in_ONE_request():
+    """THE SAVING, AND THE ONLY REASON ANY OF THIS CHANGED. The first of the two
+    calls existed solely to learn `count`. Supplying last turn's count skips it,
+    and the seek still lands on the true tail because the platform appends while
+    we were away and a FULL PAGE sweeps up whatever it appended."""
+    # Cache said 18; two rows have been appended since, so the true count is 20
+    # and the true tail is id 20. Seeking to 17 with a full page returns rows
+    # 18..20 -- 3 rows -- and 17 + 3 == 20 proves the tail was reached.
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 20, "results": [
+            {"id": 18, "status": "sent"},
+            {"id": 19, "status": "sent"},
+            {"id": 20, "status": "COMPLETED"},
+        ]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "100", "offset": "17"})],
+    )
+
+    result = _client().is_session_completed("s1", known_count=18)
+
+    assert result.done is True
+    assert result.count == 20
+    assert len(resp_lib.calls) == 1
+
+
+@resp_lib.activate
+def test_a_stale_cache_re_seeks_rather_than_answering_wrongly():
+    """SELF-VERIFYING IS WHAT MAKES THE CACHE SAFE. A count more than a page
+    behind cannot reach the tail in one response -- and the client knows, because
+    `offset + len(results) != count`. It re-seeks with the fresh count and pays
+    the second call it used to pay every time. A stale cache costs a round trip;
+    it must never cost a wrong answer, because a wrong `False` means the
+    interview never finalises and no PDF is ever produced."""
+    # Cache said 5. 300 rows exist now, so seeking to 4 returns a full page
+    # (rows 5..104) and stops well short: 4 + 100 == 104, not 300.
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 300, "results": [
+            {"id": i, "status": "sent"} for i in range(5, 105)
+        ]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "100", "offset": "4"})],
+    )
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 300, "results": [{"id": 300, "status": "COMPLETED"}]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "100", "offset": "299"})],
+    )
+
+    result = _client().is_session_completed("s1", known_count=5)
+
+    assert result.done is True
+    assert result.count == 300
+    # Two calls -- exactly what it used to cost EVERY turn, now only on a cache
+    # this far behind. And no `limit=1` head call: the re-seek uses the count the
+    # first response already carried.
+    assert len(resp_lib.calls) == 2
+
+
+@resp_lib.activate
+def test_a_cache_from_a_longer_transcript_still_reads_the_true_tail():
+    """The dangerous direction. An over-large cached count (a cache carried
+    across sessions, or a platform that deleted rows) seeks PAST the tail and
+    gets nothing back -- which must re-seek, not answer False."""
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 4, "results": []},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "100", "offset": "99"})],
+    )
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 4, "results": [{"id": 4, "status": "COMPLETED"}]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "100", "offset": "3"})],
+    )
+
+    result = _client().is_session_completed("s1", known_count=100)
+
+    assert result.done is True
+    assert result.count == 4
+
+
+@resp_lib.activate
+def test_a_cached_count_of_zero_falls_back_to_the_cold_path():
+    """Zero is "nothing recorded yet", not "seek to row -1". It must take the
+    two-call cold path rather than becoming a negative offset."""
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 2, "results": [{"id": 1, "status": "sent"}]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "1"})],
+    )
+    resp_lib.add(
+        resp_lib.GET, f"{BASE_URL}/api/companychat/",
+        json={"count": 2, "results": [{"id": 2, "status": "COMPLETED"}]},
+        status=200, match=[resp_lib.matchers.query_param_matcher(
+            {"session": "s1", "limit": "100", "offset": "1"})],
+    )
+
+    assert _client().is_session_completed("s1", known_count=0).done is True

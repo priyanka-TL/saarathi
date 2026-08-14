@@ -665,3 +665,57 @@ def test_a_turn_that_never_arrives_still_raises_rather_than_reporting_an_ending(
 
     with pytest.raises(ProviderTurnTimeout):
         channel.send_and_await_turn("hello", timeout_s=0.2, idle_gap_s=0.1)
+
+
+# ---------------------------------------------------------------------------
+# The provider's own `finish_reason` STRING, kept rather than merely tested
+# ---------------------------------------------------------------------------
+#
+# WHY CARRY A VALUE NOTHING BRANCHES ON. `WsChannel` tests this field for
+# truthiness only, so every distinct value a platform might send has so far been
+# collapsed to "the turn ended" and thrown away. That matters because the
+# per-turn completion poll -- an HTTP round trip on the critical path of every
+# turn -- exists to discover something the socket may already be saying:
+# `ws_flow/frames.py` lists `session_end` among the envelope types this family
+# knows. If a platform distinguishes end-of-TURN from end-of-SESSION here, the
+# poll is redundant and can go entirely rather than merely being halved.
+#
+# So it is RECORDED, not acted on. Deciding from it today would be guessing;
+# observing it in real traffic for a few days is not.
+
+
+def test_the_finish_reason_string_is_carried_onto_the_turn():
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("done", source="bot", finish_reason="stop"))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("go", timeout_s=5.0, idle_gap_s=1.0)
+
+    assert turn.end_reason is TurnEnd.FINISH_REASON
+    assert turn.finish_reason == "stop"
+
+
+def test_an_unfamiliar_finish_reason_is_preserved_verbatim():
+    """THE ONE THIS EXISTS FOR. A value other than "stop" is exactly the
+    observation that would let the completion poll be removed -- so it must reach
+    the log unchanged, not be normalised into a known set."""
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("done", source="bot", finish_reason="session_end"))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("go", timeout_s=5.0, idle_gap_s=1.0)
+
+    assert turn.finish_reason == "session_end"
+
+
+def test_a_turn_that_ended_on_the_idle_gap_carries_no_finish_reason():
+    """None, not "" and not "idle_gap": the field means "what the platform said",
+    and the platform said nothing. `end_reason` is where our own verdict lives."""
+    fake = _FakeWebSocket()
+    fake.queue_raw(0.03, _text_frame("partial", source="bot", finish_reason=None))
+    channel = _make_channel(fake, spec=_Spec(handshake=_Handshake(settle_ms=20)))
+
+    turn = channel.send_and_await_turn("go", timeout_s=5.0, idle_gap_s=0.2)
+
+    assert turn.end_reason is TurnEnd.IDLE_GAP
+    assert turn.finish_reason is None

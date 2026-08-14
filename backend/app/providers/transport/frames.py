@@ -142,3 +142,20 @@ class BotTurn:
     #: How many bot frames the reply arrived in. 1 means the provider is not
     #: streaming to us, which is what makes an idle-gap ending likely.
     fragment_count: int = 0
+
+    #: The provider's own `finish_reason` STRING, from the frame that ended the
+    #: turn. None when the turn ended some other way.
+    #:
+    #: WHY CARRY A VALUE WE DO NOT BRANCH ON. `WsChannel` tests this field for
+    #: truthiness only, so every distinct value the platform might send has so far
+    #: been collapsed to "the turn ended" and thrown away. That matters because
+    #: the per-turn completion poll -- two HTTP round trips, every turn, on the
+    #: critical path -- exists precisely to discover something the socket may
+    #: already be saying: `ws_flow/frames.py` lists `session_end` among the
+    #: envelope types this family knows, and the legacy parser hardcodes
+    #: `finish_reason="stop"` for one shape. If the platform distinguishes
+    #: end-of-TURN from end-of-SESSION here, the poll is redundant and can go.
+    #:
+    #: So this is recorded, not acted on. Deciding from it would be guessing;
+    #: observing it for a few days is not.
+    finish_reason: Optional[str] = None

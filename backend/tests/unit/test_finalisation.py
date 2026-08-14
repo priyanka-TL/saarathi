@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from unittest.mock import MagicMock, call, patch
 
-from app.providers.protocol import FinalizeResult
+from app.providers.protocol import CompletionCheck, FinalizeResult
 
 import pytest
 
@@ -489,7 +489,10 @@ class TestTimedOutTurnRecovery:
         provider.reconcile.side_effect = (
             lambda remote, session_view, sent_text, user: reconcile(rows, sent_text)
         )
-        provider.is_complete.return_value = completed
+        # A `CompletionCheck`, not a bool: the recovery path reads `.done`, and a
+        # bool here would hide a regression back to truthiness-testing the object
+        # -- which reports EVERY recovered turn as terminal.
+        provider.is_complete.return_value = CompletionCheck(done=completed)
 
         orch = _make_orch(provider=provider)
         session = _session_dto()

@@ -227,6 +227,7 @@ class WsChannel:
             first_frame_at: Optional[float] = None
             last_frame_at: Optional[float] = None
             fragment_count = 0
+            finish_reason: Optional[str] = None
 
             while True:
                 if self._closed.is_set():
@@ -313,6 +314,10 @@ class WsChannel:
                     attachments = f.attachments
                 if f.finish_reason:
                     end_reason = TurnEnd.FINISH_REASON
+                    # KEPT, not just tested. The value may distinguish
+                    # end-of-turn from end-of-session, which would make the
+                    # per-turn completion poll redundant. See BotTurn.
+                    finish_reason = f.finish_reason
                     break  # END OF TURN
 
             text_out = "".join(chunks)
@@ -333,6 +338,7 @@ class WsChannel:
                 first_frame_ms=_since_send(first_frame_at),
                 last_frame_ms=_since_send(last_frame_at),
                 fragment_count=fragment_count,
+                finish_reason=finish_reason,
             )
         finally:
             self._turn_lock.release()

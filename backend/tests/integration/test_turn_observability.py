@@ -22,6 +22,7 @@ from app.core import timing
 
 
 TURN_COMPLETED = "turn completed"
+REQUEST_COMPLETED = "request completed"
 
 
 @pytest.fixture()
@@ -31,6 +32,17 @@ def turn_events(caplog):
 
     def _records():
         return [r for r in caplog.records if r.getMessage() == TURN_COMPLETED]
+
+    return _records
+
+
+@pytest.fixture()
+def request_events(caplog):
+    """Every "request completed" record -- the router's half of the breakdown."""
+    caplog.set_level(logging.INFO)
+
+    def _records():
+        return [r for r in caplog.records if r.getMessage() == REQUEST_COMPLETED]
 
     return _records
 
@@ -109,6 +121,80 @@ def test_the_accumulator_does_not_leak_between_requests(client, script, turn_eve
         f"second turn saw {second.counts['llm_calls']} LLM calls -- the first "
         "turn's accumulator was reused"
     )
+
+
+# ---------------------------------------------------------------------------
+# The router's half: the work that happens OUTSIDE `handle_turn`
+# ---------------------------------------------------------------------------
+
+
+def test_the_router_logs_the_work_that_happens_outside_the_turn(
+    client, script, turn_events, request_events,
+):
+    """TWO EVENTS PER REQUEST, joined by `request_id`.
+
+    `"turn completed"` is emitted inside `handle_turn`, which returns before the
+    response is built -- so the response stage cannot structurally appear on it.
+    Without this second line, `flow_payload`'s three queries (one of them a
+    `distinct_agent_sequence` scan) ran on every turn and were invisible.
+    """
+    script.queue(json.dumps({"agent_key": "general_support", "confidence": 0.9}))
+    script.queue("agent reply")
+
+    assert _chat(client).status_code == 200
+
+    turn, request = turn_events()[0], request_events()[0]
+    assert len(request_events()) == 1, "exactly one request-completed event"
+
+    # The two halves that `"turn completed"` could not see.
+    assert "request" in request.stages, sorted(request.stages)
+    assert "response" in request.stages, sorted(request.stages)
+
+    # And they carry the turn's stages too, so one line is readable alone.
+    assert "handler" in request.stages
+
+    assert request.request_id == turn.request_id, (
+        "the two events are joined by request_id and nothing else"
+    )
+
+
+def test_the_request_total_covers_more_than_the_turn_it_wrapped(
+    client, script, turn_events, request_events,
+):
+    """THE NUMBER THIS EXISTS TO PRODUCE. `latency_ms` is measured inside the
+    handler; `total_ms` is what the user waited. The difference is everything
+    the turn's own measurement structurally could not include, and it should be
+    small -- but "should be" is what instrumentation is for."""
+    script.queue(json.dumps({"agent_key": "general_support", "confidence": 0.9}))
+    script.queue("agent reply")
+
+    assert _chat(client).status_code == 200
+
+    turn, request = turn_events()[0], request_events()[0]
+
+    assert isinstance(request.total_ms, int) and request.total_ms >= 0
+    assert request.total_ms >= turn.latency_ms, (
+        f"total_ms {request.total_ms} < the turn's own {turn.latency_ms}ms -- "
+        "the request cannot have taken less time than the turn inside it"
+    )
+
+
+def test_a_failed_request_logs_no_request_completed_event(client, request_events):
+    """Only the success path. An error returns an envelope that already logs,
+    and a rejected request has no response stage worth reading."""
+    assert client.post("/api/chat", json={}).status_code == 400
+
+    assert request_events() == []
+
+
+def test_the_request_event_survives_json_serialisation(client, script, request_events):
+    script.queue(json.dumps({"agent_key": "general_support", "confidence": 0.9}))
+    script.queue("agent reply")
+
+    assert _chat(client).status_code == 200
+
+    event = request_events()[0]
+    json.dumps({"stages": event.stages, "total_ms": event.total_ms})
 
 
 def test_recording_outside_a_request_is_a_no_op_rather_than_an_error():
