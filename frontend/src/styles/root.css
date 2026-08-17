@@ -223,6 +223,30 @@ body {
  */
 
 /*
+ * A card that GROUPS agents is a heading, not a control: the buttons inside it
+ * are the targets, so the body must not advertise a click it no longer has.
+ *
+ * NOT dimmed like .is-disabled -- nothing here is unavailable, and the two
+ * agent buttons are fully live. Only the affordance goes.
+ *
+ * The background/border reset is scoped :not(.active) on purpose. root.css
+ * loads after style.css and `.capability-card.is-static` ties `.active` on
+ * specificity, so an unscoped rule would win on order and swallow the purple
+ * highlight the card still earns when one of its agents is running. The cursor
+ * is unscoped because an active grouping card is no more clickable than an
+ * idle one.
+ */
+.capability-card.is-static {
+    cursor: default;
+}
+
+.capability-card.is-static:not(.active),
+.capability-card.is-static:not(.active):hover {
+    background: var(--card-bg);
+    border-color: var(--border-color);
+}
+
+/*
  * ---------------------------------------------------------------------------
  * Sidebar toast.
  *

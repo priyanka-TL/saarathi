@@ -39,8 +39,10 @@ function AgentActionButton({ capabilityId, agent, onRun, isBusy }) {
   const blocked = isBlocked(agent) || isInert(agent);
 
   async function handleClick(e) {
-    // The parent card has its own display-only handler; without this it would
-    // also fire and reset the conversation a second time.
+    // A card that renders these buttons no longer carries a handler of its own,
+    // so this is belt-and-braces rather than load-bearing. Kept deliberately:
+    // without it the button's correctness would depend on the parent's gating
+    // staying right, and a stray bubble would reset the conversation twice.
     e.stopPropagation();
     if (blocked) {
       // A blocked agent still reports why -- it just never routes.
@@ -83,20 +85,36 @@ export default function CapabilityCard({ capability, isActive, onRun, isBusy }) 
   const blocked = isBlocked(capability);
   const inert = isInert(capability);
 
+  // A card that renders agent buttons is a GROUPING HEADER, not a control: the
+  // buttons inside it are what you click, and a handler on the body as well
+  // gives two meanings to one target (Listening at Scale).
+  //
+  // A card with no buttons is itself the only target and must stay live -- a
+  // self-launching `start_agent` card, whose nested agents the server
+  // suppresses precisely because the card IS the control (Saathi), a
+  // coming_soon card whose click raises the toast, or a display_card a tenant
+  // has added before wiring any agents to it.
+  const hasAgentButtons = !blocked && capability.agents.length > 0;
+  const cardIsInteractive = !inert && !hasAgentButtons;
+
   return (
     <div
       className={cx(
         'capability-card',
         isActive && 'active',
         capability.status === STATUS.disabled && 'is-disabled',
+        !cardIsInteractive && 'is-static',
       )}
       data-capability-id={capability.id}
       data-status={capability.status}
       aria-disabled={capability.status === STATUS.disabled || undefined}
-      onClick={() => {
-        if (inert) return;
-        onRun(capability.action, { capabilityId: capability.id, label: capability.title });
-      }}
+      // Omitted rather than early-returning, so a non-interactive card carries
+      // no listener at all.
+      onClick={
+        cardIsInteractive
+          ? () => onRun(capability.action, { capabilityId: capability.id, label: capability.title })
+          : undefined
+      }
     >
       <div className="capability-header">
         <Icon />
@@ -118,7 +136,7 @@ export default function CapabilityCard({ capability, isActive, onRun, isBusy }) 
         A blocked CAPABILITY hides its agents too: entering them individually
         would contradict the card saying the whole thing is unavailable.
       */}
-      {!blocked && capability.agents.length > 0 && (
+      {hasAgentButtons && (
         <div className="capability-actions">
           {capability.agents.map((agent) => (
             <AgentActionButton

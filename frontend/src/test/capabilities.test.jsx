@@ -218,6 +218,73 @@ describe('CapabilityCard renders any number of agents', () => {
     // the card's 10px gap, so its absence is the assertion, not its emptiness.
     expect(container.querySelector('.capability-actions')).toBeNull();
   });
+
+  /*
+   * A card that groups agents is a HEADING. Its buttons are the controls, so
+   * the body must be inert -- otherwise the icon, title, description and badge
+   * are all a second, differently-behaved target sitting behind the two the
+   * user is meant to press.
+   */
+  describe('and the card body is inert once it has any', () => {
+    it('runs nothing when the grouping card body is clicked', async () => {
+      const onRun = vi.fn();
+      const { container } = render(
+        <CapabilityCard
+          capability={capability(['One', 'Two'])}
+          isActive={false}
+          onRun={onRun}
+          isBusy={never}
+        />,
+      );
+
+      // The title, the description and the card itself -- every part of the
+      // body, not just the heading.
+      await userEvent.click(screen.getByText('Cap'));
+      await userEvent.click(screen.getByText('A capability'));
+      await userEvent.click(container.querySelector('.capability-card'));
+
+      expect(onRun).not.toHaveBeenCalled();
+      // The affordance goes with the handler; .is-static is what root.css
+      // hangs `cursor: default` and the hover reset off.
+      expect(container.querySelector('.capability-card').className).toContain('is-static');
+    });
+
+    it('still runs the agent action when a button inside it is clicked', async () => {
+      const onRun = vi.fn();
+      render(
+        <CapabilityCard
+          capability={capability(['One', 'Two'])}
+          isActive={false}
+          onRun={onRun}
+          isBusy={never}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole('button', { name: 'One' }));
+
+      expect(onRun).toHaveBeenCalledTimes(1);
+      expect(onRun.mock.calls[0][0]).toMatchObject({ type: 'start_agent', agentKey: 'k0' });
+      expect(onRun.mock.calls[0][1]).toMatchObject({ capabilityId: 'cap', label: 'One' });
+    });
+
+    it('leaves a card with no agents clickable, since it is its own control', async () => {
+      const onRun = vi.fn();
+      const { container } = render(
+        <CapabilityCard capability={capability([])} isActive={false} onRun={onRun} isBusy={never} />,
+      );
+
+      await userEvent.click(screen.getByText('Cap'));
+
+      // The regression guard for the OTHER two shapes: a self-launching
+      // start_agent card (Saathi), whose nested agents the server suppresses
+      // because the card is the control, and a display_card a tenant added
+      // before wiring agents to it. Gating on the action type instead of on
+      // "renders buttons" would have killed both.
+      expect(onRun).toHaveBeenCalledTimes(1);
+      expect(onRun.mock.calls[0][0].type).toBe('display_card');
+      expect(container.querySelector('.capability-card').className).not.toContain('is-static');
+    });
+  });
 });
 
 describe('a coming-soon capability', () => {
