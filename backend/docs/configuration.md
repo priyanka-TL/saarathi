@@ -220,7 +220,7 @@ no startup sync left to catch it.
 
 | Gone | Replaced by |
 |---|---|
-| `app/config/agents/*.yaml` | migration 0007 + `POST /api/agents/{key}/config` |
+| `app/config/agents/*.yaml` | migration 0010 + `POST /api/agents/{key}/config` |
 | `ConfigSyncService` | nothing — with no file to reconcile against there is no drift |
 | `CONFIG_SYNC_MODE` | nothing |
 | `${VAR}` expansion inside a spec | literal values in the row |

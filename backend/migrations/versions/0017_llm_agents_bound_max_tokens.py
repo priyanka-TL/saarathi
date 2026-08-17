@@ -1,7 +1,7 @@
 """Give every LLM agent a max_tokens ceiling
 
-Revision ID: 0021
-Revises: 0020
+Revision ID: 0017
+Revises: 0016
 Create Date: 2026-08-13 19:00:00.000000
 
 WHAT THIS FIXES
@@ -48,8 +48,8 @@ from typing import Any, Dict, Sequence, Tuple, Union
 
 from alembic import op
 
-revision: str = "0021"
-down_revision: Union[str, Sequence[str], None] = "0020"
+revision: str = "0017"
+down_revision: Union[str, Sequence[str], None] = "0016"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

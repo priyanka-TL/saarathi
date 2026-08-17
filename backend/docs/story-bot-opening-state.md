@@ -97,7 +97,7 @@ kwargs['force_function_call'] = True                         # -> advance the st
 text is never shown to a model, so `"I want to record a story"`, `"hi"` and
 anything else all produce identical output -- for every client, not just Saarthi.
 
-This is the mechanism migration `0023_story_bot_route.py` already anticipated:
+This is the mechanism migration `0018_story_bot_route_and_routing_intent.py` already anticipated:
 *"the profile questions are removed on the MITRA side instead, in the
 `/saarthi_story_flow` bot's own configuration"*.
 

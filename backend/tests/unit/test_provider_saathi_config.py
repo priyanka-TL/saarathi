@@ -234,9 +234,9 @@ def test_only_the_assistant_yields_never_an_interview():
     for key, agent in interviews.items():
         assert agent.get("routing", {}).get("yields_to_keyword", False) is False, key
 
-    # 0016 is what turns it on for the assistant; the seed itself does not.
+    # 0015 is what turns it on for the assistant; the seed itself does not.
     assistant = copy.deepcopy(saathi_seed.seed_spec())
     assert assistant.get("routing", {}).get("yields_to_keyword", False) is False
 
-    generalize = _load("_yield_0016", versions / "0016_saathi_yields_pin.py")
+    generalize = _load("_saathi_config_0015", versions / "0015_saathi_config_end_state.py")
     assert generalize.PROVIDER == "saathi", "only the assistant is switched on"

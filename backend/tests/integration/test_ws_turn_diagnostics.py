@@ -21,7 +21,7 @@ WHAT THE COLUMNS ANSWER, and why `latency_ms` cannot:
   separates them.
 
 These tests run against a REAL Postgres, because three CHECK constraints are the
-substance of migration 0022 and an in-memory fake would enforce none of them.
+substance of migration 0014 and an in-memory fake would enforce none of them.
 """
 from __future__ import annotations
 
@@ -131,7 +131,7 @@ def test_a_turn_with_no_websocket_leaves_all_four_null(db_session, conversation)
 
 
 # ---------------------------------------------------------------------------
-# The three CHECK constraints -- the substance of migration 0022
+# The three CHECK constraints -- the substance of migration 0014
 # ---------------------------------------------------------------------------
 
 

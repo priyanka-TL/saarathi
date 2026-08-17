@@ -1,4 +1,4 @@
-"""Pins the `routing.intent` grid migration 0024 seeds.
+"""Pins the `routing.intent` grid migration 0018 seeds.
 
 The grid is what lets the router recognise a request phrased in a way no fixed
 keyword list contains -- "I want to start a discussion" matches none of the six
@@ -7,7 +7,7 @@ narrow and the LLM classifier comes back on every turn, too broad and an
 ordinary interview answer yields the user out of a conversation.
 
 These read the migration's own `apply()` rather than restating its values, for
-the reason 0019 gives: a pin that restates an edit can agree with itself while
+the reason 0016 gives: a pin that restates an edit can agree with itself while
 disagreeing with the database.
 """
 from __future__ import annotations
@@ -35,7 +35,7 @@ def _load_migration(name: str, path: Path):
     return module
 
 
-_intent = _load_migration("_intent_0024", _VERSIONS / "0024_seed_routing_intent.py")
+_intent = _load_migration("_intent_0018", _VERSIONS / "0018_story_bot_route_and_routing_intent.py")
 
 
 def _grid(agent_key: str):

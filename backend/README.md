@@ -10,7 +10,7 @@ make run                     # migrates to head, then binds HOST:PORT from .env
 ```
 
 `make migrate` alone produces a working application: the agent catalogue is
-seeded by migration 0007. There is no YAML to sync and no first-run flag.
+seeded by migration 0010. There is no YAML to sync and no first-run flag.
 
 Infrastructure and secrets — host, port, `API_PREFIX`, CORS origins, feature
 flags, credentials, and the Mitra defaults — live in that one `.env`. **Agent
@@ -279,7 +279,7 @@ editing another tenant's configuration is the normal case.
 ### There is no YAML
 
 `app/config/agents/*.yaml` is **gone**, along with `ConfigSyncService` and
-`CONFIG_SYNC_MODE`. The catalogue is seeded by **migration 0007** and edited
+`CONFIG_SYNC_MODE`. The catalogue is seeded by **migration 0010** and edited
 through `POST /api/agents/{key}/config`, which versions, audits and validates
 every change. `app/config/ui/capabilities.yaml` went the same way in 0006.
 
@@ -287,7 +287,7 @@ That removes the "on a fresh database set `CONFIG_SYNC_MODE=safe` for the first
 run, then put it back" step, and with it the possibility of a deploy reverting
 a live override — which is why the mode defaulted to `off` in the first place.
 
-Upgrading a database from the YAML era is handled: migration 0007 supersedes
+Upgrading a database from the YAML era is handled: migration 0010 supersedes
 any active default-scope config still written in the old shape (a `${VAR}`
 reference, or `bot_route_env` / `company_env`) with a literal one, as a **new
 version**, so the previous config stays one activate call away. An operator's

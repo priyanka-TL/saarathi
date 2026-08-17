@@ -24,16 +24,14 @@ from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 #: 0010 seeds the ORIGINAL shape; 0013 rewrites it into the provider-neutral
-#: envelope; 0019 moves this agent onto its own bot and opts it in to sending
-#: the caller's profile; 0020 takes that opt-in back out. What the database
-#: actually holds -- and therefore what the application validates -- is all four
-#: applied in sequence, so that is what these assertions read. Composing them
-#: beats restating the end state: a migration whose edit changes and a pin that
-#: does not would otherwise agree with each other and disagree with the
-#: database.
+#: envelope; 0016 moves this agent onto its own bot and pins `send_user_profile`
+#: off. What the database actually holds -- and therefore what the application
+#: validates -- is all three applied in sequence, so that is what these
+#: assertions read. Composing them beats restating the end state: a migration
+#: whose edit changes and a pin that does not would otherwise agree with each
+#: other and disagree with the database.
 _GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
-_DISCUSSION_BOT = _VERSIONS / "0019_discussion_bot_route.py"
-_DROPS_USER_PROFILE = _VERSIONS / "0020_discussion_drops_user_profile.py"
+_DISCUSSION_BOT = _VERSIONS / "0016_discussion_bot_route.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -52,8 +50,7 @@ def _seed_specs() -> dict:
     """
     seed = _load_migration("_seed_0010", _MIGRATION)
     generalize = _load_migration("_generalize_0013", _GENERALIZE)
-    discussion_bot = _load_migration("_discussion_bot_0019", _DISCUSSION_BOT)
-    drops_profile = _load_migration("_drops_user_profile_0020", _DROPS_USER_PROFILE)
+    discussion_bot = _load_migration("_discussion_bot_0016", _DISCUSSION_BOT)
 
     agents = {}
     for agent in seed.seed_agents():
@@ -61,21 +58,16 @@ def _seed_specs() -> dict:
         if isinstance(agent.get("remote"), dict):
             agent["agent_type"] = "remote_flow"
             agent["remote"] = generalize._to_envelope(agent["remote"])
-        # 0019 touches exactly one agent, and the guard below is the migration's
+        # 0016 touches exactly one agent, and the guard below is the migration's
         # own predicate: it will not convert a row whose bot_route has drifted.
+        # The route move and the `send_user_profile: false` pin are one edit now,
+        # so there is no second step to compose.
         if (
             agent["key"] == discussion_bot.AGENT_KEY
             and agent.get("remote", {}).get("options", {}).get("bot_route")
             == discussion_bot.OLD_BOT_ROUTE
         ):
             agent = discussion_bot.apply(agent)
-        # 0020's own predicate: only a config that opted IN gets opted back out.
-        if (
-            agent["key"] == drops_profile.AGENT_KEY
-            and agent.get("remote", {}).get("options", {}).get("send_user_profile")
-            is True
-        ):
-            agent = drops_profile.apply(agent)
         agents[agent["key"]] = agent
     return agents
 
@@ -122,7 +114,7 @@ def test_bot_route_and_company_are_stored_literals():
     flow_name selects the story branch at finalisation.
 
     THE ROUTE AND THE FLOW MOVED SEPARATELY, AND ONLY ONE OF THEM MOVED.
-    Migration 0019 took this agent off /shikshalokam_chaupal -- a bot shared
+    Migration 0016 took this agent off /shikshalokam_chaupal -- a bot shared
     with the Mitra web portal and the WhatsApp service -- and onto its own.
     `flow_name` deliberately did NOT follow: Mitra's v1 /api/end-story/ branches
     on flow == 'guest-discussion' to render the minutes-of-meeting report, and
