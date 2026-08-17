@@ -26,7 +26,7 @@ export default function WorkflowBanner({ banner }) {
   const { hidden, title, stops, currentIndex, label, subLabel } = banner;
 
   const stopText =
-    stops && stops.length > 0 ? `Stop ${(currentIndex || 0) + 1} of ${stops.length}` : '';
+    stops && stops.length > 0 ? `Step ${(currentIndex || 0) + 1} of ${stops.length}` : '';
 
   const classes = cx(
     'active-context-banner',

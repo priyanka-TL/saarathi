@@ -1,5 +1,10 @@
+"""Persistence for `conversation_messages`.
+
+Responsible for: writing turns and reading back a memory window.
+Used by: OrchestrationService and ConversationService.
+"""
 import uuid
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,12 +30,14 @@ class MessageRepository:
         route_confidence: Optional[float] = None,
         options: Optional[List[Dict[str, Any]]] = None,
         selected_option_id: Optional[str] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None,
         prompt_tokens: Optional[int] = None,
         completion_tokens: Optional[int] = None,
         latency_ms: Optional[int] = None,
         error: Optional[str] = None,
         request_id: Optional[str] = None,
+        ws: Optional[Mapping[str, Any]] = None,
         actor: str = SYSTEM_ACTOR,
     ) -> MessageDTO:
         """
@@ -40,9 +47,23 @@ class MessageRepository:
         they typed and the reply it drew, since an assistant message exists
         because that user asked for it. `agent_id` is what records WHICH agent
         wrote a reply; the two answer different questions.
+
+        `ws` is the WebSocket turn diagnostics, as the mapping
+        `app.core.timing` already accumulated -- ONE argument rather than four,
+        because these four always travel together and come from one source. Only
+        the four known keys are read; anything else on the record (there is a
+        `remote_reestablished` flag, for one) is ignored rather than silently
+        becoming a column. Absent or None for an `llm` agent and for every user
+        row, which the `ws_only_assistant` CHECK enforces.
+
+        THE KEY NAMES MATCH THE COLUMN NAMES ON PURPOSE. They are also the log
+        field names, so one string identifies the same measurement in a log line,
+        in this mapping, and in the database -- which is what makes a log line
+        and a row correlatable by grep rather than by memory.
         """
         # Convert string role to enum
         role_enum = MessageRoleEnum(role)
+        ws = ws or {}
 
         new_msg = ConversationMessage(
             id=uuid.uuid4(),
@@ -56,12 +77,19 @@ class MessageRepository:
             route_confidence=route_confidence,
             options=options,
             selected_option_id=selected_option_id,
+            attachments=attachments,
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             error=error,
             request_id=request_id,
+            # Named explicitly rather than splatted, so the set of columns this
+            # mapping may write is visible here and cannot grow by accident.
+            ws_end_reason=ws.get("ws_end_reason"),
+            ws_first_frame_ms=ws.get("ws_first_frame_ms"),
+            ws_last_frame_ms=ws.get("ws_last_frame_ms"),
+            ws_fragments=ws.get("ws_fragments"),
             created_by=actor,
             updated_by=actor,
         )
@@ -74,7 +102,24 @@ class MessageRepository:
     def recent(self, conversation_id: uuid.UUID, memory: Any) -> List[MessageDTO]:
         """
         Returns the last `N` messages up to `memory.history_turns` (or max_messages for legacy), ordered chronologically (seq ASC).
+
+        `strategy: "none"` MEANS NO QUERY, not "query and let the caller ignore
+        it". This method used to consult only `history_turns`, which defaults to
+        10 and is left at its default by every `strategy: "none"` agent -- so
+        `record_stories` and `capture_discussion` each paid a ten-row SELECT plus
+        ten model validations per turn for a list that provably cannot be read:
+        `RemoteFlowAgentHandler` never touches `ctx.history`, and its docstring
+        says so as a structural guarantee.
+
+        KEYED ON `strategy`, NEVER ON AN AGENT KEY. The config is the single
+        source of truth for whether an agent has memory, and `LlmAgentHandler`
+        already branches on this same field before reading history -- so an agent
+        that later wants history changes its config and gets it, with no code
+        change here.
         """
+        if getattr(memory, "strategy", "recent") == "none":
+            return []
+
         limit_val = getattr(memory, "history_turns", getattr(memory, "max_messages", 10))
         if limit_val <= 0:
             return []
@@ -97,7 +142,7 @@ class MessageRepository:
     def last_user_content(self, conversation_id: uuid.UUID) -> Optional[str]:
         """Text of the most recent user message, or None.
 
-        Turn recovery needs to ask Mitra "what became of THIS message", and the
+        Turn recovery needs to ask the provider "what became of THIS message", and the
         conversation transcript is the only record of what was sent -- the turn
         that timed out never got far enough to store anything else.
         """

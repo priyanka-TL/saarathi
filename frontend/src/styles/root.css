@@ -5,6 +5,140 @@
  */
 
 /*
+ * ---------------------------------------------------------------------------
+ * Application font -- Source Sans 3 everywhere.
+ *
+ * style.css names two families of its own: 'Inter' on `body` (line ~63) and
+ * 'Public Sans' on `.brand-text h1` (line ~191). It is frozen byte-for-byte by
+ * the parity gate, so both are overridden from here instead.
+ *
+ * Three selectors, each doing something the others cannot:
+ *
+ *   *          Form controls (<input>, <textarea>, <button>) do not inherit
+ *              font-family from body by UA default. style.css already fixes
+ *              the five it knows about with `font-family: inherit`, but the
+ *              universal selector covers any control added later too.
+ *
+ *   body       `*` has specificity 0,0,0 and loses to style.css's `body`
+ *              (0,0,1), so the element rule is re-stated explicitly.
+ *
+ *   .brand-text h1
+ *              Same story at 0,1,1 -- the wordmark keeps its own family
+ *              otherwise. Its size/weight/letter-spacing/uppercase are left
+ *              alone; only the face changes.
+ *
+ * Source Sans 3 is a variable face covering 200-900, so the weights style.css
+ * asks for (400/500/600/700) all resolve to real instances rather than
+ * synthesised bold -- index.html requests that full range.
+ * ---------------------------------------------------------------------------
+ */
+*,
+*::before,
+*::after {
+    /* font-family: "Comfortaa", sans-serif; */
+    font-family: "Source Sans 3", sans-serif !important;
+}
+
+body {
+    /* font-family: "Comfortaa", sans-serif; */
+    font-family: "Source Sans 3", sans-serif !important;
+}
+
+.brand-text h1 {
+    /* font-family: "Comfortaa", sans-serif; */
+    font-family: "Source Sans 3", sans-serif !important;
+}
+
+/*
+ * Code stays monospace.
+ *
+ * This rule only exists because of the `!important` above. Without it, the
+ * `*` rule beats `.message-content code` (style.css line ~878) no matter the
+ * specificity -- an important declaration outranks a normal one outright -- so
+ * inline code spans would silently lose 'IBM Plex Mono' and render in the body
+ * face. That is shipped behaviour and a legibility choice about aligned
+ * characters, so it is restored here at equal weight.
+ *
+ * Delete this block if code SHOULD render in Source Sans 3.
+ */
+.message-content code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace !important;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Minimum font size -- nothing renders below 15px.
+ *
+ * CSS has no `min-font-size` property, so the floor is applied by re-declaring
+ * every rule that sat under it. The list below is exhaustive as of this commit:
+ * every `font-size` in style.css and root.css was enumerated and converted to
+ * px (the rem base is the 16px browser default -- style.css sets no `html`
+ * font-size -- so 1rem = 16px and 15px = 0.9375rem), and everything that
+ * computed under 15px is here. Nothing sits between these and the floor.
+ *
+ * Sizes AT OR ABOVE 15px are deliberately left alone, since this is a floor and
+ * not a resize: .capability-title / .highlight-desc-title (0.95rem = 15.2px),
+ * #user-input (16px), .message-content h1-h4 (1.05rem = 16.8px) and
+ * .brand-text h1 (1.125rem = 18px) all keep their shipped values.
+ *
+ * Selectors are copied VERBATIM from style.css, including the two-class ones,
+ * so each matches the specificity of the rule it replaces -- root.css is
+ * imported second (src/main.jsx), so equal specificity wins on source order.
+ * No !important here: unlike font-family above, nothing needs to be beaten
+ * across a specificity boundary. Keep it that way -- a font-size !important
+ * would make these impossible to tune per-component later.
+ *
+ * NOTE ON REM: these are px, not rem, on purpose. A floor expressed in rem
+ * would scale with the root font size and stop being a 15px floor the moment
+ * anything sets one.
+ * ---------------------------------------------------------------------------
+ */
+
+/* Sidebar: brand block, status/meta rows, section headers */
+/* .brand-text p, */
+.status-row,
+/* .meta-row, */
+.advanced-title,
+/* .advanced-subtitle, */
+.capabilities-label,
+.mobile-sidebar-title,
+/* Capability + highlight cards */
+.capability-desc,
+/* .capability-badge, */
+.capability-action-btn,
+.highlight-desc,
+/* Agent list */
+.agent-name,
+.agent-desc,
+/* Workflow banner + context chrome */
+.workflow-title-text,
+/* .workflow-stop-text, */
+.context-pill,
+.context-banner-desc,
+/* .breadcrumb-item, */
+/* Messages */
+.message-content,
+.context-switch .message-content,
+/* Composer + in-message actions */
+#send-btn,
+.option-btn,
+.retry-btn,
+.message-content a.report-link,
+.message-content a.report-link:visited {
+    font-size: 15px;
+}
+
+/*
+ * `.message-content code` is the one relative size in the app: style.css sets
+ * `0.9em`, which resolved against .message-content's old 14px to 12.6px. With
+ * the parent now at 15px it would still be 13.5px -- under the floor -- so it
+ * is pinned outright rather than left relative.
+ */
+.message-content code {
+    font-size: 15px;
+}
+
+/*
  * THE ONE RULE THAT MAKES THE LAYOUT WORK.
  *
  * style.css builds its height chain as:
@@ -46,7 +180,10 @@
     margin-left: auto;
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
-    font-size: 0.55rem;
+    /* Was 0.55rem (8.8px) -- raised to the 15px floor. This pill is uppercase
+       with letter-spacing and sits in a flex row, so it is the widest thing
+       the floor affected; see the min-font-size block above. */
+    font-size: 15px;
     font-weight: 700;
     letter-spacing: 0.05em;
     padding: 2px 5px;
@@ -86,6 +223,30 @@
  */
 
 /*
+ * A card that GROUPS agents is a heading, not a control: the buttons inside it
+ * are the targets, so the body must not advertise a click it no longer has.
+ *
+ * NOT dimmed like .is-disabled -- nothing here is unavailable, and the two
+ * agent buttons are fully live. Only the affordance goes.
+ *
+ * The background/border reset is scoped :not(.active) on purpose. root.css
+ * loads after style.css and `.capability-card.is-static` ties `.active` on
+ * specificity, so an unscoped rule would win on order and swallow the purple
+ * highlight the card still earns when one of its agents is running. The cursor
+ * is unscoped because an active grouping card is no more clickable than an
+ * idle one.
+ */
+.capability-card.is-static {
+    cursor: default;
+}
+
+.capability-card.is-static:not(.active),
+.capability-card.is-static:not(.active):hover {
+    background: var(--card-bg);
+    border-color: var(--border-color);
+}
+
+/*
  * ---------------------------------------------------------------------------
  * Sidebar toast.
  *
@@ -103,7 +264,8 @@
     border: 1px solid var(--border-color);
     border-radius: 12px;
     color: var(--text-secondary);
-    font-size: 0.78rem;
+    /* Was 0.78rem (12.48px) -- raised to the 15px floor. */
+    font-size: 15px;
     line-height: 1.4;
     cursor: pointer;
     animation: sidebar-toast-in 0.2s ease;
@@ -127,4 +289,1310 @@
     .sidebar-toast {
         animation: none;
     }
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Collapsible CHAT HISTORY section.
+ *
+ * The HEADER is not styled here at all. ChatHistorySection reuses
+ * .advanced-toggle / .advanced-toggle-left / .advanced-title /
+ * .advanced-subtitle straight out of style.css, so the two section headers are
+ * identical by construction -- including the chevron rotation, which is driven
+ * by the attribute selector `.advanced-toggle[aria-expanded="false"] .chevron`
+ * and therefore matches the moment the class and the attribute are both
+ * present. That coupling is safe in the direction that matters: those rules
+ * live in style.css, which the byte-for-byte parity gate freezes, so they
+ * cannot drift out from under this section.
+ *
+ * EVERY RULE BELOW THAT NAMES AN .advanced-* CLASS IS SCOPED under
+ * .chat-history-section, and must stay that way. root.css is imported AFTER
+ * style.css (src/main.jsx), so an unscoped `.advanced-toggle-left { ... }`
+ * here would silently restyle the Advanced panel too. The ONE deliberate
+ * exception is the `.advanced-section` rule at the bottom of this block, which
+ * exists precisely to change the Advanced panel -- see the comment there.
+ *
+ * Only the collapse GEOMETRY is new, and it has to be: .advanced-content
+ * collapses via `max-height: 1500px -> 0`, but useRecentConversations caps the
+ * list at MAX_ROWS = 20 and a full list is ~1850px, so reusing that class
+ * would clip the oldest rows with no visible cause. This uses the grid
+ * `1fr -> 0fr` technique instead -- the same one style.css already uses for
+ * the workflow banner, which has no height ceiling. It does NOT reuse that
+ * banner's .collapsible-inner either: that carries `padding: 0 20px 10px 20px`
+ * and would inset every conversation row off the rail.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * No `margin-top: auto` here, unlike .advanced-section. Only ONE element can
+ * usefully claim the rail's free space, and .chat-history-placeholder
+ * (`flex: 1 0 auto`) already does -- it pushes this section and Advanced down
+ * as a pair, in every combination of their collapsed states.
+ */
+.chat-history-section {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    border-top: 1px solid var(--border-color);
+    padding-top: 16px;
+}
+
+/* `flex-shrink: 0` mirrors .advanced-content: this is a flex item of
+ * .chat-history-section, and nothing in the rail may compress -- a long list
+ * overflows into .sidebar's scrollbar instead. */
+.chat-history-content {
+    display: grid;
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transition: grid-template-rows 0.3s ease, opacity 0.3s ease;
+    flex-shrink: 0;
+}
+
+.chat-history-content.collapsed {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    pointer-events: none;
+}
+
+/*
+ * `overflow: hidden` is what actually clips at 0fr -- without it the grid item
+ * keeps its automatic min-content size and nothing collapses. Safe to add a
+ * new block formatting context here: style.css's `* { margin: 0; padding: 0 }`
+ * reset means .agent-list has no margins that were relying on collapsing.
+ *
+ * Deliberately NO padding (that is .collapsible-inner's trap), NO `gap` (it
+ * would stack on .agent-list's own 12px), and NO `overflow-y: auto` or
+ * max-height -- .sidebar is the rail's only scroll container, which is the
+ * same decision style.css already made with `.agent-list { overflow-y: visible }`.
+ */
+.chat-history-inner {
+    overflow: hidden;
+    min-height: 0;
+}
+
+/*
+ * 320px insurance. The rail narrows to 320px under the single
+ * `@media (max-width: 768px)` block, leaving ~240px inside the toggle once its
+ * padding and the 16px chevron are accounted for. The current copy fits with
+ * room to spare, but .advanced-toggle-left is a flex column with no
+ * `min-width: 0`, so longer copy would push the chevron out of the button
+ * rather than wrap. Scoped, so the Advanced header keeps its exact behaviour.
+ */
+.chat-history-section .advanced-toggle-left {
+    min-width: 0;
+}
+
+.chat-history-section .advanced-title,
+.chat-history-section .advanced-subtitle {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/*
+ * Scoped to this section only. Advanced and the workflow banner do not honour
+ * reduced motion today; widening it to them would change shipped chrome, which
+ * is a separate decision from adding a new section. The three-class selector
+ * is what beats `.advanced-toggle .chevron` in style.css.
+ */
+@media (prefers-reduced-motion: reduce) {
+    .chat-history-content {
+        transition: none;
+    }
+
+    .chat-history-section .advanced-toggle .chevron {
+        transition: none;
+    }
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Closing the gap between the two panels, so they read as one stacked group
+ * rather than two unrelated blocks.
+ *
+ * Three separate things contributed it, and all three are cancelled here:
+ *
+ *   16px  .advanced-toggle's own `margin-bottom`, which is pure dead space
+ *         once the content below it has collapsed to zero height. Scoped to
+ *         .chat-history-section.collapsed, so the Advanced panel keeps the
+ *         identical dead margin it has always had when collapsed.
+ *
+ *   16px  .advanced-section's `padding-top`, plus its `border-top` divider.
+ *         Both are dropped: .chat-history-section now carries the border that
+ *         marks the top of the GROUP, and a second rule between the two pills
+ *         is what made them look like separate regions. This is the one
+ *         deliberately unscoped .advanced-* rule in this file -- it changes the
+ *         real Advanced panel, which is the point. `margin-top: auto` is left
+ *         untouched: it is the fallback that pins the group to the bottom of
+ *         the rail if .chat-history-placeholder ever stops growing.
+ *
+ *   14px  .sidebar's flex `gap` is deliberately KEPT. It is the rhythm between
+ *         the two toggle pills, and matching it to the gap elsewhere in the
+ *         rail is what makes the group look intentional rather than crushed.
+ * ---------------------------------------------------------------------------
+ */
+.chat-history-section.collapsed .advanced-toggle {
+    margin-bottom: 0;
+}
+
+/*
+ * style.css gives .advanced-toggle `transition: all 0.2s ease`, so without
+ * this the margin above would tween over 0.2s while the grid rows tween over
+ * 0.3s -- a visible two-stage collapse. Naming the properties that should
+ * animate drops margin from the list. Scoped, so Advanced is unaffected.
+ */
+.chat-history-section .advanced-toggle {
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.advanced-section {
+    border-top: none;
+    padding-top: 0;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Brand mark.
+ *
+ * .brand-icon's tinted rounded square and `color: var(--primary-color)` exist
+ * to carry the single-colour STROKED compass icon this replaced. A
+ * multicolour mark on a purple wash just reads as muddy, so the tint goes and
+ * the 46px slot stays -- nothing else in the card shifts.
+ *
+ * The dark-mode override needs the same [data-theme="dark"] specificity as the
+ * rule it beats in style.css; root.css loads later, so an equal-specificity
+ * selector is enough.
+ * ---------------------------------------------------------------------------
+ */
+.brand-icon {
+    background: none;
+}
+
+[data-theme="dark"] .brand-icon {
+    background: none;
+}
+
+/* The slot is a 46px centred flex box; the mark fills it and keeps its aspect
+ * ratio, so a replacement file that is not perfectly square still sits right. */
+.brand-logo {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Chat colour scheme -- cream / deep purple / forest green.
+ *
+ * Most of the reference palette was already shipped: --bg-color (#f6f3ee), the
+ * white .chat-window-card, the white .active-context-banner, the purple
+ * #send-btn and .message-avatar, and the mint .breadcrumb-item.active with its
+ * pulsing #1e5c43 dot are all untouched here because they already match.
+ *
+ * Only three elements differed, and only their COLOURS change -- no markup, no
+ * geometry beyond the one radius adjustment change 3 forces. Every value below
+ * is a token style.css already uses (#4e2277, #1e5c43, #f6f3ee, #e3dcd1);
+ * nothing new is invented.
+ *
+ * LIGHT THEME ONLY, by decision. Dark mode is unreachable from the UI -- its
+ * toggle is commented out of the markup and ChatPage.jsx only boot-READS a
+ * stored preference -- so it is deliberately left exactly as shipped rather
+ * than half-migrated. Change 1 is what makes that scoping real; see below.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * 1. User bubble -- solid purple, white text (was a 12% wash with dark text).
+ *
+ * These two custom properties are read in exactly ONE place, style.css:805-806
+ * (`.user .message-content`), so redefining them is surgical: no other rule
+ * changes as a side effect.
+ *
+ * `:not([data-theme="dark"])` IS LOAD-BEARING -- do not simplify it to `:root`.
+ * A bare `:root` is specificity (0,1,0), identical to `[data-theme="dark"]` in
+ * style.css, and root.css is imported second (src/main.jsx) -- so it would win
+ * against the DARK palette too and paint a solid light-purple bubble onto the
+ * dark background. The :not() raises this to (0,2,0) AND confines it to light.
+ */
+:root:not([data-theme="dark"]) {
+    --message-user: #4e2277;
+    --message-user-text: #ffffff;
+
+    /*
+     * Page background: neutral #f7f7f7, replacing the warm cream #f6f3ee.
+     *
+     * Overriding the VARIABLE rather than `body` carries the change to all
+     * four consumers at once -- body (style.css:64), .sidebar (:98),
+     * .capability-action-btn (:412) and .mobile-menu-btn.standalone (:1033).
+     * Those three read var(--bg-color) precisely so they match the page; a
+     * `body { background: ... }` rule here would have left them warm against
+     * a neutral page.
+     *
+     * The two OTHER #f6f3ee uses are intentionally left alone, because they
+     * are bubble/field fills rather than the page: the agent + system bubble
+     * (style.css:812/819) and the composer (change 4 below). Both sit on the
+     * WHITE .chat-window-card, not on the page, so their contrast is measured
+     * against #ffffff and is unaffected by this.
+     *
+     * The body's 3%-black grid overlay used to be left untouched here -- it no
+     * longer is; see 1c below, which removes it and supersedes this note.
+     */
+    --bg-color: #f7f7f7;
+}
+
+/*
+ * 1b. Grid overlay removed -- flat #f7f7f7, no dot/line pattern.
+ *
+ * `body` carries background-COLOUR (var(--bg-color), just set to #f7f7f7
+ * above) and a separate background-IMAGE: two 1px linear-gradients tiled
+ * 24px, which is what renders as the faint grid (style.css:65-69). This turns
+ * the image off and leaves the colour alone -- `background-image: none`,
+ * not `background: #f7f7f7`, so a shorthand reset can't accidentally drop
+ * back to a browser-default transparent and reveal `html`'s white through
+ * `body`'s own background-color, which stays exactly var(--bg-color).
+ *
+ * One `body` rule is enough for the whole page: the sidebar's now-opaque
+ * #ffffff (1b, above) already masked this same grid under the rail, so this
+ * rule is the only other place it could still show -- the gap around and
+ * below .chat-window-card on the right, which is exactly what was asked.
+ */
+:root:not([data-theme="dark"]) body {
+    background-image: none;
+}
+
+/*
+ * 1c. Sidebar fill -- pinned to #ffffff, diverging from the page.
+ *
+ * .sidebar reads var(--bg-color) (style.css:98) BECAUSE it is meant to match
+ * the page, and did, until now -- this is the one deliberate exception. Fixing
+ * it here as a literal, rather than adding a second variable, keeps the other
+ * three var(--bg-color) consumers (body :64, .capability-action-btn :412,
+ * .mobile-menu-btn.standalone :1033) on #f7f7f7 exactly as change 1 intends;
+ * none of them were asked to change.
+ *
+ * Every card already inside the sidebar (.brand-card, .advanced-toggle,
+ * .capability-card, .highlight-card, .agent-item) is var(--card-bg), which is
+ * ALSO #ffffff (style.css:4) -- so this does not introduce white-on-white; it
+ * REMOVES the grey that used to separate the rail from its cards, which is
+ * consistent with why every card keeps its 1px var(--border-color) outline
+ * regardless.
+ *
+ * `@media (min-width: 1025px)` GUARDS THE MOBILE DRAWER. Below 1024px style.css
+ * turns .sidebar into a fixed slide-in panel on `var(--panel-bg-strong)`
+ * (95% white -- a deliberate near-opaque scrim, not the rail colour). Without
+ * this guard, `:root .sidebar` at (0,2,0) would outrank that rule regardless
+ * of the media query and flatten the drawer's translucency to full opaque --
+ * a real, if 5%, divergence from a DIFFERENT shipped design than the one this
+ * change targets.
+ */
+@media (min-width: 1025px) {
+    :root:not([data-theme="dark"]) .sidebar {
+        background: #ffffff;
+    }
+}
+
+/*
+ * 1d. Sidebar width -- 1/4 of the window on desktop (was a fixed 360px).
+ *
+ * style.css:96 sets `width: 360px` with `flex-shrink: 0` and no `flex`
+ * shorthand -- so flex-basis stays `auto`, which per spec resolves to the
+ * `width` property. Overriding width alone is therefore enough; flex-shrink:0
+ * does not need restating.
+ *
+ * `width: 25%`, NOT `25vw`. `.sidebar` and `.chat-container` (flex: 1,
+ * style.css:581) are the only two children of `.app-container`, itself
+ * `width: 100vw` (style.css:83) -- so today the two units are numerically
+ * identical. `%` is still the correct one: it resolves against the FLEX
+ * CONTAINER'S content box, so the split stays exactly 1/4 - 3/4 if
+ * `.app-container` is ever not full-viewport (embedded, a future max-width
+ * cap, etc), where `vw` would silently stop matching the container and throw
+ * the ratio off.
+ *
+ * No theme scoping and no `:not([data-theme="dark"])` -- layout, unlike every
+ * change above it in this file, does not vary by theme, so there is nothing
+ * to exclude dark mode from.
+ *
+ * Same `@media (min-width: 1025px)` guard as 1c, and for the same reason: below
+ * 1024px `.sidebar` is style.css's fixed-320px slide-in drawer (:1093), a
+ * different layout mode entirely -- "1/4 of the window" was scoped to
+ * desktop, and an unguarded rule would also resize that drawer.
+ *
+ * NOT capped. On a very wide desktop monitor 25% is a wide rail (e.g. 860px
+ * at 3440px). No max-width was requested here, so none is added -- add one
+ * (e.g. `max-width: 480px`) if that reads too wide once you see it.
+ */
+@media (min-width: 1025px) {
+    .sidebar {
+        width: 25%;
+    }
+}
+
+/*
+ * 2. ...and the timestamp inside it. Forced by change 1, not a separate choice:
+ * .message-meta is var(--text-secondary) (#6e665e), which on #4e2277 is dark
+ * grey on dark purple. (0,1,1) beats style.css's `.message-meta` (0,1,0).
+ * Scoped to the same light-only condition so dark mode keeps its grey meta.
+ */
+:root:not([data-theme="dark"]) .user .message-meta {
+    color: rgba(255, 255, 255, 0.72);
+}
+
+/*
+ * 3. Agent + system bubbles -- #f7f7f7 fill, forest-green left bar.
+ *
+ * THE FILL IS SET HERE, ON BOTH SELECTORS AT ONCE, ON PURPOSE.
+ *
+ * style.css declares the two bubble kinds as separate rules (:810 and :817)
+ * that happen to carry the same colour, and they had already drifted apart --
+ * .agent was on #f7f7f7 while .system was still on the old cream #f6f3ee. That
+ * is not a rare edge case: Message.jsx renders EVERY non-'agent' kind with the
+ * `system` class, so the completion notice, the report-link row, the finalizing
+ * spinner and the error rows all take the .system branch and were all cream
+ * while ordinary replies were grey. Restating the fill on the combined
+ * selector makes the pair impossible to split again, and it is why this rule
+ * -- not style.css -- is the place to change the bubble colour from now on.
+ *
+ * #1e5c43 is reused verbatim from `.breadcrumb-item.active .breadcrumb-dot`,
+ * so the accent green is one value across the whole interface rather than two
+ * near-identical greens.
+ *
+ * The bar follows the corner radius rather than squaring off against it -- the
+ * reference shows the green sweeping around the top-left and bottom-left, which
+ * is just what a thick border on a rounded box does. An earlier revision here
+ * squared those two corners to 6px; that was wrong and is not coming back.
+ */
+:root:not([data-theme="dark"]) .agent .message-content,
+:root:not([data-theme="dark"]) .system .message-content {
+    background: #f7f7f7;
+    border-left: 4px solid #1e5c43;
+}
+
+/*
+ * 3b. Bubble silhouette -- 14px, uniform.
+ *
+ * style.css sets `border-radius: 20px` on .message-content plus a
+ * `border-bottom-right-radius: 4px` notch on the user bubble (the classic
+ * "speech tail" corner). The reference has neither: its corners are tighter
+ * and all four match, on both speakers. The notch override needs (0,2,0) to
+ * beat `.user .message-content`, which the :root:not() prefix already gives.
+ */
+:root:not([data-theme="dark"]) .message-content {
+    border-radius: 14px;
+}
+
+:root:not([data-theme="dark"]) .user .message-content {
+    border-bottom-right-radius: 14px;
+}
+
+/*
+ * 4. Composer -- warm-grey fill, hairline border (was white with a 2px purple
+ * border). Same #f6f3ee / #e3dcd1 pair as the agent bubble above.
+ *
+ * The 2px -> 1px border does NOT shift the composer's height: style.css:55
+ * sets `* { box-sizing: border-box }`, so `min-height: 52px` measures the outer
+ * box either way and only the content area gains the 2px.
+ *
+ * #user-input:focus is deliberately NOT touched -- the purple ring is the
+ * accessible focus affordance, and no reference frame shows a focused field.
+ * It simply renders at 1px now.
+ */
+:root:not([data-theme="dark"]) #user-input {
+    background: #f6f3ee;
+    border: 1px solid #e3dcd1;
+}
+
+/*
+ * 5. User avatar, on the right.
+ *
+ * `.message` is already `display: flex` with `gap: 12px` (style.css:739-743),
+ * and Message.jsx emits the avatar AFTER .message-body for user rows, so the
+ * row mirrors the agent's without any order/row-reverse trickery. This rule
+ * only stops the 28px box from being squeezed by a long bubble and pins it to
+ * the top, level with the first line -- matching the bot side.
+ */
+.message.user .message-avatar {
+    align-self: flex-start;
+}
+
+/*
+ * The avatar column is new on user rows, so the bubble now shares the row with
+ * a 28px box plus the 12px flex gap. Without this, a long user message keeps
+ * its old 78% and the pair overflows the 78% envelope by 40px.
+ */
+.message.user {
+    max-width: calc(78% + 40px);
+}
+
+/* =========================================================================
+ * VOICE
+ *
+ * Speech-to-text (the composer's mic) and text-to-speech (a speaker on each
+ * agent reply). Everything lives here rather than in style.css, which is a
+ * byte-verbatim port of the original Flask CSS and must not be edited.
+ *
+ * All colours come from the existing custom properties, so these controls
+ * follow the light/dark cascade without declaring a palette of their own.
+ * ====================================================================== */
+
+/*
+ * 6. The mic button.
+ *
+ * Sits between the textarea and #send-btn inside #chat-form, which is already
+ * `display: flex` (style.css). Circular and 48px so it reads as secondary to
+ * the pill-shaped Send, while still clearing the 44px minimum touch target.
+ * `margin-bottom: 2px` matches #send-btn so the two sit on one baseline as the
+ * textarea grows.
+ */
+.mic-btn {
+    flex-shrink: 0;
+    width: 48px;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    margin-bottom: 2px;
+    padding: 0;
+}
+
+.mic-btn:hover:not(:disabled) {
+    color: var(--primary-color);
+    border-color: var(--primary-color);
+    transform: translateY(-1px);
+}
+
+.mic-btn:active:not(:disabled) {
+    transform: scale(0.97);
+}
+
+.mic-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/*
+ * Recording. The colour change alone is not enough -- a user needs to be able
+ * to tell at a glance that the microphone is LIVE, so the pulse does the work
+ * and the fill makes it unmistakable.
+ */
+.mic-btn.is-recording {
+    background: var(--accent-color, #b83d78);
+    border-color: var(--accent-color, #b83d78);
+    color: #fff;
+    animation: mic-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(184, 61, 120, 0.45);
+    }
+
+    50% {
+        box-shadow: 0 0 0 8px rgba(184, 61, 120, 0);
+    }
+}
+
+/* Indeterminate progress, while transcribing or synthesising. */
+.voice-spinner {
+    animation: voice-spin 0.9s linear infinite;
+}
+
+@keyframes voice-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/*
+ * Respect the OS setting. A pulsing, spinning control is exactly the kind of
+ * motion this preference exists to suppress -- and both states stay legible
+ * without it, since each also changes colour or glyph.
+ */
+@media (prefers-reduced-motion: reduce) {
+    .mic-btn.is-recording {
+        animation: none;
+    }
+
+    .voice-spinner {
+        animation: none;
+    }
+}
+
+/*
+ * 7. Voice errors.
+ *
+ * Above the composer rather than in the transcript: a blocked microphone is a
+ * problem with the CONTROL, not a message in the conversation, and putting it
+ * in the transcript would leave a permanent artefact of a transient failure.
+ */
+.voice-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 10px;
+    padding: 10px 14px;
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+.voice-error-dismiss {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.9rem;
+    line-height: 1;
+    padding: 4px;
+}
+
+.voice-error-dismiss:hover {
+    color: var(--text-primary);
+}
+
+/*
+ * 8. The speaker button, on agent replies.
+ *
+ * `.message-footer` is a new flex row wrapping the existing `.message-meta`,
+ * so the button sits on the timestamp line instead of taking one of its own.
+ * `.message-meta` keeps every style it had; only its parent is new.
+ */
+.message-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.speaker-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: none;
+    border-radius: 9999px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    /*
+     * Faded until the bubble is hovered: one of these appears on EVERY agent
+     * reply, and at full strength a long transcript becomes a column of
+     * speaker icons competing with the text.
+     */
+    opacity: 0.55;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.message:hover .speaker-btn,
+.speaker-btn:focus-visible,
+.speaker-btn.is-playing {
+    opacity: 1;
+}
+
+.speaker-btn:hover:not(:disabled),
+.speaker-btn.is-playing {
+    color: var(--primary-color);
+}
+
+.speaker-btn:disabled {
+    cursor: default;
+}
+
+/*
+ * Touch devices have no hover, so the reveal above would never fire and the
+ * button would sit permanently at 55%. Show it outright instead.
+ */
+@media (hover: none) {
+    .speaker-btn {
+        opacity: 0.8;
+    }
+}
+
+/*
+ * 9. The preferred-language selector, top-right of the sidebar.
+ *
+ * Sits ABOVE the brand card, right-aligned and deliberately small: it is a
+ * preference set once, so it should read as a quiet setting rather than as one
+ * of the rail's actions. It was a full-width, stacked control directly under
+ * New Chat, where it carried the same visual weight as the primary button.
+ *
+ * These rules override the row version in style.css -- root.css is imported
+ * second (main.jsx) and both files define this class. Editing HERE rather than
+ * there also keeps the byte-verbatim port untouched; the selector is a
+ * voice-era addition and this file is where it has always lived.
+ */
+.voice-language {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    /* No bottom margin: .sidebar owns the 14px gap between its children, and a
+       margin here would double it above the brand card. */
+    margin: 0;
+    /* Never let a long translated label push the select out of the rail. */
+    min-width: 0;
+}
+
+.voice-language-label {
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.voice-language-select {
+    /* Content-sized, not full-width -- the whole point of the move. */
+    flex: 0 1 auto;
+    max-width: 60%;
+    padding: 5px 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.voice-language-select:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+}
+
+/*
+ * 10. Mobile.
+ *
+ * Mirrors what style.css:1136 does to #send-btn at the same breakpoint (the
+ * label is hidden and the button shrinks). The mic is already icon-only, so it
+ * only needs to give back width -- while staying at the 44px minimum touch
+ * target, which is why this shrinks to 44 and not further.
+ */
+@media (max-width: 1024px) {
+    .mic-btn {
+        width: 44px;
+        height: 44px;
+    }
+
+    .voice-error {
+        font-size: 0.8rem;
+        padding: 9px 12px;
+    }
+}
+
+/*
+ * 11. Send, disabled while the microphone is busy.
+ *
+ * style.css has no :disabled rule for #send-btn -- nothing ever disabled it
+ * before -- so without this the button greys out semantically and looks
+ * completely untouched, which reads as an unresponsive app rather than a
+ * deliberate state.
+ *
+ * The :hover and :active overrides are not redundant. CSS still applies :hover
+ * to a disabled button, so #send-btn:hover (style.css:1006) would keep lifting
+ * it and swapping in the hover colour under the cursor. These are one
+ * pseudo-class more specific and win.
+ */
+#send-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+#send-btn:disabled:hover,
+#send-btn:disabled:active {
+    background: var(--primary-color);
+    transform: none;
+}
+
+/* =========================================================================
+ * AUTH -- login and register pages.
+ *
+ * New screens, not a port of anything in the original Flask app, so there is
+ * no verbatim shape to match here. Built entirely from the existing custom
+ * properties (--bg-color, --card-bg, --border-color, --primary-color, etc.)
+ * so both pages follow the light/dark cascade for free, same as every other
+ * addition in this file.
+ * ====================================================================== */
+
+/*
+ * `#root { display: contents }` (above) means THIS is a direct flex item of
+ * `body` (style.css), not a normal block box -- and body's flex is row/
+ * `justify-content: flex-start` with no stretch on the main axis, so without
+ * an explicit width this shrinks to its own content and pins to the
+ * top-left instead of covering the viewport. `width: 100vw` is what
+ * `.app-container` already does for exactly this reason; matched here.
+ *
+ * `overflow-y: auto` (not `hidden`, unlike body) so a card taller than the
+ * viewport -- a small phone with the OTP field open and the keyboard up --
+ * scrolls instead of clipping.
+ */
+.auth-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    min-height: 100vh;
+    min-height: 100dvh;
+    background: var(--bg-color);
+    padding: 24px;
+    box-sizing: border-box;
+    overflow-y: auto;
+}
+
+.auth-card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 32px 28px;
+    box-shadow: 0 8px 24px var(--shadow-color, rgba(0, 0, 0, 0.08));
+    /* Belt-and-braces alongside style.css's global `* { box-sizing:
+       border-box }` reset -- this file must stand on its own if that rule
+       is ever scoped differently. */
+    box-sizing: border-box;
+}
+
+/* Narrow phones: tighten the card's own padding rather than shrinking
+   .auth-page's -- 24px there is what keeps the card off the screen edge. */
+@media (max-width: 420px) {
+    .auth-card {
+        padding: 24px 18px;
+    }
+}
+
+.auth-brand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 4px;
+    margin-bottom: 24px;
+}
+
+.auth-brand-icon {
+    width: 46px;
+    height: 46px;
+    margin-bottom: 8px;
+}
+
+.auth-brand h1 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.auth-brand p {
+    font-size: 15px;
+    color: var(--text-secondary);
+    margin: 0;
+}
+
+.auth-mode-toggle {
+    display: flex;
+    gap: 6px;
+    background: var(--bg-color);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 4px;
+    margin-bottom: 20px;
+}
+
+.auth-mode-btn {
+    flex: 1;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.auth-mode-btn.active {
+    background: var(--primary-color);
+    color: #ffffff;
+}
+
+.auth-form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.auth-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 15px;
+    color: var(--text-secondary);
+}
+
+.auth-field input {
+    padding: 10px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-color);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 15px;
+}
+
+.auth-field input:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+}
+
+.auth-field input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.auth-submit-btn,
+.auth-secondary-btn {
+    padding: 11px 16px;
+    border-radius: 9999px;
+    border: none;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
+}
+
+.auth-submit-btn {
+    background: var(--primary-color);
+    color: #ffffff;
+}
+
+.auth-submit-btn:hover:not(:disabled) {
+    background: var(--primary-hover);
+}
+
+.auth-secondary-btn {
+    background: var(--bg-color);
+    color: var(--primary-color);
+    border: 1px solid var(--border-color);
+}
+
+.auth-secondary-btn:hover:not(:disabled) {
+    border-color: var(--primary-color);
+}
+
+.auth-submit-btn:disabled,
+.auth-secondary-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.auth-error {
+    font-size: 15px;
+    color: var(--accent-color);
+    background: var(--message-system, rgba(184, 61, 120, 0.1));
+    border-radius: 9px;
+    padding: 10px 12px;
+}
+
+.auth-success {
+    font-size: 15px;
+    color: var(--text-primary);
+    text-align: center;
+    margin: 0 0 20px;
+}
+
+.auth-switch {
+    margin: 20px 0 0;
+    text-align: center;
+    font-size: 15px;
+    color: var(--text-secondary);
+}
+
+.auth-switch a {
+    color: var(--primary-color);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.auth-switch a:hover {
+    text-decoration: underline;
+}
+
+/* =========================================================================
+ * The account block at the END of the rail: View Profile and Logout, one row.
+ *
+ * ONE CLASS FOR BOTH BUTTONS. They were briefly .profile-row-btn (a full-width
+ * rounded rectangle) above .account-logout-btn (a small pill) on separate rows,
+ * which read as two unrelated controls that happened to be adjacent. They are
+ * one thing, so they share a class and split the row evenly.
+ *
+ * This also replaced a collapsible PROFILE panel under the brand card, whose
+ * rules (.profile-section / .profile-toggle / .profile-content /
+ * .profile-subtitle / .profile-edit-btn) are gone with it -- five read-only
+ * fields was a lot of rail for something read rarely, and it hid itself
+ * entirely when the user service was unconfigured, which made the menu entry
+ * look broken. The details moved into the dialog.
+ *
+ * .profile-fields and .profile-field-row below SURVIVED that move: the dialog's
+ * <dl> reuses them verbatim, so the field layout was not rewritten.
+ * ====================================================================== */
+
+.account-actions {
+    display: flex;
+    gap: 8px;
+    padding: 4px 4px 0;
+}
+
+/*
+ * Box model matched to #new-chat-btn (style.css) -- same radius, padding and
+ * weight, so the two rows read as one family of rail actions. COLOR IS
+ * DELIBERATELY NOT copied from it: New Chat is filled solid because it is the
+ * rail's one primary action, whereas these are secondary and stay the quiet
+ * outline they already were -- transparent fill, border-color, muted text.
+ */
+.account-action-btn {
+    /* Equal halves. `min-width: 0` lets them shrink below their content width
+     * on a narrow rail rather than overflowing it. */
+    flex: 1 1 0;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 13px 16px;
+    border-radius: 14px;
+    border: 1px solid var(--border-color);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.account-action-btn:hover {
+    color: var(--accent-color);
+    border-color: var(--accent-color);
+}
+
+.account-action-btn:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
+}
+
+.account-action-btn svg {
+    flex-shrink: 0;
+    width: 15px;
+    height: 15px;
+}
+
+
+
+/* The 503 PROFILE_UNAVAILABLE state: a notice, not a bare sentence, so an
+ * unprompted dead end still reads as a deliberate, explained answer. */
+.profile-modal-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-color);
+    margin-bottom: 4px;
+}
+
+.profile-modal-notice svg {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    color: var(--text-secondary);
+}
+
+.profile-modal-notice p {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+
+/* A clean, compact grid of details */
+.profile-details-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    row-gap: 16px;
+    column-gap: 16px;
+    margin: 16px 0 24px;
+}
+
+@media (max-width: 600px) {
+    .profile-details-list {
+        grid-template-columns: 1fr;
+    }
+}
+
+.profile-detail-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Ensure long text like School (3rd item) spans both columns */
+.profile-detail-item:nth-child(3) {
+    grid-column: 1 / -1;
+}
+
+@media (max-width: 600px) {
+
+    /* No need to span since there's only 1 column, reset to default */
+    .profile-detail-item:nth-child(3) {
+        grid-column: auto;
+    }
+}
+
+.profile-detail-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.04);
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.profile-detail-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.profile-detail-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.profile-detail-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.profile-detail-value {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.profile-detail-value.profile-detail-empty {
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
+/* Success state for profile update */
+.profile-modal-success {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 0;
+    gap: 16px;
+    text-align: center;
+}
+
+.profile-modal-success-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: rgba(34, 197, 94, 0.1);
+    color: #22c55e;
+}
+
+.profile-modal-success p {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+/* =========================================================================
+ * Modal -- the app's first dialog (src/components/common/Modal.jsx).
+ *
+ * PORTALLED TO document.body, so these rules are deliberately free of any
+ * ancestor: the sidebar is position:fixed with its own stacking context on
+ * mobile and the chat column scrolls, either of which would clip a dialog
+ * rendered in place.
+ * ====================================================================== */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.modal-panel {
+    width: 100%;
+    max-width: 420px;
+    /* Caps at the viewport so a long form scrolls INSIDE the panel rather than
+     * pushing its buttons off-screen on a short window. */
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    padding: 20px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary, #fff);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+@media (max-width: 480px) {
+    .modal-panel {
+        padding: 16px;
+    }
+}
+
+.modal-panel:focus {
+    /* Focus lands here on open purely to anchor the keyboard, so the ring would
+     * be noise -- the heading and fields are what the user reads. */
+    outline: none;
+}
+
+.modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 4px;
+}
+
+.modal-title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.modal-close {
+    flex-shrink: 0;
+    display: inline-flex;
+    padding: 4px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.modal-close:hover {
+    color: var(--accent-color);
+}
+
+/* =========================================================================
+ * Profile form, inside the modal. Reuses the login page's .auth-field /
+ * .auth-submit-btn / .auth-secondary-btn / .auth-error above -- they are the
+ * app's only form styling, and a second set would be a second thing to keep
+ * in step.
+ * ====================================================================== */
+
+.profile-modal-intro {
+    margin: 0 0 16px;
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+
+/* Fills in live as fields are completed (ProfileForm computes the width
+ * inline) -- five short inputs with no feedback reads as a wall of boxes;
+ * watching this move turns filling them in into a small, visible checklist. */
+.profile-form-progress {
+    height: 6px;
+    border-radius: 9999px;
+    background: var(--border-color);
+    overflow: hidden;
+    margin: 2px 0 6px;
+}
+
+.profile-form-progress-bar {
+    height: 100%;
+    border-radius: 9999px;
+    background: var(--primary-color);
+    transition: width 0.2s ease;
+}
+
+.profile-form-progress-label {
+    margin: 0 0 16px;
+    font-size: 15px;
+    color: var(--text-secondary);
+}
+
+/* District and State: one idea ("where"), one row. Halves the form's height
+ * without touching validation -- each stays its own .auth-field with its own
+ * error. Below 380px there is not enough room for two comfortable inputs
+ * side by side, so it drops back to stacked. */
+.profile-form-row {
+    display: flex;
+    gap: 12px;
+}
+
+.profile-form-row .auth-field {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+@media (max-width: 480px) {
+    .profile-form-row {
+        flex-direction: column;
+    }
+}
+
+/* Marks a field the API reported in `missing_fields`, so a dialog that opened
+ * by itself shows WHY it did. Only while still empty -- see ProfileForm. */
+.profile-field-missing input {
+    border-color: var(--accent-color);
+}
+
+.profile-form-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.profile-form-actions button {
+    /* Equal halves, so neither action reads as the default. Declining is a
+     * legitimate answer to an unprompted dialog. */
+    flex: 1 1 0;
+    margin: 0;
 }

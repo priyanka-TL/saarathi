@@ -1,3 +1,13 @@
+"""The in-process agent catalogue.
+
+Responsible for: holding the enabled agents and their active configs, reloading
+them on a TTL, and resolving a tenant's own config on top.
+Used by: routing, the agents router and the admin reload endpoint.
+
+The snapshot holds the DEFAULT scope. `resolve_for_scope` layers a tenant's own
+config over it -- every path that reads an agent for a caller must go through
+it, or one tenant is served another's configuration.
+"""
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 import time
@@ -7,13 +17,15 @@ from pydantic import TypeAdapter
 
 from app.core.logger import get_logger
 from app.domain.agent_spec import AgentSpec
+from app.domain.scope import DEFAULT_SCOPE, scope_for_user
+from app.repositories.scope_sql import (
+    scope_candidate_filter,
+    scope_precedence_order_by,
+)
 
 _agent_spec_adapter = TypeAdapter(AgentSpec)
 
 logger = get_logger("agent_registry")
-
-#: Matches migration 0006. The scope meaning "applies to every tenant".
-DEFAULT_SCOPE = "default"
 
 @dataclass
 class RegisteredAgent:
@@ -27,44 +39,43 @@ class RegisteredAgent:
     spec: AgentSpec
 
 class AgentRegistry:
-    def __init__(self, ttl_s: float = 60.0, mitra_enabled: bool = True):
+    def __init__(
+        self,
+        ttl_s: float = 60.0,
+        enabled_providers: Optional[frozenset] = None,
+    ):
         self._ttl_s = ttl_s
-        # MITRA_ENABLED=0 must hide every remote_flow agent, or the sidebar
-        # offers interviews nothing can serve and RemoteFlowAgentHandler raises
-        # at construction time.
+        # A disabled provider's agents are HIDDEN, or the sidebar offers
+        # conversations nothing can serve and the handler raises at click time.
+        # A runtime filter, not a DB write: a deployment switch has no business
+        # mutating tenant configuration.
         #
-        # This used to be a DB WRITE: ConfigSyncService forced those agents to
-        # status='disabled' at startup, and had to flip them back when the flag
-        # was re-enabled. That is gone with the YAML sync, and a runtime filter
-        # is the better home anyway -- a deployment-level switch has no business
-        # mutating rows that a tenant's configuration also lives in.
-        self._mitra_enabled = mitra_enabled
+        # KEYED ON THE PROVIDER, NOT ON THE AGENT TYPE. Gating by type is what
+        # forced a second delegated agent_type into existence when a second
+        # platform arrived -- two platforms sharing `remote_flow` could not be
+        # switched on independently. One set of provider names scales without a
+        # Postgres enum value per platform.
+        #
+        # None means "no filtering", which is what tests and any caller with no
+        # deployment opinion want; an empty frozenset really does hide every
+        # delegated agent.
+        self._enabled_providers = enabled_providers
         self._snapshot: Dict[str, RegisteredAgent] = {}
         self._legacy_names: Dict[str, str] = {}
         self._version: int = 0
         self._loaded_at: float = 0.0
         self._max_updated_at = None
-        # Keyed by (registry_version, tenant, org, agent_key), so a reload
-        # invalidates every scoped entry for free -- the version is part of the
-        # key, and stale entries age out when the cache is cleared on overflow.
+        # The registry version is part of the key, so a reload invalidates
+        # every scoped entry for free.
         self._scope_cache: Dict[tuple, "RegisteredAgent"] = {}
 
     def reload(self, session) -> int:
         try:
-            # Query enabled agents joined with their active DEFAULT-SCOPE
-            # configuration.
-            #
-            # THE SCOPE FILTER IS LOAD-BEARING, not decoration. Since migration
-            # 0006 an agent may have SEVERAL active configs -- one per
-            # (tenant_id, organization_id) -- so an unfiltered join returns one
-            # row per scope and the dict assignment below would keep whichever
-            # arrived last. That is non-deterministic, and it would let one
-            # tenant's configuration become the global snapshot every other
-            # tenant is served from.
-            #
-            # The snapshot is the DEFAULT scope, i.e. what a tenant sees when
-            # it has not customised anything. Tenant-specific configs are
-            # applied per request by resolve_for_scope() below.
+            # THE SCOPE FILTER IS LOAD-BEARING. An agent may have several
+            # active configs, one per (tenant, org); unfiltered, the dict
+            # assignment below keeps whichever row arrived last -- letting one
+            # tenant's configuration become the snapshot everyone is served
+            # from. resolve_for_scope() layers tenant configs on per request.
             query = text("""
                 SELECT a.id, a.key, a.name, a.description, a.agent_type, a.is_default, a.updated_at, c.config, c.checksum
                 FROM agents a
@@ -80,18 +91,9 @@ class AgentRegistry:
 
             skipped = []
             for row in result:
-                if row.agent_type == "remote_flow" and not self._mitra_enabled:
-                    continue
-                # PER-ROW, so ONE bad config costs ONE agent rather than all of
-                # them. That matters more than it used to: config is written
-                # through the API now, with no YAML validated at startup, so a
-                # row can predate a schema change. Letting it abort the whole
-                # loop meant the snapshot came back empty and `sync_and_reload`
-                # refused to boot -- one editable row able to take down every
-                # agent, including the ones it has nothing to do with.
-                #
-                # Same posture as resolve_for_scope, which already falls back
-                # rather than failing a turn.
+                # PER-ROW: one bad config costs one agent, not all of them.
+                # Aborting the loop left the snapshot empty and refused the
+                # boot -- one editable row able to take down every agent.
                 try:
                     spec = _agent_spec_adapter.validate_python(row.config)
                 except Exception as exc:  # noqa: BLE001
@@ -100,6 +102,10 @@ class AgentRegistry:
                         "AgentRegistry: skipping agent %r -- its active config does "
                         "not validate: %s", row.key, exc,
                     )
+                    continue
+                # AFTER validation, not before: the provider name lives inside
+                # the config, so the gate needs a parsed spec to read it.
+                if not self._provider_enabled(spec):
                     continue
                 agent = RegisteredAgent(
                     id=str(row.id),
@@ -122,7 +128,14 @@ class AgentRegistry:
             self._version += 1
             self._loaded_at = time.monotonic()
             self._max_updated_at = max_ts
-            logger.info(f"AgentRegistry reloaded version {self._version} with {len(self._snapshot)} agents")
+            logger.info(
+                "AgentRegistry reloaded",
+                extra={
+                    "registry_version": self._version,
+                    "agent_count": len(self._snapshot),
+                    "skipped_count": len(skipped),
+                },
+            )
             if skipped:
                 logger.warning(
                     "AgentRegistry: %s agent(s) EXCLUDED for an unparseable config: %s. "
@@ -133,7 +146,11 @@ class AgentRegistry:
             
         except Exception as e:
             # Failure to reload must LOG and keep the cached snapshot
-            logger.error(f"Failed to reload AgentRegistry: {e}. Keeping cached snapshot.")
+            logger.error(
+                "Failed to reload AgentRegistry: %s. Keeping cached snapshot.", e,
+                exc_info=True,
+                extra={"registry_version": self._version},
+            )
             
         return self._version
 
@@ -151,7 +168,10 @@ class AgentRegistry:
             else:
                 self._loaded_at = time.monotonic()
         except Exception as e:
-            logger.error(f"Failed to check for AgentRegistry updates: {e}")
+            logger.error(
+                "Failed to check for AgentRegistry updates: %s", e,
+                extra={"registry_version": self._version},
+            )
 
     @property
     def version(self) -> int:
@@ -159,7 +179,37 @@ class AgentRegistry:
 
     def routable(self) -> List[RegisteredAgent]:
         return [a for a in self._snapshot.values() if getattr(a.spec.routing, 'router_selectable', True)]
-        
+
+    def routable_for_user(self, session, user) -> List[RegisteredAgent]:
+        """Every routable agent this caller may actually select, scope-resolved.
+
+        Two steps that must stay together:
+
+        1. RESOLVE each agent for the caller's tenant/organization. The snapshot
+           holds the default scope, so a tenant that customised an agent would
+           otherwise be shown -- and access-checked against -- someone else's
+           configuration.
+        2. FILTER by the resolved spec's own AccessSpec, using the SAME
+           `AccessSpec.matches()` RouterService._visible calls.
+
+        Step 2 calling the same matcher as routing is the point. Listing an
+        agent the router would then refuse means the sidebar advertises
+        something that silently falls through to the default agent when clicked;
+        a second, separate access check here would be free to drift into exactly
+        that state.
+
+        Sorted by `sort_order`, which is the order the sidebar renders.
+        """
+        resolved = (
+            self.resolve_for_scope(session, agent, *scope_for_user(user))
+            for agent in self.routable()
+        )
+        return sorted(
+            (a for a in resolved if a.spec.access.matches(user)),
+            key=lambda a: a.spec.sort_order,
+        )
+
+
     _KEY_STRIP_CHARS = "'\" .,!?;:"
 
     def get_by_key_exact(self, key: Optional[str]) -> Optional[RegisteredAgent]:
@@ -192,6 +242,21 @@ class AgentRegistry:
             if agent.is_default:
                 return agent
         return None
+
+    def _provider_enabled(self, spec) -> bool:
+        """Whether this deployment serves the provider a spec names.
+
+        An `llm` agent has no provider and is never gated here. A delegated
+        agent is hidden when its `remote.provider` is not in the enabled set --
+        one line, however many platforms exist, because the set is the only
+        thing that grows.
+        """
+        if self._enabled_providers is None:
+            return True
+        remote = getattr(spec, "remote", None)
+        if remote is None:
+            return True
+        return remote.provider in self._enabled_providers
 
     # ------------------------------------------------------------------
     # Tenant-scoped resolution
@@ -238,17 +303,15 @@ class AgentRegistry:
         resolved = agent
         try:
             row = session.execute(
-                text("""
+                text(f"""
                     SELECT c.config, c.checksum
                     FROM agent_configs c
                     WHERE c.agent_id = :agent_id
                       AND c.is_active
-                      AND c.tenant_id IN (:tenant_id, :default_scope)
-                      AND c.organization_id IN (:organization_id, :default_scope)
+                      AND {scope_candidate_filter("c")}
                       AND NOT (c.tenant_id = :default_scope
                                AND c.organization_id = :default_scope)
-                    ORDER BY CASE WHEN c.organization_id = :organization_id THEN 0 ELSE 1 END,
-                             CASE WHEN c.tenant_id = :tenant_id THEN 0 ELSE 1 END
+                    ORDER BY {scope_precedence_order_by("c")}
                     LIMIT 1
                 """),
                 {

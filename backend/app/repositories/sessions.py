@@ -1,3 +1,12 @@
+"""Persistence for `agent_sessions`.
+
+Responsible for: the guarded UPDATEs behind every session state change.
+Used by: SessionService, which owns the state machine over them.
+
+The conditional UPDATEs are the concurrency control: matching zero rows means
+another request already moved the session, and the caller must treat that as a
+lost race rather than retrying.
+"""
 import uuid
 from datetime import datetime
 from typing import Optional, Iterable, List
@@ -80,8 +89,8 @@ class AgentSessionRepository:
         `language` is the agent's configured default. It used to fall through to
         the column's server_default ('en') on every session, which meant
         RemoteSpec.default_language was never read by anything -- an agent
-        configured for hi/kn/te still opened its Mitra channel with route='en',
-        because MitraChannel._authenticate sends this column's value.
+        configured for hi/kn/te still opened its channel with route='en',
+        because the provider's handshake frame sends this column's value.
         """
         row = AgentSession(
             conversation_id=conversation_id,

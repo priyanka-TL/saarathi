@@ -1,8 +1,15 @@
-"""Unit tests for RemoteFlowAgentHandler against faked REST client and pool.
+"""Unit tests for RemoteFlowAgentHandler, through a REAL provider.
 
 No DB, no network: only plain dataclasses and hand-rolled fakes. Mirrors
 tests/unit/test_llm_handler.py's style (real TurnContext/UserContext/
-AgentSessionView, only the Mitra-facing dependencies faked).
+AgentSessionView, only the outermost dependencies faked).
+
+THE PROVIDER IS REAL, and only its REST surface and channel pool are faked.
+That is deliberate: the handler got smaller in this refactor -- profile
+creation, the one re-establishment attempt and the completion poll all moved
+behind the provider -- so a test that faked the whole provider would assert
+almost nothing. Driving the real MitraProvider keeps every behaviour below
+pinned where a user would actually experience it.
 """
 from __future__ import annotations
 
@@ -17,16 +24,20 @@ from app.agents.protocol import AgentSessionView, SessionState, TurnContext, His
 from app.agents.remote_flow_handler import RemoteFlowAgentHandler
 from app.domain.core import UserContext
 from app.domain.agent_spec import (
-    MitraConnectionSpec,
-    MitraHandshakeSpec,
-    MitraTurnSpec,
     RemoteFlowAgentSpec,
     RemoteSpec,
+    RemoteTurnSpec,
     RoutingSpec,
 )
-from app.integrations.mitra.exceptions import MitraChannelClosed, MitraTurnTimeout
-from app.integrations.mitra.frame_parser import ParsedOption
-from app.integrations.mitra.ws_channel import BotTurn
+from app.providers.connection import resolve_connection
+from app.providers.errors import ProviderNotEnabled
+from app.providers.mitra.provider import MitraProvider
+from app.providers.mitra.spec import MitraOptions
+from tests.provider_factories import MITRA_ORIGIN_ENV, remote_dict
+from app.providers.errors import ProviderChannelClosed, ProviderTurnTimeout
+from app.providers.protocol import CompletionPoll
+from app.providers.ws_flow.frames import ParsedOption
+from app.providers.transport.ws import BotTurn
 
 
 # ---------------------------------------------------------------------------
@@ -37,23 +48,31 @@ from app.integrations.mitra.ws_channel import BotTurn
 class _FakeRestClient:
     def __init__(self):
         self.upsert_profile_calls = []
+        self.upsert_profile_extras = []
         self.generate_session_calls = 0
         self.is_session_completed_calls = []
+        self.known_counts = []
         self._profile_id = "profile-1"
         self._session_id = "remote-sess-1"
         self._completed = False
+        self._count = 7
 
-    def upsert_profile(self, email, latest_flow_used, company):
+    def upsert_profile(self, email, latest_flow_used, company, extra=None):
         self.upsert_profile_calls.append((email, latest_flow_used, company))
+        self.upsert_profile_extras.append(extra)
         return self._profile_id
 
     def generate_session(self):
         self.generate_session_calls += 1
         return self._session_id
 
-    def is_session_completed(self, session_id):
+    def is_session_completed(self, session_id, known_count=None):
+        # Records the CACHED COUNT it was given as well as the session id: the
+        # count is what turns a two-request poll into one, so a regression that
+        # stopped threading it through would otherwise be invisible here.
         self.is_session_completed_calls.append(session_id)
-        return self._completed
+        self.known_counts.append(known_count)
+        return CompletionPoll(done=self._completed, count=self._count)
 
     def finalize(self, *args, **kwargs):
         raise AssertionError("RemoteFlowAgentHandler must never call finalize()")
@@ -83,12 +102,12 @@ class _FakeSessionManager:
         self.acquire_calls = []
         self.reacquire_calls = []
 
-    def acquire(self, spec, sess, conn):
-        self.acquire_calls.append((spec, sess, conn))
+    def acquire(self, sess, conn, factory):
+        self.acquire_calls.append((sess, conn))
         return self._channels.pop(0)
 
-    def reacquire(self, spec, sess, conn):
-        self.reacquire_calls.append((spec, sess, conn))
+    def reacquire(self, sess, conn, factory):
+        self.reacquire_calls.append((sess, conn))
         return self._channels.pop(0)
 
 
@@ -113,11 +132,12 @@ _BASE_URL = "https://mitra.example.com"
 
 @dataclasses.dataclass
 class _Settings:
-    """What `resolve_connection` still reads from Settings: the Origin
-    credential and the SSRF ceiling. Nothing else about Mitra lives here."""
+    """The ONE thing `resolve_connection` still reads from Settings: the
+    operator's SSRF ceiling. The credentials come from the variables the config
+    row NAMES, not from a field here -- which is why adding a platform no
+    longer adds a Settings field."""
 
-    mitra_origin_url: str = "https://origin.example.com"
-    mitra_host_ceiling: str = ""
+    provider_host_ceiling: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -126,17 +146,15 @@ class _Settings:
 
 
 def _remote_spec(**overrides) -> RemoteFlowAgentSpec:
-    fields = dict(
-        provider="mitra",
-        flow_name="guest-mi-story",
-        bot_route="/test-bot-route",
-        company="test-company",
-        handshake=MitraHandshakeSpec(settle_ms=10),
-        turn=MitraTurnSpec(first_turn_timeout_ms=60000, turn_timeout_ms=45000, idle_gap_ms=8000),
-        connection=MitraConnectionSpec(
-            base_url=_BASE_URL, ws_url="wss://mitra.example.com/ws/common/"
-        ),
+    fields = remote_dict(
+        "mitra",
+        options={"bot_route": "/test-bot-route", "company": "test-company",
+                 "handshake": {"settle_ms": 10}},
     )
+    fields["turn"] = RemoteTurnSpec(
+        first_turn_timeout_ms=60000, turn_timeout_ms=45000, idle_gap_ms=8000,
+    )
+    fields["base_url"] = _BASE_URL
     # Merged rather than splatted alongside, so a test can override any of the
     # defaults above.
     fields.update(overrides)
@@ -151,7 +169,9 @@ def _remote_spec(**overrides) -> RemoteFlowAgentSpec:
     )
 
 
-def _session(remote_session_id: Optional[str] = None, step: int = 0) -> AgentSessionView:
+def _session(
+    remote_session_id: Optional[str] = None, step: int = 0, state_data: Optional[dict] = None,
+) -> AgentSessionView:
     return AgentSessionView(
         id=uuid.uuid4(),
         conversation_id=uuid.uuid4(),
@@ -167,7 +187,7 @@ def _session(remote_session_id: Optional[str] = None, step: int = 0) -> AgentSes
         result_ref=None,
         report_url=None,
         error=None,
-        state_data={},
+        state_data={} if state_data is None else state_data,
     )
 
 
@@ -184,22 +204,55 @@ def _ctx(text: str, session: AgentSessionView, history=None) -> TurnContext:
     )
 
 
-def _deps(rest, sessions, settings=None) -> HandlerDeps:
+def _provider(rest, pool, spec, settings=None):
+    """A REAL MitraProvider with its REST surface and pool substituted.
+
+    `__new__` rather than `__init__` because the real constructor would build a
+    live RestTransport; every method under test below is the real one.
+    """
+    provider = MitraProvider.__new__(MitraProvider)
+    options = MitraOptions(**spec.remote.options)
+    provider._conn = resolve_connection(settings or _Settings(), spec.remote, options)
+    provider._pool = pool
+    provider.options = options
+    provider._rest = rest
+    return provider
+
+
+class _Registry:
+    """Stands in for ProviderRegistry, recording the specs it was asked for so
+    a test can assert which endpoint the handler resolved."""
+
+    def __init__(self, provider):
+        self._provider = provider
+        self.requested = []
+
+    def get(self, remote):
+        self.requested.append(remote)
+        if self._provider is None:
+            raise ProviderNotEnabled(remote.provider)
+        return self._provider
+
+
+def _deps(rest, sessions, settings=None, spec=None) -> HandlerDeps:
+    spec = spec or _remote_spec()
+    provider = (
+        _provider(rest, sessions, spec, settings)
+        if rest is not None and sessions is not None else None
+    )
     return HandlerDeps(
         llm_factory=None,
         tool_registry=None,
-        # None rest means "Mitra not configured", which is now expressed as an
-        # absent registry rather than an absent client.
-        mitra_clients=_FakeClientRegistry(rest) if rest is not None else None,
-        mitra_sessions=sessions,
+        providers=_Registry(provider),
         settings=settings or _Settings(),
     )
 
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
-    monkeypatch.setenv("TEST_BOT_ROUTE", "/test-bot-route")
-    monkeypatch.setenv("TEST_COMPANY", "test-company")
+    # The credential the config row NAMES. Unset, resolving a connection is a
+    # ProviderConfigError by design -- there is no global to fall back to.
+    monkeypatch.setenv(MITRA_ORIGIN_ENV, "https://origin.example.com")
 
 
 # ---------------------------------------------------------------------------
@@ -207,14 +260,20 @@ def _env(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_constructor_raises_if_mitra_clients_is_none():
-    with pytest.raises(RuntimeError):
-        RemoteFlowAgentHandler(_remote_spec(), _deps(rest=None, sessions=_FakeSessionManager([])))
+def test_constructor_raises_if_the_provider_is_not_enabled():
+    """ONE guard, not one per platform. This used to be two hand-written
+    constructor checks -- one per platform, each naming its own settings --
+    and a third platform would have added a third."""
+    with pytest.raises(ProviderNotEnabled):
+        RemoteFlowAgentHandler(_remote_spec(), _deps(rest=None, sessions=None))
 
 
-def test_constructor_raises_if_mitra_sessions_is_none():
+def test_constructor_raises_without_a_provider_registry():
+    deps = HandlerDeps(
+        llm_factory=None, tool_registry=None, providers=None, settings=_Settings(),
+    )
     with pytest.raises(RuntimeError):
-        RemoteFlowAgentHandler(_remote_spec(), _deps(rest=_FakeRestClient(), sessions=None))
+        RemoteFlowAgentHandler(_remote_spec(), deps)
 
 
 def test_handle_raises_if_ctx_session_is_none():
@@ -280,7 +339,7 @@ def test_subsequent_turn_does_not_recreate_profile_or_session():
 
 def test_exactly_one_reestablishment_attempt_on_connection_loss():
     rest = _FakeRestClient()
-    failing_channel = _FakeChannel([MitraChannelClosed("dropped")])
+    failing_channel = _FakeChannel([ProviderChannelClosed("dropped")])
     retry_channel = _FakeChannel([BotTurn(text="recovered", options=[], step=3)])
     sessions = _FakeSessionManager([failing_channel, retry_channel])
     handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
@@ -295,13 +354,13 @@ def test_exactly_one_reestablishment_attempt_on_connection_loss():
 
 def test_second_connection_loss_is_not_retried_again():
     rest = _FakeRestClient()
-    failing_channel = _FakeChannel([MitraChannelClosed("dropped")])
-    also_failing_channel = _FakeChannel([MitraChannelClosed("dropped again")])
+    failing_channel = _FakeChannel([ProviderChannelClosed("dropped")])
+    also_failing_channel = _FakeChannel([ProviderChannelClosed("dropped again")])
     sessions = _FakeSessionManager([failing_channel, also_failing_channel])
     handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
 
     ctx = _ctx("Priya", session=_session(remote_session_id="already-set", step=2))
-    with pytest.raises(MitraChannelClosed):
+    with pytest.raises(ProviderChannelClosed):
         handler.handle(ctx)
 
     assert len(sessions.acquire_calls) == 1
@@ -310,12 +369,12 @@ def test_second_connection_loss_is_not_retried_again():
 
 def test_other_exceptions_are_not_retried():
     rest = _FakeRestClient()
-    channel = _FakeChannel([MitraTurnTimeout(step=1)])
+    channel = _FakeChannel([ProviderTurnTimeout(step=1)])
     sessions = _FakeSessionManager([channel])
     handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
 
     ctx = _ctx("Priya", session=_session(remote_session_id="already-set"))
-    with pytest.raises(MitraTurnTimeout):
+    with pytest.raises(ProviderTurnTimeout):
         handler.handle(ctx)
     assert len(sessions.reacquire_calls) == 0
 
@@ -385,12 +444,98 @@ def test_incomplete_session_returns_not_terminal_and_awaiting_user():
     assert turn.session_delta.state == SessionState.awaiting_user
 
 
+# ---------------------------------------------------------------------------
+# The completion poll's cached row count: two HTTP calls per turn become one
+# ---------------------------------------------------------------------------
+#
+# The provider learns a row count while polling and hands it back as an OPAQUE
+# patch; the handler remembers it on the session and the provider reads it again
+# next turn to seek straight to the tail. These tests cover the handler's half:
+# it must merge rather than overwrite, and it must not look inside the patch.
+
+
+def test_the_polls_row_count_is_remembered_on_the_session():
+    """The round trip that removes an HTTP call from every remote turn. Without
+    this the provider is handed no `known_count` next turn and pays the two-call
+    cold path forever -- which is the behaviour, and the ~350 ms, this replaced.
+    """
+    rest = _FakeRestClient()
+    rest._count = 42
+    channel = _FakeChannel([BotTurn(text="ok", options=[], step=1)])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    turn = handler.handle(_ctx("go", session=_session(remote_session_id="already-set")))
+
+    assert turn.session_delta.state_data == {"mitra": {"chat_count": 42}}
+
+
+def test_a_remembered_count_is_handed_back_to_the_provider_next_turn():
+    rest = _FakeRestClient()
+    channel = _FakeChannel([BotTurn(text="ok", options=[], step=1)])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    handler.handle(_ctx("go", session=_session(
+        remote_session_id="already-set",
+        state_data={"mitra": {"chat_count": 18}},
+    )))
+
+    assert rest.known_counts == [18]
+
+
+def test_the_cache_does_not_trample_other_session_state():
+    """A MERGE, NOT AN ASSIGNMENT. `SessionService.apply` writes `state_data`
+    wholesale, so returning the provider's patch alone would silently delete
+    every other key the column holds."""
+    rest = _FakeRestClient()
+    rest._count = 9
+    channel = _FakeChannel([BotTurn(text="ok", options=[], step=1)])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    turn = handler.handle(_ctx("go", session=_session(
+        remote_session_id="already-set",
+        state_data={"something_else": {"kept": True}, "mitra": {"chat_count": 2}},
+    )))
+
+    assert turn.session_delta.state_data == {
+        "something_else": {"kept": True},
+        "mitra": {"chat_count": 9},
+    }
+
+
+@pytest.mark.parametrize("stored", [
+    {"mitra": {"chat_count": "18"}},   # a string where an int belongs
+    {"mitra": {"chat_count": -1}},     # a negative offset
+    {"mitra": {"chat_count": True}},   # a bool, which int() would happily accept
+    {"mitra": "not-a-dict"},
+    {"mitra": {}},
+    {},
+])
+def test_a_malformed_cache_is_treated_as_absent(stored):
+    """A bad cache must cost a round trip, NEVER a wrong `terminal`. A wrong
+    False leaves the interview unfinalised with no report and no way for the user
+    to recover; a wrong True ends it early."""
+    rest = _FakeRestClient()
+    channel = _FakeChannel([BotTurn(text="ok", options=[], step=1)])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    handler.handle(_ctx("go", session=_session(
+        remote_session_id="already-set", state_data=stored,
+    )))
+
+    assert rest.known_counts == [None]
+
+
 def test_completion_poll_every_turn_false_never_polls():
     rest = _FakeRestClient()
     channel = _FakeChannel([BotTurn(text="ok", options=[], step=1)])
     sessions = _FakeSessionManager([channel])
-    spec = _remote_spec(completion_poll_every_turn=False)
-    handler = RemoteFlowAgentHandler(spec, _deps(rest, sessions))
+    spec = _remote_spec(options={"bot_route": "/test-bot-route", "company": "test-company",
+                          "completion_poll_every_turn": False})
+    handler = RemoteFlowAgentHandler(spec, _deps(rest, sessions, spec=spec))
 
     turn = handler.handle(_ctx("go", session=_session(remote_session_id="already-set")))
 
@@ -429,9 +574,10 @@ def test_bot_route_and_company_come_from_the_spec_not_the_environment(monkeypatc
     monkeypatch.setenv("MITRA_STORY_BOT_ROUTE", "/env-bot-route")
     rest = _FakeRestClient()
     sessions = _FakeSessionManager([_FakeChannel([BotTurn(text="hi", options=[], step=1)])])
-    spec = _remote_spec(bot_route="/tenant_bot", company="tenant-company")
+    spec = _remote_spec(options={"bot_route": "/tenant_bot", "company": "tenant-company",
+                                 "handshake": {"settle_ms": 10}})
 
-    handler = RemoteFlowAgentHandler(spec, _deps(rest, sessions))
+    handler = RemoteFlowAgentHandler(spec, _deps(rest, sessions, spec=spec))
     turn = handler.handle(_ctx("go", session=_session(remote_session_id=None)))
 
     assert rest.upsert_profile_calls[0][2] == "tenant-company"
@@ -445,9 +591,9 @@ def test_two_scopes_of_the_same_agent_use_their_own_companies():
     for company, route in (("tenant-a", "/bot_a"), ("tenant-b", "/bot_b")):
         rest = _FakeRestClient()
         sessions = _FakeSessionManager([_FakeChannel([BotTurn(text="hi", options=[], step=1)])])
-        handler = RemoteFlowAgentHandler(
-            _remote_spec(company=company, bot_route=route), _deps(rest, sessions),
-        )
+        spec = _remote_spec(options={"company": company, "bot_route": route,
+                                     "handshake": {"settle_ms": 10}})
+        handler = RemoteFlowAgentHandler(spec, _deps(rest, sessions, spec=spec))
         turn = handler.handle(_ctx("go", session=_session(remote_session_id=None)))
         profiles.append((rest.upsert_profile_calls[0][2], turn.session_delta.remote_bot_route))
 
@@ -459,9 +605,14 @@ def test_an_empty_company_or_bot_route_is_rejected_at_validation():
     silently resolves the wrong CompanyBot or splits a user's profile."""
     import pydantic
 
+    # Enforced by the PROVIDER's own options model now, which is where the
+    # knowledge that these two exist belongs.
+    from app.providers.mitra.spec import MitraOptions
+
     for field in ("company", "bot_route"):
+        base = {"company": "c", "bot_route": "/r"}
         with pytest.raises(pydantic.ValidationError):
-            _remote_spec(**{field: ""})
+            MitraOptions(**{**base, field: ""})
 
 
 # ---------------------------------------------------------------------------
@@ -473,21 +624,19 @@ def test_a_connection_override_reaches_both_the_client_and_the_channel_pool():
     rest = _FakeRestClient()
     sessions = _FakeSessionManager([_FakeChannel([BotTurn(text="hi", options=[], step=1)])])
     spec = _remote_spec(
-        connection=MitraConnectionSpec(
-            base_url="https://tenant-mitra.example.com",
-            ws_url="wss://tenant-mitra.example.com/ws/common/",
-        ),
+        base_url="https://tenant-remote.example.com",
+        stream_url="wss://tenant-remote.example.com/ws/common/",
     )
 
-    deps = _deps(rest, sessions)
+    deps = _deps(rest, sessions, spec=spec)
     handler = RemoteFlowAgentHandler(spec, deps)
     handler.handle(_ctx("go", session=_session(remote_session_id="already-set")))
 
-    # The REST client was requested for the tenant's endpoint...
-    assert deps.mitra_clients.requested[0].base_url == "https://tenant-mitra.example.com"
-    # ...and the SAME connection was handed to the channel pool, so the socket
-    # and the REST calls cannot disagree about which Mitra this is.
-    assert sessions.acquire_calls[0][2] is handler._conn
+    # The provider was resolved for the tenant's endpoint...
+    assert deps.providers.requested[0].base_url == "https://tenant-remote.example.com"
+    # ...and the SAME connection reached the channel pool, so the socket and the
+    # REST calls cannot disagree about which deployment this is.
+    assert sessions.acquire_calls[0][1] is handler._provider._conn
 
 
 def test_the_endpoint_comes_from_the_spec_not_from_settings():
@@ -499,4 +648,73 @@ def test_the_endpoint_comes_from_the_spec_not_from_settings():
     deps = _deps(rest, sessions)
     RemoteFlowAgentHandler(_remote_spec(), deps)
 
-    assert deps.mitra_clients.requested[0].base_url == _BASE_URL
+    assert deps.providers.requested[0].base_url == _BASE_URL
+
+
+# ---------------------------------------------------------------------------
+# Downloadable documents reach the turn
+# ---------------------------------------------------------------------------
+
+
+def test_documents_are_carried_from_the_provider_to_the_agent_turn():
+    from app.providers.transport.frames import Attachment as ProviderAttachment
+
+    rest = _FakeRestClient()
+    channel = _FakeChannel([BotTurn(
+        text="Your plan is ready.",
+        options=[],
+        attachments=[
+            ProviderAttachment("plan", "pdf", "application/pdf", "https://files.mitra.test/p.pdf"),
+            ProviderAttachment("plan", "docx", "application/msword", "https://files.mitra.test/p.docx"),
+        ],
+        step=1,
+    )])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    turn = handler.handle(_ctx("go", session=_session(remote_session_id="already-set")))
+
+    assert [(a.format, a.url) for a in turn.attachments] == [
+        ("pdf", "https://files.mitra.test/p.pdf"),
+        ("docx", "https://files.mitra.test/p.docx"),
+    ]
+    assert turn.attachments[0].media_type == "application/pdf"
+    # They are NOT options -- an option is click-to-reply and would post the
+    # URL back to the agent as user input.
+    assert turn.options == []
+
+
+def test_a_turn_with_no_documents_carries_an_empty_list():
+    rest = _FakeRestClient()
+    channel = _FakeChannel([BotTurn(text="just talking", options=[], step=1)])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    turn = handler.handle(_ctx("hi", session=_session(remote_session_id="already-set")))
+
+    assert turn.attachments == []
+
+
+def test_a_document_on_a_host_the_agent_does_not_allow_is_dropped():
+    """End to end through the handler: `remote.allowed_hosts` is what decides
+    whether a link is surfaced at all, and a rejected one costs the button
+    rather than the turn."""
+    from app.providers.transport.frames import Attachment as ProviderAttachment
+
+    rest = _FakeRestClient()
+    channel = _FakeChannel([BotTurn(
+        text="Your plan is ready.",
+        options=[],
+        attachments=[
+            ProviderAttachment("plan", "pdf", "application/pdf", "https://elsewhere.test/p.pdf"),
+            ProviderAttachment("plan", "docx", "application/msword", "https://files.mitra.test/p.docx"),
+        ],
+        step=1,
+    )])
+    sessions = _FakeSessionManager([channel])
+    handler = RemoteFlowAgentHandler(_remote_spec(), _deps(rest, sessions))
+
+    turn = handler.handle(_ctx("go", session=_session(remote_session_id="already-set")))
+
+    assert [a.format for a in turn.attachments] == ["docx"]
+    assert turn.text == "Your plan is ready.", "the reply survives a dropped link"

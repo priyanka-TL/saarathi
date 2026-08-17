@@ -1,73 +1,18 @@
-"""The whole schema, in one file.
+"""The SQLAlchemy schema -- all nine tables.
 
-NINE TABLES, ONE MIGRATION EACH
--------------------------------
-`migrations/versions/0001`-`0009` create exactly one table apiece, in foreign
-key dependency order, and `0010` seeds the default catalogue. There are no
-ALTER migrations: this schema was built on a fresh database, so anything the
-old nine-migration history used to patch in later is simply part of the
-CREATE TABLE now. Keep it that way -- a new table gets a new numbered
-migration, and a column change gets one too, but neither should be folded into
-an existing file once it has been applied anywhere.
+Responsible for: the ORM mapping. The MIGRATIONS are the source of truth for
+what is actually in the database; this mirrors them.
+Used by: repositories, and Alembic's autogenerate comparison.
 
-THE AUDIT BLOCK
----------------
-Every table carries the same four columns:
+CHECK CONSTRAINTS ARE DECLARED WITH A BARE SUFFIX (`name="locale"`), here and in
+the migrations. The naming convention interpolates `%(constraint_name)s`, so a
+qualified name gets double-prefixed -- that is what produced
+`ck_conversations_ck_conversations_conv_locale`. uq/fk/pk/ix names are written
+out in full and used verbatim.
 
-    created_by / updated_by   the acting principal, as a STRING
-    created_at / updated_at   timestamptz, server-defaulted to now()
-
-`created_by`/`updated_by` are NOT foreign keys and never will be, for the same
-reason `tenant_code` and `tenant_id` are not: users are the user service's
-records, and these columns hold values that arrive as JWT claims. The vocabulary
-is small and deliberate:
-
-    UserContext.user_id   a user-initiated write (a turn, a conversation)
-    the admin's user_id   an admin route write
-    'system'              a machine write with no user behind it: the 0010 seed,
-                          idle sweeps, the boot-time capability seed. Also the
-                          server default, so a writer that forgets says
-                          something true rather than something wrong.
-
-On the two append-only tables (`conversation_messages`, `audit_logs`)
-`updated_at` always equals `created_at` and `updated_by` always equals
-`created_by`. They are present anyway: a uniform audit block that a reader can
-rely on without checking is worth more than four saved columns.
-
-THE DEFAULT SCOPE
------------------
-Every scoped row (`agents`, `agent_configs`, `capabilities`) carries `tenant_id`
-+ `organization_id`, NOT NULL, defaulting to the literal 'default'. A 'default'
-row is what every tenant sees until a more specific row exists, so onboarding a
-tenant needs no writes and shipping a capability to everyone is one insert.
-Resolution is most-specific-wins:
-
-    (tenant, org)  >  (tenant, 'default')  >  ('default', 'default')
-
-A sentinel string rather than NULL, deliberately: NULL would make every scope
-unique constraint a partial index (NULLs do not compare equal in Postgres) and
-every lookup an IS NOT DISTINCT FROM.
-
-CONSTRAINT NAMING
------------------
-`NAMING` below is applied by Alembic at `op.create_table()` time as well as by
-the ORM. For the "ck" key it interpolates `%(constraint_name)s`, which means a
-CHECK constraint's explicit name is treated as the SUFFIX and gets prefixed --
-so CHECKs are declared here and in the migrations with a BARE suffix
-(`"locale"`, not `"ck_conversations_locale"`) and render as
-`ck_conversations_locale` exactly once. The uq/fk/pk/ix conventions do not
-interpolate a constraint name, so those are written out in full and are used
-verbatim. Getting this backwards is what produced the previous schema's
-`ck_conversations_ck_conversations_conv_locale`.
-
-WHY SOME `agent_id` COLUMNS HAVE NO `ForeignKey()`
---------------------------------------------------
-`AgentSession.agent_id` and `ToolExecution.agent_id` are bare UUID columns here
-while the real FK is declared in their migrations. The two disagree on purpose:
-the migrations set `ondelete` policies (RESTRICT for a live session, SET NULL
-for a historical tool trace) that differ per table, and letting the ORM emit its
-own `ForeignKey()` would mean two places to keep in step. The migration is the
-one in force.
+SOME `agent_id` COLUMNS HAVE NO ForeignKey() here on purpose: their migrations
+set per-table `ondelete` policies, and letting the ORM emit its own would mean
+two places to keep in step. The migration is the one in force.
 """
 from datetime import datetime
 import enum
@@ -79,6 +24,12 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 import sqlalchemy as sa
 
+#: The sentinel meaning "applies to every tenant / every organization".
+#: Declared once in app/domain/scope.py; re-exported from this module because
+#: the column defaults below read it and `from app.models.orm import
+#: DEFAULT_SCOPE` is an established import path.
+from app.domain.scope import DEFAULT_SCOPE  # noqa: F401  (re-exported)
+
 NAMING = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",
@@ -86,9 +37,6 @@ NAMING = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
-
-#: The sentinel meaning "applies to every tenant / every organization".
-DEFAULT_SCOPE = "default"
 
 #: The `created_by` / `updated_by` value for a write with no user behind it.
 SYSTEM_ACTOR = "system"
@@ -545,6 +493,10 @@ class ConversationMessage(AuditMixin, Base):
     # interaction affordances
     options: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     selected_option_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Downloadable documents this reply produced. NOT options: an option is
+    # click-to-reply, so a URL there would be posted back as user input. One
+    # entry per file, so a document offered as PDF and DOCX is two entries.
+    attachments: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
     # telemetry
     model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -554,16 +506,49 @@ class ConversationMessage(AuditMixin, Base):
     error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     request_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # How a turn DELEGATED over a WebSocket ended, and when its fragments
+    # arrived. All NULL for an `llm` agent, for every user row, and for a turn
+    # recovered from a timeout rather than heard -- so `ws_end_reason IS NOT NULL`
+    # is what selects the turns this telemetry describes.
+    #
+    # `latency_ms` alone cannot separate "the platform thought for nine seconds"
+    # from "it answered in one and we then waited out an eight-second idle gap".
+    # `ws_end_reason` is the field that can, and `latency_ms - ws_last_frame_ms`
+    # is what the second case cost. See migration 0014.
+    ws_end_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ws_first_frame_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ws_last_frame_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ws_fragments: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     __table_args__ = (
         UniqueConstraint("conversation_id", "seq", name="uq_conversation_messages_seq"),
         CheckConstraint("seq > 0", name="seq"),
         CheckConstraint("role <> 'assistant' OR agent_id IS NOT NULL", name="assistant_attribution"),
         CheckConstraint("options IS NULL OR role = 'assistant'", name="options_only_assistant"),
+        CheckConstraint("attachments IS NULL OR role = 'assistant'", name="attachments_only_assistant"),
         CheckConstraint("COALESCE(prompt_tokens, 0) >= 0 AND COALESCE(completion_tokens, 0) >= 0",
                         name="tokens"),
         CheckConstraint("COALESCE(latency_ms, 0) >= 0", name="latency"),
         CheckConstraint("route_confidence IS NULL OR (route_confidence >= 0 AND route_confidence <= 1)",
                         name="confidence"),
+        # The three values TurnEnd can produce. Pinned so a typo in a future
+        # writer fails at the row rather than becoming a fourth category in the
+        # reporting query. Must stay in step with
+        # app.providers.transport.frames.TurnEnd and migration 0014.
+        CheckConstraint(
+            "ws_end_reason IS NULL OR "
+            "ws_end_reason IN ('finish_reason', 'idle_gap', 'turn_timeout')",
+            name="ws_end_reason"),
+        CheckConstraint(
+            "(ws_end_reason IS NULL AND ws_first_frame_ms IS NULL "
+            " AND ws_last_frame_ms IS NULL AND ws_fragments IS NULL) "
+            "OR role = 'assistant'",
+            name="ws_only_assistant"),
+        CheckConstraint(
+            "COALESCE(ws_first_frame_ms, 0) >= 0 "
+            "AND COALESCE(ws_last_frame_ms, 0) >= 0 "
+            "AND COALESCE(ws_fragments, 0) >= 0",
+            name="ws_timings"),
         Index("ix_conversation_messages_conversation_seq", "conversation_id", "seq"),
         Index("ix_conversation_messages_agent_time", "agent_id", sa.text("created_at DESC")),
         Index("ix_conversation_messages_request", "request_id",

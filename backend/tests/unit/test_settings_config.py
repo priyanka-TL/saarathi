@@ -9,8 +9,7 @@ from __future__ import annotations
 import pytest
 
 from app.core.settings import Settings
-from app.domain.agent_spec import MitraConnectionSpec, MitraPathsSpec
-from app.integrations.mitra.rest_client import MitraPaths
+from app.providers.mitra.spec import MitraOptions, MitraPaths
 
 
 def _settings(**overrides) -> Settings:
@@ -59,7 +58,7 @@ def test_server_binding_is_configurable():
 
 
 # ---------------------------------------------------------------------------
-# Settings carries NO Mitra connection fields any more
+# Settings carries NO per-platform fields any more
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
@@ -70,59 +69,142 @@ def test_server_binding_is_configurable():
         "mitra_ip_city", "mitra_ip_state", "mitra_ip_zip",
         "mitra_profile_path", "mitra_generate_session_path", "mitra_chat_path",
         "mitra_get_story_path", "mitra_finalize_v1_path", "mitra_finalize_v2_path",
+        # Retired with the second delegated agent type. Enablement is per
+        # provider now (PROVIDERS_ENABLED), and everything else below moved into
+        # `remote` on the agent config row where it is per tenant.
+        "mitra_enabled", "saathi_enabled",
+        "mitra_host_ceiling", "mitra_max_open_channels", "mitra_idle_close_s",
+        "saathi_login_mechanism", "saathi_tenant_code",
+        # NOTE: `elevate_base_url` used to be on this list and has deliberately
+        # been taken off it. What was retired was Saathi's PER-AGENT login
+        # endpoint, which is per tenant and so belongs on the config row. The
+        # field is back under the same name as a different thing: the base URL
+        # of the one first-party ELEVATE user service behind /api/profile, which
+        # is a property of the deployment and carries no credential -- the
+        # profile is read and written with the caller's own token. See the note
+        # in .env.example, and test_the_structural_provider_fields_remain below.
+        # CREDENTIALS. Still in .env -- but named by `remote.auth`, never held as
+        # a Settings field, so adding a platform adds no field here.
+        "mitra_origin_url", "saathi_origin_url",
+        "saathi_access_token", "saathi_email", "saathi_password",
     ],
 )
 def test_the_moved_fields_are_gone_from_settings(field):
-    # They live in `remote.connection` on the agent config now. extra="ignore"
-    # means a leftover key in a .env is accepted silently, so this is the only
-    # place that can catch one being quietly reintroduced.
+    # extra="ignore" means a leftover key in a .env is accepted silently, so
+    # this is the only place that can catch one being quietly reintroduced.
     assert field not in Settings.model_fields
 
 
-def test_the_four_structural_mitra_fields_remain():
-    # Each is here for a reason that rules out a config row: a flag read before
-    # any config loads, a credential, an SSRF backstop ON config, and the bounds
-    # of one process-wide pool shared by every agent.
-    for field in ("mitra_enabled", "mitra_origin_url", "mitra_host_ceiling",
-                  "mitra_max_open_channels", "mitra_idle_close_s"):
+def test_the_structural_provider_fields_remain():
+    # Each is here for a reason that rules out a config row: a switch read
+    # before any config loads, an SSRF backstop ON config, and the bounds of one
+    # pool per provider shared by every agent using it.
+    for field in ("providers_enabled", "provider_host_ceiling",
+                  "provider_max_open_channels", "provider_idle_close_s"):
         assert field in Settings.model_fields
+
+
+def test_the_elevate_user_service_is_configurable_and_off_by_default():
+    """The profile feature's one required key, plus its split timeouts.
+
+    None is the only safe default: there is no sensible fallback host for a
+    user-data write, and an unset value degrades to 503 PROFILE_UNAVAILABLE at
+    request time rather than failing the boot -- so upgrading a deployment that
+    never sets it changes nothing.
+    """
+    # The FIELD DEFAULT, not a constructed instance: a real environment
+    # variable outranks the default, and tests/conftest.py sets
+    # ELEVATE_BASE_URL to an unresolvable host for the whole suite. Asserting
+    # through `_settings()` here would pin conftest's value, not the default.
+    assert Settings.model_fields["elevate_base_url"].default is None
+    assert _settings(elevate_base_url="https://elevate.example").elevate_base_url == (
+        "https://elevate.example"
+    )
+    # Split, not one combined budget: a request holds a worker thread for its
+    # whole life, so a dead DNS must not park one for the full read budget.
+    #
+    # And TIGHTER than the Bhashini equivalents (10/30): PATCH /api/profile
+    # makes three sequential ELEVATE calls, so these compound. At 5/10 the
+    # three-call worst case stays below what a single call used to allow.
+    assert Settings.model_fields["elevate_connect_timeout"].default == 5.0
+    assert Settings.model_fields["elevate_read_timeout"].default == 10.0
+    assert (
+        Settings.model_fields["elevate_read_timeout"].default
+        < Settings.model_fields["bhashini_read_timeout"].default
+    )
+
+
+def test_there_is_no_second_switch_for_the_profile_popup():
+    """Whether the completion popup shows is a FRONTEND decision.
+
+    APPLICATION_PROFILE_POPUP_ENABLED owns it. A backend flag beside it would
+    let the two disagree, and the popup would be un-disableable from the place
+    that actually renders it.
+    """
+    assert "profile_popup_enabled" not in Settings.model_fields
+    assert "profile_enabled" not in Settings.model_fields
+
+
+def test_enablement_is_one_key_however_many_platforms_exist():
+    """The point of the rename. Two platforms meant two flags and three gates;
+    a third would have meant three flags and nine."""
+    # `saarthi_admin_enabled` is THIS APP's own admin surface (SAARTHI, with
+    # the R) and `voice_enabled` is a feature of it -- neither is a remote
+    # platform. Worth spelling out: SAARTHI_*, SAATHI_* and MITRA_* are three
+    # different things one character apart, and conflating the first two is how
+    # a reader ends up "generalising" the app's own auth switch.
+    not_a_platform = {"voice_enabled", "auth_check", "saarthi_admin_enabled"}
+    per_platform = [
+        f for f in Settings.model_fields
+        if f.endswith("_enabled") and f not in not_a_platform
+    ]
+    assert per_platform == ["providers_enabled"], (
+        f"a per-platform enable flag has reappeared: {per_platform}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Mitra paths
 # ---------------------------------------------------------------------------
 
-def test_the_spec_defaults_match_the_clients_defaults():
-    """MitraPathsSpec restates MitraPaths' defaults because the domain layer is
-    import-pure (.importlinter) and cannot import them. Nothing but this test
-    keeps the two copies honest, and a drift would repoint an endpoint for every
-    config that does not name it explicitly."""
-    spec, client = MitraPathsSpec(), MitraPaths()
-    for name in ("profile", "generate_session", "chat", "get_story",
-                 "finalize_v1", "finalize_v2"):
-        assert getattr(spec, name) == getattr(client, name), name
+def test_there_is_now_only_one_copy_of_the_paths():
+    """The duplicate this test used to police is GONE.
+
+    The domain layer restated these six paths because it is import-pure and
+    could not import the client's copy; nothing but a test kept the two honest,
+    and a drift would have repointed an endpoint for every config that did not
+    name one explicitly. They live in the provider package now -- one copy, next
+    to the client that uses it -- so the drift is not possible rather than
+    merely detected.
+    """
+    from app.domain import agent_spec
+
+    for name in dir(agent_spec):
+        assert "PATH" not in name.upper() or name == "DEFAULT_REPORT_MEDIA_TYPE", (
+            f"app.domain.agent_spec has grown a provider path constant: {name}"
+        )
 
 
 def test_mitra_paths_default_to_the_shipped_contract():
-    assert MitraPathsSpec().finalize_v2 == "/api/end-story/v2/"
     assert MitraPaths().finalize_v2 == "/api/end-story/v2/"
 
 
 def test_mitra_paths_follow_the_agent_config():
-    conn = MitraConnectionSpec(
-        base_url="https://mitra.example.com",
-        ws_url="wss://mitra.example.com/ws/common/",
+    options = MitraOptions(
+        bot_route="/guided_guest",
+        company="testco",
         paths={"finalize_v2": "/api/end-story/v3/"},
     )
-    assert conn.paths.finalize_v2 == "/api/end-story/v3/"
+    assert options.paths.finalize_v2 == "/api/end-story/v3/"
     # The five it did not name keep the contract defaults.
-    assert conn.paths.finalize_v1 == "/api/end-story/"
+    assert options.paths.finalize_v1 == "/api/end-story/"
 
 
-def test_a_connection_spec_requires_an_endpoint():
-    # No env floor behind it: a missing base_url has nothing to fall back to.
+def test_the_options_block_is_strict():
+    """A mistyped option must not be dropped in silence and take a default --
+    for a finalize endpoint that is an HTTP 200 and a blank PDF."""
     with pytest.raises(ValueError):
-        MitraConnectionSpec(ws_url="wss://mitra.example.com/ws/common/")
+        MitraOptions(bot_route="/r", company="c", finalize_pathh="/api/end-story/")
 
 
 def test_is_v2_finalize_ignores_trailing_slashes():

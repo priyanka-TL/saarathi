@@ -187,10 +187,19 @@ still says something true.
 ### 2. One migration per table
 
 `migrations/versions/0001`-`0009` create exactly one table each, in foreign key
-dependency order, and `0010` seeds the default catalogue. There are no ALTER
-migrations: every constraint, index and column a table needs is in its own
-`CREATE TABLE`. A future schema change gets a **new** numbered migration -- never
-an edit to one that has already been applied.
+dependency order, and `0010` seeds the default catalogue. Every constraint,
+index and column those nine tables need is in its own `CREATE TABLE`.
+
+A schema change to an applied table gets a **new** numbered migration -- never
+an edit to one that has already been applied. `0014` is such a migration: it
+adds `attachments` and four `ws_*` diagnostic columns to
+`conversation_messages`, which `0007` created.
+
+The rule protects APPLIED migrations specifically, because alembic tracks by
+revision id: deleting or renumbering a revision strands every database whose
+`alembic_version` still names it. Migrations that are pending everywhere carry
+no such constraint, and `0014`-`0018` were consolidated down from fourteen
+files on exactly that basis.
 
 ---
 

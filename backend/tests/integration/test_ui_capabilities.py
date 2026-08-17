@@ -14,13 +14,14 @@ so what this route answers IS the sidebar. Two things are pinned here.
    onboarding costs zero writes -- and a tenant's own row shadows the default
    for that tenant ONLY.
 
-READING THE DOCUMENT FOR A SPECIFIC TENANT. Identity is resolved once from
-configuration, not per request (app/dependencies/identity.py -- there is no
-login flow upstream of this API that could supply a caller-specific token), so
-an HTTP client cannot be made to look like a different tenant's browser. The
-scope-resolution tests below call `resolve_for_user` directly instead -- the
-exact function this route calls -- which is what actually proves the
-precedence rule, independent of how a caller's tenant reaches it.
+READING THE DOCUMENT FOR A SPECIFIC TENANT. Identity IS resolved per request
+now (app/dependencies/identity.py), from whatever bearer token a caller sends
+-- an HTTP client minting its own signed token absolutely can look like a
+different tenant's browser (see tests/integration/test_identity_per_request.py).
+The scope-resolution tests below still call `resolve_for_user` directly,
+though, because that is the exact function this route calls and proving the
+precedence rule against it directly is simpler than minting a token per
+tenant just to reach the same code one HTTP hop later.
 """
 from __future__ import annotations
 
@@ -152,6 +153,16 @@ def _by_id(document, key):
 
 
 def test_serves_the_seeded_catalogue(client):
+    """The default-scope catalogue, in display order.
+
+    A PIN, not a golden fixture: seeding a new capability is expected to fail
+    this once, and the list is then updated deliberately.
+
+    `saathi_assistant` is ABSENT here because the suite runs with
+    SAATHI_ENABLED unset: its only agent is filtered out by the provider gate,
+    and an active card with no agents is hidden rather than rendered as a dead
+    end. test_an_active_card_with_no_agents_is_hidden covers that directly.
+    """
     body = _doc(client)
     assert body["version"] == 1
     assert _ids(body) == ["listening_at_scale", "sg_commons"]
@@ -206,9 +217,15 @@ def test_membership_can_only_name_real_agents(client, interview_agents_enabled):
 
 def test_a_tenant_with_no_rows_inherits_the_default_catalogue():
     """Onboarding a tenant costs zero writes -- the headline property of the
-    default-scope model."""
+    default-scope model.
+
+    Includes `saathi_assistant`, unlike the client-based test above:
+    `_document_for` calls resolve_for_user directly, whose provider gates
+    DEFAULT to enabled, where the HTTP route passes the real settings (and the
+    suite runs with SAATHI_ENABLED unset).
+    """
     newcomer = _document_for(f"t_{uuid.uuid4().hex[:8]}")
-    assert _ids(newcomer) == ["listening_at_scale", "sg_commons"]
+    assert _ids(newcomer) == ["listening_at_scale", "saathi_assistant", "sg_commons"]
 
 
 def test_a_tenant_row_shadows_the_default_for_that_tenant_only(scoped):
@@ -299,12 +316,130 @@ def test_an_empty_catalogue_is_200_with_an_empty_list_not_404(client, monkeypatc
     assert response.json()["capabilities"] == []
 
 
-def test_the_route_needs_no_credential(anonymous_client):
-    """Identity comes from configuration, not the request (see
-    app/dependencies/identity.py) -- a caller that sends no `Authorization`
-    header at all still gets 200, because there is nothing about the request
-    the resolver ever reads. This is the frontend's actual traffic pattern: it
-    has no login flow and sends no such header, ever."""
+def test_the_route_401s_with_no_credential(anonymous_client):
+    """Identity is resolved per request from the Authorization header (see
+    app/dependencies/identity.py), and AUTH_CHECK=true has no fallback for a
+    request that sends none -- removed as an authentication bypass. The
+    frontend now has a real login flow and sends a bearer token on every
+    call (src/api/http.js), so an anonymous caller here is genuinely
+    unauthenticated, not the app's normal traffic pattern."""
     response = anonymous_client.get("/api/ui/capabilities")
+    assert response.status_code == 401
+
+
+def test_the_route_returns_capabilities_with_a_valid_credential(client):
+    response = client.get("/api/ui/capabilities")
     assert response.status_code == 200
     assert response.json()["capabilities"]
+
+
+# ---------------------------------------------------------------------------
+# Empty cards
+# ---------------------------------------------------------------------------
+
+
+def test_an_active_card_with_no_agents_is_hidden():
+    """A card whose agents were filtered out advertises a dead end.
+
+    The provider gate drops an agent when its provider is disabled, for a
+    reason the user cannot see. Leaving the card behind renders a heading and a
+    description with nothing to click -- the same mistake as listing an agent
+    the router would refuse.
+
+    Reproduced with SAATHI_ENABLED off, which is the case that surfaced it.
+    """
+    session = SessionLocal()
+    try:
+        shown = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
+        hidden = resolve_for_user(session, None, enabled_providers=frozenset({"mitra"}))
+    finally:
+        session.close()
+
+    assert "saathi_assistant" in [c["id"] for c in shown["capabilities"]]
+    assert "saathi_assistant" not in [c["id"] for c in hidden["capabilities"]]
+
+
+def test_a_coming_soon_card_with_no_agents_still_shows():
+    """SG Commons Portal has no agents BY DESIGN and says so with a badge, so
+    it explains itself rather than dead-ending. The exemption is what keeps the
+    rule above from hiding it."""
+    session = SessionLocal()
+    try:
+        doc = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
+    finally:
+        session.close()
+
+    sg = next(c for c in doc["capabilities"] if c["id"] == "sg_commons")
+    assert sg["agents"] == []
+    assert sg["status"] == "coming_soon"
+
+
+def test_disabling_mitra_hides_the_interview_card_too():
+    """The rule is not Saathi-specific: listening_at_scale had the same latent
+    dead end whenever MITRA_ENABLED was off."""
+    session = SessionLocal()
+    try:
+        doc = resolve_for_user(session, None, enabled_providers=frozenset({"saathi"}))
+    finally:
+        session.close()
+
+    assert "listening_at_scale" not in [c["id"] for c in doc["capabilities"]]
+
+
+# ---------------------------------------------------------------------------
+# Self-launching cards
+# ---------------------------------------------------------------------------
+
+
+def test_a_self_launching_card_carries_an_agent_key_and_no_nested_agents():
+    """The Saathi card IS the control, so it needs no button beside it.
+
+    `agentKey` on the CARD is what makes it routable: the frontend normalises
+    `start_agent` without one to an inert `none`, which is why the card was
+    dead and its nested button did the routing. With the key present, a nested
+    button would be a second control showing the same name twice.
+    """
+    session = SessionLocal()
+    try:
+        doc = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
+    finally:
+        session.close()
+
+    card = next(c for c in doc["capabilities"] if c["id"] == "saathi_assistant")
+
+    assert card["action"] == {"type": "start_agent", "agentKey": "saathi"}
+    assert card["agents"] == []
+
+
+def test_suppressing_the_nested_agent_does_not_disable_the_provider_gate():
+    """THE SUBTLE ONE.
+
+    The membership row is never rendered, but it is NOT dead data: the gate
+    reads it to tell "no agents configured" (legitimate, shown) from "every
+    agent filtered out" (a dead end, hidden). Deleting the row as unused would
+    make the card render, and fail on click, whenever SAATHI_ENABLED=0.
+    """
+    session = SessionLocal()
+    try:
+        on = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
+        off = resolve_for_user(session, None, enabled_providers=frozenset({"mitra"}))
+    finally:
+        session.close()
+
+    assert "saathi_assistant" in [c["id"] for c in on["capabilities"]]
+    assert "saathi_assistant" not in [c["id"] for c in off["capabilities"]]
+
+
+def test_a_grouping_card_keeps_its_nested_agents():
+    """Listening at Scale is display-only, so its buttons ARE the controls.
+    The suppression must apply only to cards that route themselves."""
+    session = SessionLocal()
+    try:
+        doc = resolve_for_user(session, None, enabled_providers=frozenset({"mitra", "saathi"}))
+    finally:
+        session.close()
+
+    card = next(c for c in doc["capabilities"] if c["id"] == "listening_at_scale")
+
+    assert card["action"]["type"] == "display_card"
+    assert [a["id"] for a in card["agents"]] == ["record_stories", "capture_discussion"]

@@ -1,24 +1,33 @@
-"""RouterService -- five gates, in order (design doc §6.2-§6.4).
+"""Agent routing: five gates, in order.
 
-Replaces app.agents.orchestrator.OrchestratorAgent's single-gate LLM
-classifier (which has a substring-collision bug at orchestrator.py:62-65) and
-app.services.config_mode_router's temporary stand-in (that module's own
-docstring says to delete it once this ships -- not done in this task, per
-explicit scope decision; this file is additive only).
+Responsible for: choosing which agent serves a turn.
+Used by: OrchestrationService, once per turn.
+
+    1 explicit selection from the UI
+    2 session pin        -- zero LLM calls
+    3 keyword pre-route  -- zero LLM calls
+    4 LLM classifier     -- the only gate that can fail
+    5 default            -- routing NEVER fails
+
+Gate 4 falling through to Gate 5 is why a router outage degrades rather than
+errors.
 """
-import time
 from dataclasses import dataclass
 from operator import itemgetter
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 import json_repair
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.agents.protocol import HistoryTurn, TurnContext
 from app.domain.agent_spec import ModelSpec
+from app.exceptions.domain import AgentNotFound
+from app.core import timing
 from app.core.logger import get_logger
 from app.repositories.conversations import ConversationRepository
+from app.repositories.messages import MessageRepository
 from app.repositories.sessions import AgentSessionRepository
+from app.services import intent_match as intent_match_lib
 from app.services.agent_registry import AgentRegistry, RegisteredAgent
 from app.services.session_service import SessionService
 
@@ -28,16 +37,18 @@ logger = get_logger("router_service")
 @dataclass(frozen=True)
 class RouteDecision:
     agent: RegisteredAgent
-    reason: Literal["explicit", "pinned", "keyword", "llm", "default", "exit_to_default"]
+    reason: Literal[
+        "explicit", "pinned", "keyword", "llm", "default", "exit_to_default",
+        # A pinned session that GAVE THE TURN UP. Distinct from "keyword"/"llm"
+        # so the turn log shows a displacement rather than an ordinary route.
+        "keyword_yield", "llm_yield",
+    ]
     confidence: float
     router_latency_ms: int
     unpinned: bool = False
 
 
-class AgentNotFound(Exception):
-    def __init__(self, key: str):
-        super().__init__(f"agent not found or not selectable: {key!r}")
-        self.key = key
+# Declared in app/exceptions/domain.py; re-exported here for existing callers.
 
 
 # Stripped from both ends of a candidate command before comparing it to an exit
@@ -54,8 +65,8 @@ def _as_text(msg: AIMessage) -> str:
     return str(content) if content else ""
 
 
-def _ms(t0: float) -> int:
-    return int((time.monotonic() - t0) * 1000)
+#: Local alias kept so the five gates below stay one line each.
+_ms = timing.elapsed_ms
 
 
 class RouterService:
@@ -65,6 +76,7 @@ class RouterService:
         self._llm_factory = llm_factory
         self._sessions_repo = AgentSessionRepository(session)
         self._conversations = ConversationRepository(session)
+        self._messages = MessageRepository(session)
         self._session_service = SessionService(session)
 
         self._cache_key = None
@@ -75,7 +87,7 @@ class RouterService:
     # ------------------------------------------------------------------
 
     def select(self, conv, ctx: TurnContext, explicit_key: Optional[str]) -> RouteDecision:
-        t0 = time.monotonic()
+        t0 = timing.start()
 
         # GATE 1 -- explicit selection from the UI
         if explicit_key:
@@ -96,12 +108,16 @@ class RouterService:
         if pin:
             if self._is_exit(ctx.text, pin.spec.routing.exit_keywords):
                 return self._exit_to_default(conv)
+            if pin.spec.routing.yields_to_keyword:
+                yielded = self._yield_from_pin(ctx, pin, t0)
+                if yielded is not None:
+                    return yielded
             return RouteDecision(pin, "pinned", 1.0, 0)  # <- ZERO LLM calls
 
         # GATE 3 -- deterministic keyword pre-route
         visible = self._visible(ctx.user)
         hits = [(a.spec.routing.priority, a) for a in visible
-                if self._kw_match(ctx.text, a.spec.routing.keywords)]
+                if self._kw_match(ctx.text, a)]
         if hits:
             return RouteDecision(max(hits, key=itemgetter(0))[1], "keyword", 1.0, 0)
 
@@ -116,7 +132,17 @@ class RouterService:
                     and conf >= a.spec.routing.confidence_threshold):
                 return RouteDecision(a, "llm", conf, _ms(t0))
         except Exception as e:
-            logger.warning(f"router failed, falling back: {e}")
+            # Gate 4 is the only gate that can fail, and falling through to the
+            # default agent hides that it did. The fields are what distinguish
+            # "the router model is down" from "it answered but below threshold".
+            logger.warning(
+                "router failed, falling back: %s", e,
+                extra={
+                    "conversation_id": str(getattr(conv, "id", "")) or None,
+                    "candidate_count": len(visible),
+                    "latency_ms": _ms(t0),
+                },
+            )
 
         # GATE 5 -- default. Routing NEVER fails.
         return RouteDecision(self._registry.default(), "default", 0.0, _ms(t0))
@@ -137,6 +163,152 @@ class RouterService:
         """
         self._session_service.abandon(conv.id, reason="user_exit")
         return RouteDecision(self._registry.default(), "exit_to_default", 1.0, 0, unpinned=True)
+
+    def _yield_from_pin(
+        self, ctx: TurnContext, pin: RegisteredAgent, t0,
+    ) -> Optional[RouteDecision]:
+        """Give the turn up when the user plainly wants a DIFFERENT agent.
+
+        Only reached for an agent whose config sets `routing.yields_to_keyword`
+        -- see RoutingSpec for why that defaults to False and must stay so. An
+        interview never gets here, and a user answering it is never re-routed.
+
+        WHY THIS EXISTS. An open-ended assistant has no completion signal, so
+        its session never becomes terminal and Gate 2 would pin the conversation
+        to it for good. Observed live: one `saathi` session sat `awaiting_user`
+        for twelve turns and swallowed every later request, including an
+        explicit ask for a different agent.
+
+        THE FLOOR IS THE PINNED AGENT, NOT THE DEFAULT, and that is the whole
+        care in this method. Gates 3-5 fall through to `registry.default()` when
+        nothing is confident; reusing them verbatim here would drop an ordinary,
+        slightly-ambiguous assistant turn onto General Support -- a worse bug
+        than the one being fixed. Returning None means "stay pinned".
+
+        THREE STEPS, CHEAPEST FIRST, AND ONLY THE LAST COSTS A MODEL CALL:
+
+          1. the deterministic matcher, free -- the same `_kw_match` Gate 3
+             uses, over the same visibility-filtered candidates. It matches
+             keyword phrases as ordered token subsequences AND the agent's
+             `routing.intent` grid;
+          1b. the ambiguity gate: if the message names none of the candidates'
+             subjects, it cannot be a request for one of them. Stay pinned,
+             no call;
+          2. the classifier, only for a message that mentions a candidate's
+             subject without matching it.
+
+        STEP 1B IS WHY THIS IS AFFORDABLE. Every step of this method used to
+        fall through to step 2, so a pinned conversation paid an OpenRouter
+        round trip -- serialised in front of the agent's own turn -- on every
+        single turn, including "yes" and "40 students". Those cannot be a
+        request to leave and now cost two set lookups.
+
+        STEP 1 USED TO BE A SUBSTRING TEST, and that is why step 2 had to carry
+        so much weight: the sentence that prompted this work, "I wanted to
+        capture a story", matched NONE of record_stories' keywords ("capture
+        story" is not in "capture a story"). The token matcher in
+        app/services/intent_match.py handles that case and its whole family
+        without a model, so step 2 now sees only genuine ambiguity.
+
+        The pinned agent is excluded from the candidates throughout, so its own
+        keywords cannot "switch" the conversation to itself and log a spurious
+        yield.
+
+        The session is deliberately NOT abandoned here. Returning a different
+        agent is enough: `SessionService.open_for` already abandons the old
+        session with reason="agent_switch" AND fires `on_displace`, which closes
+        the orphaned WebSocket. Abandoning here would skip that and leak the
+        socket until the idle reaper noticed.
+        """
+        # THE DEFAULT AGENT IS NOT A YIELD TARGET, and excluding it matters.
+        # Observed while testing this: an ordinary follow-up mid-assistant --
+        # "tell me more about that plan" -- classified to general_support ABOVE
+        # its confidence threshold and would have been bounced out of the
+        # conversation it belonged to. The floor below only guards against an
+        # UNSURE classifier, not a confidently wrong one.
+        #
+        # A yield means "the user wants THAT agent". Wanting out of this one is
+        # a different intent, and `_exit_to_default` already serves it. Staying
+        # put costs nothing when the assistant could have answered anyway.
+        candidates = [
+            a for a in self._visible(ctx.user)
+            if a.key != pin.key and not a.is_default
+        ]
+        if not candidates:
+            return None
+
+        # 1. Deterministic, zero LLM calls.
+        hits = [(a.spec.routing.priority, a) for a in candidates
+                if self._kw_match(ctx.text, a)]
+        if hits:
+            winner = max(hits, key=itemgetter(0))[1]
+            logger.info(
+                "pin yielded on a keyword",
+                extra={"from_agent": pin.key, "to_agent": winner.key},
+            )
+            return RouteDecision(winner, "keyword_yield", 1.0, 0, unpinned=True)
+
+        # 1b. THE AMBIGUITY GATE, and the reason this method is no longer a
+        #     model call on every single turn of a pinned conversation.
+        #
+        #     A message that names none of the candidates' subjects cannot be
+        #     the "explicit, unambiguous request for one of the agents below"
+        #     the prompt at step 2 asks the classifier to look for -- so there
+        #     is nothing to decide, and STAY PINNED is already the answer.
+        #     Ordinary interview answers ("yes", "40 students", "attendance
+        #     dropped after the monsoon") are the bulk of every conversation and
+        #     all stop here, having cost two set lookups instead of an
+        #     OpenRouter round trip serialised in front of the agent's own turn.
+        #
+        #     BEFORE the classifier and AFTER the keyword pass, deliberately: a
+        #     message that already matched a phrase or an intent grid has been
+        #     decided and must not be re-examined, while one that reaches step 2
+        #     genuinely is ambiguous and still gets the model.
+        if not self._could_be_a_request_for(ctx.text, candidates):
+            return None
+
+        # 2. The classifier. Same underlying call Gate 4 makes, but told it is
+        #    deciding whether to interrupt an ALREADY-PINNED conversation, and
+        #    a miss means STAY PINNED rather than fall through to the default
+        #    agent.
+        try:
+            raw = self._invoke_router(ctx, candidates, pin=pin)
+            parsed = json_repair.loads(raw)
+            key = parsed.get("agent_key") if isinstance(parsed, dict) else None
+            conf = float(parsed.get("confidence", 0)) if isinstance(parsed, dict) else 0.0
+            a = self._registry.get_by_key_exact(key)
+            # THE PIN'S OWN BAR, NOT THE CANDIDATE'S. `confidence_threshold` is
+            # tuned for cheap first-message routing (Gate 4); interrupting a
+            # conversation already in progress is a higher-stakes call and, if
+            # the pinned agent sets `yield_confidence_threshold`, must clear
+            # that stricter bar instead.
+            threshold = (pin.spec.routing.yield_confidence_threshold
+                         if pin.spec.routing.yield_confidence_threshold is not None
+                         else (a.spec.routing.confidence_threshold if a else 1.0))
+            # MEMBERSHIP IN `candidates`, not merely a registry hit. The
+            # registry is global; `candidates` is what THIS caller may see. A
+            # key the classifier returned for an agent outside that set --
+            # hallucinated, stale, or belonging to another tenant -- must not
+            # become a route, and `get_by_key_exact` alone would let it.
+            if (a is not None
+                    and any(c.key == a.key for c in candidates)
+                    and a.spec.routing.router_selectable
+                    and conf >= threshold):
+                logger.info(
+                    "pin yielded on the classifier",
+                    extra={"from_agent": pin.key, "to_agent": a.key, "confidence": conf},
+                )
+                return RouteDecision(a, "llm_yield", conf, _ms(t0), unpinned=True)
+        except Exception as e:  # noqa: BLE001
+            # Staying pinned is the safe outcome, so a router failure here is
+            # strictly less serious than at Gate 4 -- the turn still gets the
+            # agent the user was already talking to.
+            logger.warning(
+                "pin yield check failed, staying pinned: %s", e,
+                extra={"agent_key": pin.key, "latency_ms": _ms(t0)},
+            )
+
+        return None
 
     def _pin_for(self, conv) -> Optional[RegisteredAgent]:
         """The agent currently driving this conversation, or None.
@@ -183,7 +355,7 @@ class RouterService:
             "The meeting was cancelled last week"      -> session abandoned
             "We discussed the bus stop near the school"-> session abandoned
 
-        Each one abandoned the Mitra session, unpinned the conversation and
+        Each one abandoned the remote session, unpinned the conversation and
         rerouted to the default agent, which then answered plausibly -- so the
         user had no idea their interview had been destroyed and no report would
         ever be produced. record_stories was hit too, via "start over" inside
@@ -204,13 +376,87 @@ class RouterService:
         )
 
     # ------------------------------------------------------------------
-    # Gate 3 helper
+    # Gate 3 helper -- and the yield path's first step
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _kw_match(text: str, keywords: List[str]) -> bool:
-        lowered = text.lower()
-        return any(kw.lower() in lowered for kw in keywords)
+    def _kw_match(text: str, agent: "RegisteredAgent") -> bool:
+        """Whether this agent is deterministically asked for by `text`.
+
+        TWO MATCHERS, BOTH FREE. `keywords` as an order-preserving token
+        subsequence with filler-only gaps, then the agent's `routing.intent`
+        grid if it declares one. Either is enough.
+
+        THIS USED TO BE `kw.lower() in text.lower()`, and the substring test is
+        what made the LLM classifier necessary on so many turns: a single
+        inserted article defeated it, so "capture a story" missed the keyword
+        "capture story" and fell through to a model call. The docstring on
+        `_yield_from_pin` has cited that exact sentence as the reason the
+        classifier exists since the day it was written.
+
+        SIGNATURE CHANGED FROM (text, keywords) TO (text, agent) deliberately.
+        The intent grid lives on the same `routing` block as the keywords, and
+        passing the list alone meant every call site had to remember to consult
+        the grid separately -- which is the kind of thing that gets forgotten at
+        one of the two call sites and produces a routing difference nobody can
+        explain.
+
+        Precision, not recall, is the target. See app/services/intent_match.py.
+        """
+        routing = agent.spec.routing
+        if intent_match_lib.keywords_match(text, routing.keywords):
+            return True
+
+        intent = getattr(routing, "intent", None)
+        if intent is None:
+            return False
+        return intent_match_lib.intent_match(
+            intent_match_lib.tokens(text),
+            intent.verbs, intent.nouns, intent.max_distance,
+        )
+
+    @staticmethod
+    def _could_be_a_request_for(text: str, candidates: List["RegisteredAgent"]) -> bool:
+        """Whether `text` names ANY candidate agent's subject at all.
+
+        THE AMBIGUITY GATE, and the reason a pinned conversation no longer pays
+        for a model call every turn. A message that mentions none of the
+        candidates' nouns cannot be an "explicit, unambiguous request for one of
+        the agents below" -- which is precisely what the yield prompt asks the
+        classifier to look for -- so there is nothing to decide and the call is
+        skipped. Ordinary interview answers ("yes", "40 students", "attendance
+        dropped after the monsoon") are the bulk of every conversation and all
+        land here.
+
+        THE NOUNS COME FROM THE INTENT GRID, FALLING BACK TO THE KEYWORDS. An
+        agent with no `routing.intent` block still has to be reachable, so its
+        keyword tokens stand in -- minus filler, which would otherwise make
+        "a" a subject and open the gate on every sentence in English.
+
+        BIASED TO SAYING YES, unlike every other matcher here. A false positive
+        costs one LLM call, which is exactly what happens today; a false
+        negative silently declines to consider a yield the classifier would have
+        allowed. The asymmetry is the opposite of `_kw_match`'s because the
+        decision is the opposite: this one only decides whether to ASK.
+        """
+        msg_tokens = intent_match_lib.tokens(text)
+        if not msg_tokens:
+            return False
+
+        for agent in candidates:
+            routing = agent.spec.routing
+            intent = getattr(routing, "intent", None)
+            if intent is not None and intent_match_lib.mentions_any(
+                msg_tokens, intent.nouns,
+            ):
+                return True
+            # No grid: the agent's keywords are the only statement of its
+            # subject matter available.
+            if intent_match_lib.mentions_any(
+                msg_tokens, intent_match_lib.subject_tokens(routing.keywords),
+            ):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Gate 4: visibility, prompt cache, LLM invocation
@@ -219,6 +465,23 @@ class RouterService:
     def _visible(self, user) -> List[RegisteredAgent]:
         """The registry snapshot is global; VISIBILITY is per-caller."""
         return [a for a in self._registry.routable() if a.spec.access.matches(user)]
+
+    #: Ceiling on the classifier's reply. It emits one small JSON verdict
+    #: (`{"agent_key": ..., "confidence": ...}`), so this is generous by an
+    #: order of magnitude and exists to bound the REQUEST, not the answer.
+    #:
+    #: WITHOUT IT THE ROUTER 402s ON A FUNDED ACCOUNT. Omitting max_tokens does
+    #: not mean "no limit" to OpenRouter -- it means "reserve credit for the
+    #: model's whole context window", so a request that will really emit ~30
+    #: tokens is priced at 65,536 and refused with
+    #: `code: 402, limit_source: openrouter_credits` while the balance is
+    #: healthy. Observed live: the same key, at the same moment, could afford
+    #: 60,029 tokens of the cheap chat model and only 3,121 of the pricier
+    #: router model -- remaining credit divided by each model's rate. The
+    #: router failing takes the whole turn down with it, because the fallback
+    #: agent is an LLM agent that 402s for the same reason, and /api/chat
+    #: answers 502.
+    ROUTER_MAX_TOKENS = 512
 
     def _router_model_spec(self) -> ModelSpec:
         # There is no YAML for "the router" -- it classifies, it doesn't answer.
@@ -229,7 +492,7 @@ class RouterService:
             provider="openrouter",
             name=config.OPENROUTER_MODEL,
             temperature=0.0,
-            max_tokens=None,
+            max_tokens=self.ROUTER_MAX_TOKENS,
             timeout_s=config.LLM_TIMEOUT,
         )
 
@@ -239,13 +502,36 @@ class RouterService:
             for h in history
         ]
 
-    def _build_router_prompt(self, visible: List[RegisteredAgent]) -> str:
+    def _build_router_prompt(
+        self, visible: List[RegisteredAgent], pin: Optional[RegisteredAgent] = None,
+    ) -> str:
         default_agent = self._registry.default()
         lines = [
             "You are the router for the Saarthi assistant.",
             "Choose exactly one agent for the LATEST user message.",
             "Use the prior conversation for context -- a short reply such as a name",
             "or a number is usually a continuation of the previous agent's topic.",
+        ]
+        if pin is not None:
+            # YIELD MODE. This is not a fresh routing decision -- the user is
+            # already mid-conversation with `pin`, and the agents below are
+            # NOT told about `pin` because it was deliberately excluded from
+            # `candidates` (see _yield_from_pin). Naming it here is what lets
+            # the classifier tell "answering the current question" apart from
+            # "asking for something else" instead of always picking whichever
+            # visible agent is the closest topical match.
+            lines += [
+                "",
+                f'The user is currently mid-conversation with "{pin.name}": '
+                f"{pin.description}",
+                "Decide only whether the LATEST message is an explicit, unambiguous",
+                "request for one of the agents below, unrelated to that ongoing",
+                "conversation. A short or ambiguous reply -- a name, a number, an",
+                "acknowledgement, an answer to a quick-reply question -- is normally a",
+                "continuation of that conversation, not a request to leave it: return",
+                "low confidence for every agent below in that case.",
+            ]
+        lines += [
             "",
             "Agents:",
         ]
@@ -264,23 +550,67 @@ class RouterService:
             lines.append(f'If nothing fits, use "{default_agent.key}" with low confidence.')
         return "\n".join(lines)
 
-    def _router_messages(self, ctx: TurnContext, visible: List[RegisteredAgent]):
-        # Cache key is (registry version, visibility signature) -- NOT version
-        # alone. Two callers in different orgs must not share a cached prompt,
-        # or one will be offered an agent they cannot reach.
-        cache_key = (self._registry.version, tuple(sorted(a.key for a in visible)))
+    def _router_messages(
+        self, ctx: TurnContext, visible: List[RegisteredAgent],
+        pin: Optional[RegisteredAgent] = None,
+    ):
+        # Cache key is (registry version, visibility signature, pin) -- NOT
+        # version alone. Two callers in different orgs must not share a
+        # cached prompt, or one will be offered an agent they cannot reach;
+        # the pin key keeps Gate 4's cached prompt from being reused for a
+        # yield decision (a different prompt shape) and vice versa.
+        cache_key = (self._registry.version, tuple(sorted(a.key for a in visible)),
+                     pin.key if pin else None)
         if self._cache_key != cache_key:
-            self._cached_prompt = self._build_router_prompt(visible)
+            self._cached_prompt = self._build_router_prompt(visible, pin=pin)
             self._cache_key = cache_key
 
         return [
             SystemMessage(content=self._cached_prompt),
-            *self._history_messages(ctx.history[-6:]),  # HISTORY-AWARE
+            *self._history_messages(self._history(ctx)),  # HISTORY-AWARE
             HumanMessage(content=ctx.text),
         ]
 
-    def _invoke_router(self, ctx: TurnContext, visible: List[RegisteredAgent]) -> str:
+    def _history(self, ctx: TurnContext) -> List[Any]:
+        """Recent history for the router, READ ONLY WHEN A CLASSIFIER RUNS.
+
+        This is reached from `_invoke_router` and nowhere else, which is the
+        entire point. It used to be read eagerly by the orchestrator before
+        `select()` was even called, so every turn paid a ten-row SELECT plus ten
+        model validations -- while only Gate 4 and the yield classifier consume
+        it. Gate 1, Gate 2 (pinned), an exit keyword and Gate 3 all resolve
+        without it, and Gate 2-pinned is the steady-state path for every
+        capability conversation: the one the code advertises as "ZERO LLM calls",
+        which was nonetheless paying for a query to feed a prompt it never built.
+
+        Deferring is safe here and not merely convenient: routing runs inside the
+        turn's transaction under the conversation advisory lock, and nothing
+        between the old read point and this one writes a message -- so the rows
+        returned are identical, only fetched later and less often.
+
+        AGAINST THE DEFAULT AGENT'S MEMORY SPEC. Which agent will serve the turn
+        is precisely what routing has not decided yet, so the default's window is
+        the only one available. Empty when there is no default agent at all.
+
+        Sliced to the last 6 messages, which is all the prompt has ever used.
+        """
+        default = self._registry.default()
+        if default is None:
+            return []
+        return self._messages.recent(ctx.conversation_id, default.spec.memory)[-6:]
+
+    def _invoke_router(
+        self, ctx: TurnContext, visible: List[RegisteredAgent],
+        pin: Optional[RegisteredAgent] = None,
+    ) -> str:
         llm = self._llm_factory.get(self._router_model_spec())
-        messages = self._router_messages(ctx, visible)
-        response = llm.invoke(messages)
+        messages = self._router_messages(ctx, visible, pin=pin)
+        # SEPARATE FROM THE SERVING AGENT'S "llm" STAGE. This call is routing
+        # overhead, not the answer the user is waiting for, and a pinned turn
+        # skips it entirely -- folding the two together would hide both facts.
+        # `pin` is set only on the yield path, which is the case where a pinned
+        # conversation pays for a classifier on every single turn.
+        timing.count("router_llm_calls")
+        with timing.stage("router_llm"):
+            response = llm.invoke(messages)
         return _as_text(response)

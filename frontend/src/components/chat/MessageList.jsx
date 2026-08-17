@@ -13,7 +13,14 @@ import Message from './Message';
  * useLayoutEffect rather than useEffect so the scroll lands in the same frame
  * the new message paints; useEffect would show one frame at the old offset.
  */
-export default function MessageList({ items, hasRemoteSession, onSelectOption, onRetry, onResume }) {
+export default function MessageList({
+  items,
+  hasRemoteSession,
+  onSelectOption,
+  onRetry,
+  onResume,
+  speech,
+}) {
   const ref = useRef(null);
 
   useLayoutEffect(() => {
@@ -33,7 +40,12 @@ export default function MessageList({ items, hasRemoteSession, onSelectOption, o
             onResume={onResume}
           />
         ) : (
-          <Message key={item.id} item={item} onSelectOption={onSelectOption} />
+          <Message
+            key={item.id}
+            item={item}
+            onSelectOption={onSelectOption}
+            speech={speech}
+          />
         ),
       )}
     </main>

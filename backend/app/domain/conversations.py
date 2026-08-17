@@ -1,3 +1,8 @@
+"""Conversation DTOs.
+
+Responsible for: the shapes repositories return and services pass around.
+Used by: the conversation repository and service.
+"""
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -47,6 +52,7 @@ class MessageDTO(BaseModel):
     route_confidence: Optional[float] = None
     
     options: Optional[List[Dict[str, Any]]] = None
+    attachments: Optional[List[Dict[str, Any]]] = None
     selected_option_id: Optional[str] = None
     
     model: Optional[str] = None
@@ -55,6 +61,16 @@ class MessageDTO(BaseModel):
     latency_ms: Optional[int] = None
     error: Optional[str] = None
     request_id: Optional[str] = None
+
+    # How a turn delegated over a WebSocket ended, and when its fragments
+    # arrived. NULL for an `llm` agent and for every user row. Carried here so
+    # the reporting query can read it off the row; NOT part of any API response
+    # -- both message-bearing routes build their payload from an explicit field
+    # whitelist, so adding a field here cannot leak into the contract.
+    ws_end_reason: Optional[str] = None
+    ws_first_frame_ms: Optional[int] = None
+    ws_last_frame_ms: Optional[int] = None
+    ws_fragments: Optional[int] = None
 
     created_by: str
     updated_by: str

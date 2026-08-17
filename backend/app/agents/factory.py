@@ -1,9 +1,19 @@
+"""Handler construction and registration.
+
+Responsible for: mapping an AgentSpec to a built handler, cached per
+(key, checksum).
+Used by: OrchestrationService, once per turn.
+
+Handlers self-register via @register_handler, fired when their module is
+imported -- factory walks the package to trigger that.
+"""
 import pkgutil
 import importlib
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Type
 
 from app.domain.agent_spec import AgentSpec
+from app.exceptions.domain import UnknownAgentType
 from app.agents.protocol import AgentHandler
 import app.agents
 
@@ -11,16 +21,18 @@ import app.agents
 class HandlerDeps:
     llm_factory: Any
     tool_registry: Any
-    # A MitraClientRegistry, not a single client: the REST client carries the
-    # base URL, timeouts and the Origin credential, all of which now resolve
-    # per agent and per tenant. Handlers ask the registry for the client their
-    # own resolved connection needs.
-    mitra_clients: Any
-    mitra_sessions: Any
     settings: Any
+    # A ProviderRegistry, not a client and not a per-platform slot: a provider
+    # instance carries the base URL, timeouts, endpoint paths and credentials,
+    # all of which resolve per agent and per tenant. The handler asks the
+    # registry for the one its own resolved spec names.
+    #
+    # This replaced four named vendor slots. Their cost was not the four lines:
+    # it was that HandlerDeps, the container, and every test that built either
+    # had to change shape whenever a platform was added.
+    providers: Any = None
 
-class UnknownAgentType(Exception):
-    pass
+# UnknownAgentType now lives in app/exceptions/domain.py (imported above).
 
 _HANDLERS: Dict[str, Type[AgentHandler]] = {}
 

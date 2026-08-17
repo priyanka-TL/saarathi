@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { resetConversation as resetConversationApi } from '../api/chat';
 import ChatInput from '../components/chat/ChatInput.jsx';
 import MessageList from '../components/chat/MessageList.jsx';
 import TypingIndicator from '../components/chat/TypingIndicator.jsx';
 import WorkflowBanner from '../components/chat/WorkflowBanner.jsx';
 import { useToast } from '../components/common/Toast.jsx';
+import ProfileGate from '../components/profile/ProfileGate.jsx';
 import Sidebar from '../components/sidebar/Sidebar.jsx';
 import { ACTION_TYPES } from '../config/capabilities';
 import { COPY, MOBILE_MAX_WIDTH } from '../constants';
@@ -17,10 +19,12 @@ import { usePollRegistry } from '../hooks/usePollRegistry';
 import { useRecentConversations } from '../hooks/useRecentConversations';
 import { useSendMessage } from '../hooks/useSendMessage';
 import { useSessionLifecycle } from '../hooks/useSessionLifecycle';
+import { useSpeech } from '../hooks/useSpeech';
+import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import AppLayout from '../layouts/AppLayout.jsx';
 import { runResume } from '../services/resumeFlow';
 import { renderAgentHtml } from '../utils/markdown';
-import { readTheme } from '../utils/storage';
+import { readTheme, readVoiceLanguage, writeVoiceLanguage } from '../utils/storage';
 
 const HIDDEN_BANNER = {
   hidden: true,
@@ -34,6 +38,8 @@ const HIDDEN_BANNER = {
 export default function ChatPage() {
   const {
     conversationId,
+    conversationIdRef,
+    setConversationId,
     isBusy,
     isBusyNow,
     currentAgentKeyRef,
@@ -53,6 +59,52 @@ export default function ChatPage() {
   const [draft, setDraft] = useState('');
   const [activeCard, setActiveCard] = useState(null);
   const [activeAgentKey, setActiveAgentKey] = useState(null);
+  const [voiceLanguage, setVoiceLanguageState] = useState(readVoiceLanguage);
+
+  // --- voice --------------------------------------------------------------
+  const setVoiceLanguage = useCallback((language) => {
+    setVoiceLanguageState(language);
+    writeVoiceLanguage(language);
+  }, []);
+
+  /**
+   * The current conversation id, creating one if there is none yet.
+   *
+   * For voice: a recording has to be filed under a conversation, and a fresh
+   * tab has none until New Chat is clicked or a message is sent. Rather than
+   * hide the mic until then -- which made the first message, the one you would
+   * most want to speak, the one message you could not -- the conversation is
+   * created on demand.
+   *
+   * NOT `startNewConversation`, deliberately: that also resets the transcript
+   * to the greeting and clears flow/session state, which would be a bizarre
+   * side effect of pressing the mic. This only ensures an id exists. The
+   * server reuses an already-empty conversation, so it does not accumulate
+   * rows when someone starts and abandons several recordings.
+   */
+  const ensureConversation = useCallback(async () => {
+    if (conversationIdRef.current) return conversationIdRef.current;
+    try {
+      const { data } = await resetConversationApi();
+      const id = data?.conversation_id ?? null;
+      setConversationId(id);
+      return id;
+    } catch {
+      return null;
+    }
+  }, [conversationIdRef, setConversationId]);
+
+  // The transcript REPLACES the draft rather than appending to it: it is the
+  // whole of what the user just said, and appending would silently concatenate
+  // two takes when someone re-records.
+  const voice = useVoiceRecorder({
+    conversationId,
+    ensureConversation,
+    language: voiceLanguage,
+    onTranscript: setDraft,
+  });
+
+  const speech = useSpeech({ language: voiceLanguage });
 
   // --- banner ------------------------------------------------------------
   const setContextBanner = useCallback(
@@ -317,6 +369,7 @@ export default function ChatPage() {
   );
 
   return (
+    <>
     <AppLayout
       sidebarOpen={sidebarOpen}
       onToggleSidebar={() => setSidebarOpen((o) => !o)}
@@ -336,6 +389,14 @@ export default function ChatPage() {
           onSelectAgent={handleSelectAgent}
           isBusy={isBusyNow}
           toast={toast}
+          voiceLanguage={voiceLanguage}
+          onVoiceLanguageChange={setVoiceLanguage}
+          // `supported` alone -- can this browser record. It no longer implies
+          // an existing conversation (see useVoiceRecorder), so the picker and
+          // the mic ask the same question again and this is back to one flag.
+          // `voiceDisabled` stays out: it only turns true mid-session after a
+          // 503, and the stored language preference is valid regardless.
+          voiceAvailable={voice.supported}
         />
       }
       banner={<WorkflowBanner banner={banner} />}
@@ -347,6 +408,7 @@ export default function ChatPage() {
             onSelectOption={handleSelectOption}
             onRetry={handleRetry}
             onResume={handleResume}
+            speech={speech}
           />
           <TypingIndicator visible={isBusy} />
           <ChatInput
@@ -354,9 +416,24 @@ export default function ChatPage() {
             onChange={setDraft}
             onSubmit={handleSubmit}
             disabled={isBusy}
+            voice={voice}
           />
         </>
       }
     />
+
+    {/*
+      HERE, not in AppLayout or RequireAuth. AppLayout takes named slots
+      (sidebar / banner / chatCard) rather than free children, and documents
+      that .sidebar-overlay must stay its last child. RequireAuth is rendered
+      directly, with no providers, by requireAuth.test.jsx -- mounting a
+      context consumer there would break it.
+
+      This is the first authenticated screen, which is what "after login" means
+      in practice. Renders nothing unless the profile is genuinely incomplete
+      and the operator left the popup on.
+    */}
+    <ProfileGate />
+    </>
   );
 }

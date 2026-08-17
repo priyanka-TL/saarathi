@@ -1,51 +1,37 @@
-"""Caller identity, resolved once from configuration.
+"""Caller identity.
 
-AUTH_CHECK is the only switch:
+Responsible for: producing a UserContext, either from configuration (the
+AUTH_CHECK=false dev identity) or from a per-request bearer token supplied by
+a logged-in user.
+Used by: built once by the container; `authenticate()` called per request by
+the identity dependency, with that request's bearer token if it sent one.
 
-  AUTH_CHECK=true   SAARTHI_STATIC_TOKEN (from .env) is DECODED, not
-                    validated -- no signature check, no expiry check. Saarthi
-                    has already validated it upstream and is the only component
-                    allowed to; re-validating here can only reject a request
-                    Saarthi already accepted.
-
-  AUTH_CHECK=false  No token is read at all. Every request resolves to the
-                    hardcoded development identity below.
-
-Resolved ONCE, at container build time, and reused for every request
-(`authenticate()` just returns the cached result). This is the identity source
-for the whole app; there is no per-request alternative. That is a deliberate
-choice, not an oversight: the frontend is a bare SPA with no login flow and
-nothing that could supply a real per-caller JWT, so there is no request-borne
-identity to read in the first place. An undecodable SAARTHI_STATIC_TOKEN is
-therefore a STARTUP failure, which is the right shape for a misconfiguration --
-it cannot reach a user.
-
-TENANCY STILL EXISTS, just not per end-user request. `tenant_id` /
-`organization_id` are explicit parameters on the admin API
-(`/api/admin/capabilities`, ...), not derived from the caller's own identity,
-so per-tenant configuration remains fully writable and readable there. What
-does not exist is an ordinary request resolving to more than one tenant --
-there is currently nothing upstream of this class that could assert who a
-browser's user is.
-
-Downstream -- routes, repositories, AccessSpec, the admin gate -- reads a
-UserContext and is unaware of which mode produced it. No auth logic exists
-anywhere else.
-
-This module stays free of any web framework (the .importlinter contracts forbid
-app.services importing fastapi/starlette). Nothing here reads a request: the
-identity does not depend on one.
+AUTH_CHECK=true MEANS A BEARER TOKEN IS REQUIRED, ALWAYS. There used to be a
+second, no-token path here: a boot-provisioned SAARTHI_STATIC_TOKEN, decoded
+unverified and served to any caller that sent no Authorization header at all.
+That was a deliberate transitional bridge from before the frontend had a real
+login flow -- it is gone now that it does (frontend/src/api/http.js attaches
+a real per-request token once a user logs in against ELEVATE), because it was
+also, unavoidably, an authentication bypass: ANY caller, logged in or not,
+got served as a specific real identity for free. A per-request bearer token
+is decoded WITH signature and expiry verification, against ELEVATE_JWT_SECRET
+(ELEVATE's own ACCESS_TOKEN_SECRET) -- it comes from the request itself,
+exactly what an attacker controls, so trusting it unverified would let anyone
+forge any user, tenant or role. Without that secret configured, a per-request
+token is refused outright rather than trusted unverified.
 """
 from __future__ import annotations
+
+from typing import Optional
 
 import jwt
 
 from app.core.settings import Settings
+from app.exceptions.domain import InvalidTokenError
 from app.domain.core import UserContext, OrgMembership
 
 
-class InvalidTokenError(Exception):
-    """The env token could not be decoded at all (malformed / not a JWT)."""
+# InvalidTokenError now lives in app/exceptions/domain.py (imported above).
 
 
 # ---------------------------------------------------------------------------
@@ -65,22 +51,45 @@ DEFAULT_ORG_CODE = "sot"
 DEFAULT_ROLES = ("mentee", "creator", "program_designer")
 
 
-def context_from_token(token: str, settings: Settings) -> UserContext:
+def context_from_token(token: str, settings: Settings, *, verify: bool = False) -> UserContext:
     """Decode the JWT and produce a UserContext exactly as prescribed.
 
-    DECODE ONLY. verify_signature and verify_exp are both off, unconditionally:
-    validation is Saarthi's job (see the module docstring). The only failure
-    mode left is a token that is not decodable at all.
+    `verify=True`: the live, per-request path (see `Authenticator.authenticate`
+    below). Signature and expiry ARE checked, against
+    `settings.elevate_jwt_secret`. No secret configured means no per-request
+    token can be trusted, so this raises rather than silently falling back to
+    an unverified decode.
+
+    `verify=False` (the default): decode only, no live caller -- kept so the
+    decode/mapping logic itself (TRAP 1, TRAP 3, below) can be exercised
+    directly in tests without also needing a signed token.
 
     Applies TRAP 1 (email derivation) and TRAP 3 (roles from containing org).
     """
-    try:
-        decoded = jwt.decode(
-            token,
-            options={"verify_signature": False, "verify_exp": False},
-        )
-    except jwt.InvalidTokenError as e:
-        raise InvalidTokenError(f"Invalid token: {e}")
+    if verify:
+        if not settings.elevate_jwt_secret:
+            raise InvalidTokenError(
+                "ELEVATE_JWT_SECRET is not configured; a per-request bearer "
+                "token cannot be verified and is refused rather than trusted "
+                "unverified."
+            )
+        try:
+            decoded = jwt.decode(
+                token,
+                settings.elevate_jwt_secret,
+                algorithms=["HS256"],
+                options={"verify_signature": True, "verify_exp": True},
+            )
+        except jwt.InvalidTokenError as e:
+            raise InvalidTokenError(f"Invalid or expired token: {e}")
+    else:
+        try:
+            decoded = jwt.decode(
+                token,
+                options={"verify_signature": False, "verify_exp": False},
+            )
+        except jwt.InvalidTokenError as e:
+            raise InvalidTokenError(f"Invalid token: {e}")
 
     data = decoded.get("data", {})
 
@@ -128,7 +137,8 @@ def default_context(settings: Settings) -> UserContext:
     modes or auth-off runs create a second Mitra profile for the same person.
 
     token is None -- there is no token in this mode. A non-guest remote_flow
-    agent therefore cannot finalize against Mitra with auth off; MITRA_ENABLED
+    agent therefore cannot finalize against a remote platform with auth off; the
+    provider allowlist
     is 0 by default, so nothing reaches that path.
     """
     return UserContext(
@@ -150,22 +160,28 @@ def default_context(settings: Settings) -> UserContext:
 
 
 class Authenticator:
-    """The single source of caller identity for the whole application.
+    """The source of caller identity for the whole application.
 
-    Resolution happens once, here, at container build time -- before the
-    server accepts traffic. An undecodable SAARTHI_STATIC_TOKEN is therefore a
-    startup failure rather than a per-request 401, which is the right shape
-    for a misconfiguration: it cannot reach a user.
+    AUTH_CHECK=false: always the hardcoded dev identity, resolved once here at
+    container build time -- a per-request token is never consulted, so dev
+    mode stays deterministic regardless of what a request sends.
+
+    AUTH_CHECK=true: `authenticate(token)` requires a per-request bearer
+    token, always -- decoded WITH verification (see `context_from_token`).
+    No token means no identity to serve: this raises, and
+    `get_current_user` (app/dependencies/identity.py) turns that into a 401.
+    There is deliberately no fallback identity for a missing token; see the
+    module docstring for why one existed briefly and was removed.
     """
 
     def __init__(self, settings: Settings) -> None:
-        if settings.auth_check:
-            token = settings.saarthi_static_token
-            if not token:
-                raise ValueError("SAARTHI_STATIC_TOKEN is required when AUTH_CHECK is true")
-            self._user = context_from_token(token, settings)
-        else:
-            self._user = default_context(settings)
+        self._settings = settings
+        self._auth_check = settings.auth_check
+        self._default = default_context(settings)
 
-    def authenticate(self) -> UserContext:
-        return self._user
+    def authenticate(self, token: Optional[str] = None) -> UserContext:
+        if not self._auth_check:
+            return self._default
+        if token:
+            return context_from_token(token, self._settings, verify=True)
+        raise InvalidTokenError("No bearer token was supplied.")

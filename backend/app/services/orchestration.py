@@ -1,14 +1,33 @@
-import os
+"""The turn pipeline: one user message in, one agent reply out.
+
+Responsible for: ordering the thirteen steps of a turn -- claim the lock, store
+the message, route, resolve scope, enforce limits, open the session, call the
+handler, persist, finalise.
+Used by: the chat and sessions routers, via Depends(get_orchestrator).
+
+Finalisation lives in turn_finalization.py, the advisory lock in turn_lock.py
+and rate limiting in turn_limits.py; this module keeps the sequence.
+
+THE STEP ORDER IN _handle_turn_locked IS THE CONTRACT. Its numbered comments
+record why each step sits where it does -- several encode constraints whose
+failure mode is silent.
+"""
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, List, Any
 
-from sqlalchemy import text as sql_text
-
-from app.agents.protocol import TurnContext, AgentSessionView, Option, SessionDelta, SessionState
+from app.agents.protocol import TurnContext, AgentSessionView, SessionDelta, SessionState
+# ConcurrentTurnError / TurnLimitExceeded are re-exported: the chat router
+# imports them from this module (`from app.services.orchestration import
+# ConcurrentTurnError`), which is an established path.
+from app.exceptions.domain import (  # noqa: F401  (re-exported)
+    ConcurrentTurnError,
+    TurnLimitExceeded,
+)
+from app.domain.agent_spec import DEFAULT_REPORT_MEDIA_TYPE
+from app.domain.scope import scope_for_user
 from app.domain.sessions import AgentSessionDTO
-from app.models.orm import SYSTEM_ACTOR
 from app.repositories.audit import AuditLogRepository
 from app.repositories.conversations import ConversationRepository
 from app.repositories.messages import MessageRepository
@@ -17,10 +36,16 @@ from app.repositories.tool_executions import ToolExecutionRepository
 from app.services.router_service import RouterService, RouteDecision
 from app.services.session_service import SessionService
 from app.services.agent_registry import AgentRegistry
+from app.services.turn_limits import RateLimits
+from app.services.turn_lock import ConversationTurnLock
+from app.services.turn_finalization import (
+    SESSION_FOLLOW_UP,  # noqa: F401  (re-exported -- see the note below)
+    TurnFinalizer,
+)
 from app.agents.factory import HandlerFactory
-from app.integrations.mitra.exceptions import MitraError, MitraTurnTimeout
-from app.integrations.mitra.turn_recovery import Reconciliation, TurnOutcome, reconcile
-from app.agents.protocol import AgentTurn
+from app.providers.errors import ProviderError, ProviderTurnTimeout
+from app.providers.recovery import Reconciliation, TurnOutcome
+from app.core import timing
 from app.core.logger import get_logger
 
 logger = get_logger("orchestration")
@@ -28,17 +53,11 @@ logger = get_logger("orchestration")
 TITLE_MAX_LEN = 60
 TITLE_TRUNCATE_AT = 57
 
-#: What Saarthi says once a delegated interview -- story OR discussion -- has
-#: been submitted, so the transcript ends on a question to the user rather than
-#: on a download link.
-#:
-#: MUST stay byte-identical to COPY.sessionFollowUp in
-#: frontend/src/constants/index.js. The client renders this bubble locally the
-#: moment its session poll reports 'completed' (there is no transcript refetch
-#: after a turn), and this stored row is what a reload replays in its place --
-#: so a drift between the two literals shows up as the message CHANGING when
-#: the user refreshes. tests/guards/test_sync_contract.py pins them together.
-SESSION_FOLLOW_UP = "Is there anything else I can help you with today?"
+# SESSION_FOLLOW_UP is declared in app/services/turn_finalization.py and
+# RE-EXPORTED from here on purpose: tests/guards/test_sync_contract.py imports
+# it from this module to pin it byte-identical against the frontend's
+# COPY.sessionFollowUp, and tests/integration/test_orchestration_finalize.py
+# does the same. Removing the re-export breaks that pin.
 
 
 def _conversation_title(text: str) -> str:
@@ -105,22 +124,6 @@ class ResumeResult:
 
 
 @dataclass
-class _Finalization:
-    """The outcome of a `_finalize` attempt, plus WHO finalised.
-
-    `claimed` is False when another request already owned finalisation and this
-    call merely read back the result. That distinction is invisible in the
-    returned session -- both paths can hand back a 'completed' row -- and it is
-    exactly what decides whether this call may also write the follow-up
-    message. Without it, POST /api/sessions/{id}/finalize (idempotent by
-    design, §10.2) would append a second "anything else?" every time it is
-    called again.
-    """
-    session: Any
-    claimed: bool
-
-
-@dataclass
 class TurnResult:
     conversation: Any
     message: Any
@@ -129,71 +132,29 @@ class TurnResult:
     turn: Any
     session: Optional[AgentSessionView]
 
-class ConcurrentTurnError(Exception):
-    """Another request is already running a turn on this conversation.
 
-    Surfaced as HTTP 409, never retried automatically: the whole point is that
-    the duplicate must not reach Mitra, where two user messages in a row merge
-    into one and destroy an answer (§1.6).
+@dataclass(frozen=True)
+class SessionReport:
+    """The outcome of asking for a session's finalised report.
+
+    `report_url is None` means "not ready, poll again" -- which covers both an
+    interview that has not completed and a provider that was briefly unreachable.
+    `media_type` is populated either way, because the client is told what it
+    will be downloading before the URL exists.
     """
-    def __init__(self, conversation_id):
-        super().__init__(f"a turn is already in flight for conversation {conversation_id}")
-        self.conversation_id = conversation_id
+    report_url: Optional[str]
+    media_type: str
+    story_id: Optional[str]
 
+    @property
+    def ready(self) -> bool:
+        return self.report_url is not None
 
-class TurnLimitExceeded(Exception):
-    """The agent's configured limits refuse this turn. Surfaced as HTTP 429."""
-    def __init__(self, reason: str, detail: str):
-        super().__init__(detail)
-        self.reason = reason
-        self.detail = detail
+# ConcurrentTurnError / TurnLimitExceeded are imported from
+# app/exceptions/domain.py at the top of this module and remain importable from
+# here -- `from app.services.orchestration import ConcurrentTurnError` is an
+# established path used by the chat router and the tests.
 
-
-class RateLimits:
-    """Enforces LimitsSpec. This was a no-op stub (`RateLimitsDummy`), so every
-    `limits:` block in every agent YAML was decorative -- max_turns and both
-    rate limits were declared, validated, checksummed into the config table,
-    and then never consulted. An interview had no turn ceiling at all.
-
-    Deliberately cheap: two indexed counts against tables the turn is about to
-    write to anyway. No Redis, no in-process state (which would be wrong the
-    moment there is a second worker).
-    """
-
-    def __init__(self, db, sessions_repo):
-        self._db = db
-        self._sessions = sessions_repo
-
-    def check(self, conv_id, user, limits) -> None:
-        if limits is None:
-            return
-
-        max_turns = getattr(limits, "max_turns", None)
-        if max_turns:
-            open_session = self._sessions.get_open_for_conversation(conv_id)
-            if open_session is not None and open_session.turn_count >= max_turns:
-                raise TurnLimitExceeded(
-                    "max_turns",
-                    f"This interview has reached its limit of {max_turns} turns.",
-                )
-
-        per_min = getattr(limits, "rate_limit_per_conversation_per_min", None)
-        if per_min:
-            recent = self._db.execute(
-                sql_text(
-                    "SELECT count(*) FROM conversation_messages "
-                    "WHERE conversation_id = :cid AND role = 'user' "
-                    "AND created_at > now() - interval '1 minute'"
-                ),
-                {"cid": str(conv_id)},
-            ).scalar() or 0
-            # The current turn's user message is already inserted by the time
-            # check() runs, so `>` not `>=`: a limit of 20 must allow the 20th.
-            if recent > per_min:
-                raise TurnLimitExceeded(
-                    "rate_limit_per_conversation_per_min",
-                    "You're sending messages too quickly. Please wait a moment.",
-                )
 
 class OrchestrationService:
     def __init__(
@@ -203,25 +164,19 @@ class OrchestrationService:
         handler_factory: HandlerFactory,
         llm_factory: Any,
         router_service: Optional[RouterService] = None,
-        mitra_rest: Optional[Any] = None,
-        mitra_sessions: Optional[Any] = None,
-        mitra_clients: Optional[Any] = None,
+        providers: Optional[Any] = None,
         settings: Optional[Any] = None,
     ):
         self._db = session
         self._registry = registry
         self._handlers = handler_factory
         self._llm_factory = llm_factory
-        # mitra_clients is a MitraClientRegistry and is what production passes:
-        # the finalisation paths must reach Mitra through the SAME endpoint the
-        # turn used, and that endpoint is per agent and per tenant. mitra_rest
-        # is the fallback for a caller that has no registry -- a single client
-        # that knows one endpoint, which is why nothing in production builds one
-        # any more (there is no MITRA_BASE_URL to build it from). See rest_for().
-        self._mitra_rest = mitra_rest
-        self._mitra_clients = mitra_clients
+        # A ProviderRegistry. The finalisation paths must reach the remote
+        # platform through the SAME connection the turn used, and that
+        # connection is per agent and per tenant -- so what is held here is the
+        # thing that can resolve one, never a resolved client. See provider_for().
+        self._providers = providers
         self._settings = settings
-        self._mitra_sessions = mitra_sessions
 
         self._conversations = ConversationRepository(session)
         self._messages = MessageRepository(session)
@@ -233,6 +188,21 @@ class OrchestrationService:
         self._router = router_service or RouterService(session, registry, llm_factory)
 
         self._rate_limits = RateLimits(session, self._sessions_repo)
+        self._turn_lock = ConversationTurnLock(session)
+
+        # Finalisation and lost-turn recovery, in their own module.
+        #
+        # `rest_for` is passed as a BOUND METHOD, not a client: which client
+        # finalises a story is a per-agent, per-tenant decision, and the one
+        # that finalises must be built from the same connection the interview
+        # ran over. Passing the method keeps that single resolution rule here.
+        self._finalizer = TurnFinalizer(
+            sessions=self._sessions,
+            messages=self._messages,
+            conversations=self._conversations,
+            audit=self._audit,
+            provider_for=self.provider_for,
+        )
 
     # ------------------------------------------------------------------
     # Scope resolution for the paths that do NOT go through handle_turn
@@ -243,7 +213,7 @@ class OrchestrationService:
     # has always corrected for that with resolve_for_scope(); resume, finalize
     # and the report route did not, so a tenant's own finalize_path,
     # report_media_type and (since remote.company / remote.bot_route moved into
-    # the spec) its Mitra company were silently ignored on exactly the paths
+    # the spec) its remote company were silently ignored on exactly the paths
     # that submit the story and fetch the PDF.
     #
     # Every path that reads an agent off a SESSION must go through here.
@@ -253,183 +223,262 @@ class OrchestrationService:
         agent = self._registry.get_by_id(str(session_view.agent_id))
         if agent is None:
             return None
+        tenant_id, organization_id = scope_for_user(user)
         return self._registry.resolve_for_scope(
-            self._db,
-            agent,
-            getattr(user, "tenant_code", "") or "default",
-            getattr(user, "active_org_id", None) or "default",
+            self._db, agent, tenant_id, organization_id,
         )
 
-    def rest_for(self, agent):
-        """The Mitra REST client for this (already scope-resolved) agent.
+    def provider_for(self, agent):
+        """The provider for this (already scope-resolved) agent, or None.
 
-        A client carries a base URL, timeouts and the Origin credential, so the
-        one that finalises a story must be the one built from the same
-        connection the interview ran over. Falls back to the injected single
-        client when no registry is available.
+        A provider carries a base URL, timeouts, endpoint paths and credentials,
+        so the one that finalises a session must be the one built from the same
+        connection the conversation ran over.
+
+        THIS USED TO IGNORE THE AGENT'S PROVIDER ENTIRELY. It always built one
+        named platform's REST client, so an agent on the other platform was
+        handed the wrong client -- safe only by accident, because both callers
+        happened to be gated before they could reach it.
+
+        Returns None rather than raising for an agent with no `remote` block (an
+        `llm` agent) or when no registry was supplied: every caller here treats
+        "no provider" as "nothing to do", which is what keeps finalisation and
+        recovery from having to know what kind of agent they were handed.
         """
-        if self._mitra_clients is None or agent is None:
-            return self._mitra_rest
+        if self._providers is None or agent is None:
+            return None
         remote = getattr(agent.spec, "remote", None)
         if remote is None:
-            return self._mitra_rest
-        from app.integrations.mitra.connection import resolve_connection
+            return None
+        return self._providers.get(remote)
 
-        return self._mitra_clients.get(resolve_connection(self._settings, remote))
+    def report_for(self, dto, user) -> "SessionReport":
+        """The finalised interview report for a session, if it is ready yet.
 
-    def handle_turn(self, ctx_in: TurnInput) -> TurnResult:
-        # 1. get_or_create conv
-        conv = self._conversations.get_or_create(ctx_in.conversation_id, ctx_in.user)
+        Three cases, and only the first two produce a URL:
 
-        # 1b. CLAIM THE TURN, covering the handler call too.
-        #
-        # Step 2's row lock is released by the COMMIT at step 9, which happens
-        # BEFORE the handler runs -- so two concurrent posts for one
-        # conversation both sailed through and both called Mitra. On a first
-        # turn that meant two upsert_profile + generate_session pairs and an
-        # orphaned remote session; on a later turn it is §1.6 answer
-        # destruction, since two user messages in a row silently merge in
-        # Mitra's database. Claimed here, before the user message is written,
-        # so a refused turn leaves nothing behind.
-        if not self._try_lock_conversation(conv.id):
-            raise ConcurrentTurnError(conv.id)
-        try:
-            return self._handle_turn_locked(ctx_in, conv)
-        finally:
-            self._unlock_conversation(conv.id)
+        1. the session already carries a `report_url` -- serve it, no network;
+        2. the interview is COMPLETED and the provider has the document -- fetch the
+           URL and serve that;
+        3. anything else -- `report_url` is None and the client should poll.
 
-    def _handle_turn_locked(self, ctx_in: TurnInput, conv) -> TurnResult:
-        # 2. allocate seq under a row lock — also serialises double-submits (§1.6)
-        seq = self._conversations.next_seq_for_update(conv.id)
+        The agent is SCOPE-RESOLVED, like every other read of an agent off a
+        session. `get_by_id` alone answers from the default-scope snapshot, so a
+        tenant that had customised `report_media_type` -- or that points at its
+        own deployment -- would have had its report fetched with the default scope's
+        settings.
 
-        # 3. insert user message
-        self._messages.insert(
-            conv.id, seq, role="user", content=ctx_in.text,
-            selected_option_id=ctx_in.option_id, request_id=ctx_in.request_id,
-            actor=ctx_in.user.user_id,
+        A ProviderError is swallowed into case 3 rather than propagating, which
+        is deliberate and unlike every other session route: a report that is not
+        ready yet and a provider that is briefly unreachable are the same thing
+        from the client's point of view, and both are fixed by polling again.
+        """
+        agent = self.agent_for_session(dto, user)
+        remote = getattr(agent.spec, "remote", None) if agent is not None else None
+        media_type = (
+            remote.report_media_type if remote is not None
+            else DEFAULT_REPORT_MEDIA_TYPE
         )
 
-        # 3b. Title and timestamp the conversation NOW, from the user's own
-        # message, not at step 13. Step 13 only runs on a successful turn, so a
-        # turn that failed after this commit (an upstream 429, say) left the
-        # conversation titleless and with a NULL last_message_at -- it showed up
-        # in the sidebar as "New conversation / No messages yet" even though the
-        # user had clearly said something. touch() COALESCEs the title, so the
-        # first message still wins and step 13 remains harmless.
-        #
-        # An AUTOSTART turn timestamps but does not title: its text is the UI's
-        # canned opener, so titling from it gave every discussion in the sidebar
-        # the identical, useless name "I want to capture a discussion". The
-        # first thing the user actually types titles the conversation instead,
-        # and _agent_fallback_title covers the case where the interview is
-        # answered entirely with option buttons.
-        if ctx_in.autostart:
-            self._conversations.touch(conv.id)
-        else:
-            self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
-            # If an autostart turn left a placeholder title behind, this is the
-            # first thing the user has actually said -- promote it. touch()'s
-            # COALESCE cannot do this on its own, and without it every
-            # discussion would keep the generated name forever.
-            self._conversations.replace_placeholder_title(
-                conv.id, _conversation_title(ctx_in.text),
-            )
+        if dto.report_url:
+            return SessionReport(dto.report_url, media_type, dto.result_ref)
 
-        # 4. route (v2: 5 gates)
-        # Build partial context for router
-        ctx_partial = TurnContext(
-            request_id=ctx_in.request_id,
-            conversation_id=conv.id,
-            user=ctx_in.user,
-            text=ctx_in.text,
-            option_id=ctx_in.option_id,
-            history=[], # router might use recent history
-            session=None,
-            locale=ctx_in.user.locale if hasattr(ctx_in.user, 'locale') else "en"
-        )
-        # Populate history for router so it can be history-aware (gate 4)
-        ctx_partial = TurnContext(
-            request_id=ctx_in.request_id,
-            conversation_id=conv.id,
-            user=ctx_in.user,
-            text=ctx_in.text,
-            option_id=ctx_in.option_id,
-            history=self._messages.recent(conv.id, self._registry.default().spec.memory) if self._registry.default() else [],
-            session=None,
-            locale=ctx_partial.locale
-        )
-        decision = self._router.select(conv, ctx_partial, explicit_key=ctx_in.agent_key)
-        agent = decision.agent
+        if dto.state == "completed" and remote is not None and dto.remote_session_id:
+            try:
+                provider = self.provider_for(agent)
+                url = (
+                    provider.fetch_artifact(remote, _to_session_view(dto))
+                    if provider is not None else None
+                )
+            except ProviderError:
+                url = None
+            if url:
+                return SessionReport(url, media_type, dto.result_ref)
 
-        # 4b. Resolve the agent for THIS caller's tenant/organization.
-        #
-        # ONE PLACE, deliberately. `agent.spec` is read a dozen times below and
-        # `agent.checksum` keys HandlerFactory's cache, so resolving once here
-        # makes every one of those tenant-correct with no further changes --
-        # and means there is a single line to audit when asking "can one tenant
-        # be served another's configuration?".
-        #
-        # A no-op for a tenant that has not customised anything, which is the
-        # common case: one indexed lookup, then the unchanged agent.
-        agent = self._registry.resolve_for_scope(
-            self._db,
-            agent,
-            getattr(ctx_in.user, "tenant_code", "") or "default",
-            getattr(ctx_in.user, "active_org_id", None) or "default",
-        )
+        return SessionReport(None, media_type, dto.result_ref)
 
-        # 5. enforce limits
-        self._rate_limits.check(conv.id, ctx_in.user, agent.spec.limits)
+    # ------------------------------------------------------------------
+    # Turn context assembly
+    # ------------------------------------------------------------------
 
-        # 6. open the session -- which IS the pin. open_for() creates a row only
-        #    when the agent declares routing.pin_session, and
-        #    uq_agent_sessions_one_open_per_conversation makes that row the
-        #    single answer to "which agent is driving this conversation", so
-        #    RouterService Gate 2 finds it on the next turn with no LLM call.
-        #    There is no separate step writing conversations.pinned_agent_id any
-        #    more: that column duplicated this row under the identical condition
-        #    and had to be cleared in step with it by hand.
-        #
-        #    on_displace fires when the conversation had an open session
-        #    belonging to a DIFFERENT agent: that session is abandoned, and its
-        #    Mitra socket has to go with it or the pool would hand the new agent
-        #    a channel still authenticated against the old agent's remote
-        #    session. That path is how one conversation spans several agents.
-        session_view = self._sessions.open_for(
-            conv.id, agent, on_displace=self._close_remote_channel,
-            actor=ctx_in.user.user_id,
-        )
+    def _turn_context(
+        self, ctx_in: TurnInput, conv, *, history, session,
+    ) -> TurnContext:
+        """A TurnContext for this turn, differing only in history and session.
 
-        # 7. assemble history
-        history = self._messages.recent(conv.id, agent.spec.memory)
-        
-        # 8. COMMIT <- releases the lock
-        self._db.commit()
+        The turn is built twice on purpose -- once for routing, which has no
+        session yet and reads history against the default agent's window, and
+        once for the handler, which has both. Everything else is identical, and
+        was previously written out in full at each site.
 
-        # 9. handler.handle
-        handler = self._handlers.build(agent.spec, agent.checksum)
-        
-        locale = ctx_in.user.locale if hasattr(ctx_in.user, 'locale') else "en"
-        ctx = TurnContext(
+        `locale` is read defensively because several call paths reach here with
+        duck-typed identity objects that have no `locale`. `getattr` with a
+        default, NOT `... or "en"`: an explicitly falsy locale must pass through
+        unchanged, exactly as the `hasattr` check it replaces did.
+        """
+        return TurnContext(
             request_id=ctx_in.request_id,
             conversation_id=conv.id,
             user=ctx_in.user,
             text=ctx_in.text,
             option_id=ctx_in.option_id,
             history=history,
-            session=_to_session_view(session_view) if session_view else None,
-            locale=locale
+            session=session,
+            locale=getattr(ctx_in.user, "locale", "en"),
         )
-        
+
+    # `_router_history` used to live here and is deliberately gone: it now
+    # belongs to RouterService, which is the only thing that ever wanted it and
+    # the only thing that can tell whether this turn needs it at all. See
+    # RouterService._history.
+
+    def handle_turn(self, ctx_in: TurnInput) -> TurnResult:
+        # 1. get_or_create conv
+        with timing.stage("conv_lookup"):
+            conv = self._conversations.get_or_create(ctx_in.conversation_id, ctx_in.user)
+
+        # 1b. CLAIM THE TURN, covering the handler call too. Step 2's row lock
+        # is released by the commit at step 8, BEFORE the handler runs, so two
+        # concurrent posts would both reach the platform -- answer destruction.
+        # Claimed before the user message is written, so a refused turn leaves
+        # nothing behind.
+        with timing.stage("turn_lock"):
+            locked = self._try_lock_conversation(conv.id)
+        if not locked:
+            raise ConcurrentTurnError(conv.id)
         try:
-            turn = handler.handle(ctx)
-        except MitraTurnTimeout as exc:
+            return self._handle_turn_locked(ctx_in, conv)
+        finally:
+            self._unlock_conversation(conv.id)
+
+    def _record_user_message(self, ctx_in: TurnInput, conv) -> None:
+        """Steps 2, 3 and 3b: allocate a seq, store the message, title the
+        conversation.
+
+        The row lock in next_seq_for_update also serialises double-submits.
+
+        THE TITLE IS WRITTEN HERE, NOT AT STEP 13, which only runs on a
+        successful turn -- a turn failing after this commit otherwise left the
+        conversation showing "New conversation / No messages yet" despite the
+        user having said something. touch() COALESCEs, so the first message
+        still wins.
+
+        AN AUTOSTART TURN TIMESTAMPS BUT DOES NOT TITLE: its text is the UI's
+        canned opener, which named every discussion identically.
+        """
+        seq = self._conversations.next_seq_for_update(conv.id)
+
+        self._messages.insert(
+            conv.id, seq, role="user", content=ctx_in.text,
+            selected_option_id=ctx_in.option_id, request_id=ctx_in.request_id,
+            actor=ctx_in.user.user_id,
+        )
+
+        if ctx_in.autostart:
+            self._conversations.touch(conv.id)
+            return
+
+        self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
+        # If an autostart turn left a placeholder title behind, this is the
+        # first thing the user has actually said -- promote it. touch()'s
+        # COALESCE cannot do this on its own, and without it every discussion
+        # would keep the generated name forever.
+        self._conversations.replace_placeholder_title(
+            conv.id, _conversation_title(ctx_in.text),
+        )
+
+    def _handle_turn_locked(self, ctx_in: TurnInput, conv) -> TurnResult:
+        # 2/3/3b. seq under a row lock, the user message, and the title.
+        with timing.stage("record_user_message"):
+            self._record_user_message(ctx_in, conv)
+
+        # 4. route (v2: 5 gates)
+        #
+        # History-aware so Gate 4 can use it, and read against the DEFAULT
+        # agent's memory spec -- which agent will serve the turn is exactly what
+        # routing has not decided yet, so the default's window is the only one
+        # available. No session: routing is what determines the session.
+        # HISTORY IS NOT READ HERE. RouterService fetches it itself, and only on
+        # the two paths that build a classifier prompt -- see
+        # RouterService._history. Reading it eagerly here cost every turn a
+        # ten-row SELECT to feed a prompt that a pinned, explicit or
+        # keyword-routed turn never builds.
+        ctx_partial = self._turn_context(
+            ctx_in, conv,
+            history=[],
+            session=None,
+        )
+        # Covers all five gates, so it includes the pin lookup a pinned turn
+        # does. `router_llm` inside it is the part that only Gate 4 pays.
+        with timing.stage("router"):
+            decision = self._router.select(conv, ctx_partial, explicit_key=ctx_in.agent_key)
+        agent = decision.agent
+
+        # 4b. Resolve the agent for THIS caller's tenant/organization.
+        # ONE PLACE, deliberately: `agent.spec` is read a dozen times below and
+        # `agent.checksum` keys the handler cache, so resolving once here makes
+        # all of it tenant-correct and leaves a single line to audit when asking
+        # "can one tenant be served another's configuration?". A no-op, and one
+        # indexed lookup, for a tenant that has customised nothing.
+        turn_tenant_id, turn_organization_id = scope_for_user(ctx_in.user)
+        with timing.stage("agent_resolve"):
+            agent = self._registry.resolve_for_scope(
+                self._db, agent, turn_tenant_id, turn_organization_id,
+            )
+
+        # 5. enforce limits
+        with timing.stage("rate_limits"):
+            self._rate_limits.check(conv.id, ctx_in.user, agent.spec.limits)
+
+        # 6. Open the session -- which IS the pin. The unique index makes that
+        #    row the single answer to "which agent is driving this
+        #    conversation", so Gate 2 finds it next turn with no LLM call.
+        #
+        #    on_displace fires when the open session belongs to a DIFFERENT
+        #    agent: it is abandoned, and its socket must go with it or the
+        #    pool hands the new agent a channel still authenticated against the
+        #    old remote session. That is how one conversation spans agents.
+        with timing.stage("session_open"):
+            session_view = self._sessions.open_for(
+                conv.id, agent, on_displace=self._close_remote_channel,
+                actor=ctx_in.user.user_id,
+            )
+
+        # 7. assemble history
+        with timing.stage("agent_history"):
+            history = self._messages.recent(conv.id, agent.spec.memory)
+
+        # 8. COMMIT <- releases the lock
+        with timing.stage("commit_pre_handler"):
+            self._db.commit()
+
+        # 9. handler.handle
+        handler = self._handlers.build(agent.spec, agent.checksum)
+
+        ctx = self._turn_context(
+            ctx_in, conv,
+            history=history,
+            session=_to_session_view(session_view) if session_view else None,
+        )
+
+
+        try:
+            # The TOTAL for the agent's own work. Its breakdown -- remote_turn,
+            # remote_completion_poll, llm -- is recorded inside the handler, so
+            # the difference between this and the sum of those is the handler's
+            # own overhead, and should be near zero.
+            with timing.stage("handler"):
+                turn = handler.handle(ctx)
+        except ProviderTurnTimeout as exc:
             # A timeout does NOT mean the turn failed -- it means we stopped
-            # listening. Ask Mitra what actually happened before surfacing an
+            # listening. Ask the provider what actually happened before surfacing an
             # error, because nothing else will: the late frame is discarded by
             # _drain_stale() on the next turn, so an unrecovered reply desyncs
             # the interview even if the user does nothing at all.
-            turn = self._recover_timed_out_turn(agent, session_view, ctx_in.text, exc)
+            with timing.stage("timeout_recovery"):
+                turn = self._recover_timed_out_turn(
+                    agent, session_view, ctx_in.text, exc, ctx_in.user,
+                )
             if turn is None:
                 raise
 
@@ -438,28 +487,54 @@ class OrchestrationService:
             session_view = self._sessions.apply(session_view, turn.session_delta)
         finalization = None
         if turn.terminal and session_view:
-            finalization = self._finalize_claiming(session_view, agent, ctx_in.user)
+            # Only on the last turn of an interview, but it is a remote round
+            # trip plus a report fetch, so the turn a user perceives as "the one
+            # that hung" is often this one rather than a slow reply.
+            with timing.stage("finalize"):
+                finalization = self._finalize_claiming(session_view, agent, ctx_in.user)
             session_view = finalization.session
 
         # 11. persist the agent message
         options_dict = [o.__dict__ for o in turn.options] if turn.options else None
+        # Stored so the documents come back when the conversation is reopened
+        # from the sidebar or the page is reloaded -- GET .../messages replays
+        # from the row, and anything not on it is unreachable afterwards.
+        attachments_dict = [a.__dict__ for a in turn.attachments] if turn.attachments else None
         
+        # Read ONCE, here, and used for both the row below and the log line at
+        # step 13. `current()` hands back the same mutable record either way, so
+        # two reads could not disagree -- but one name makes it obvious that the
+        # stored row and the logged line describe the same turn.
+        turn_timings = timing.current()
+
+        persist = timing.Stopwatch()
         msg = self._messages.insert(
-            conv.id, 
+            conv.id,
             self._conversations.next_seq_for_update(conv.id),
-            role="assistant", 
+            role="assistant",
             content=turn.text,
             agent_id=agent.id,
             agent_session_id=session_view.id if session_view else None,
             route_reason=decision.reason,
             route_confidence=decision.confidence,
             options=options_dict, 
+            attachments=attachments_dict,
             model=turn.model,
             prompt_tokens=turn.prompt_tokens,
             completion_tokens=turn.completion_tokens,
             latency_ms=turn.latency_ms,
             error=turn.error,
             request_id=ctx_in.request_id,
+            # The WebSocket turn diagnostics, straight off this request's timing
+            # record. Read from there rather than threaded through
+            # ProviderTurn/AgentTurn on purpose: those describe what the USER
+            # gets back, and how long a socket sat idle before we stopped waiting
+            # is not part of that. Every implementor of those protocols would
+            # otherwise have to carry four measurement fields.
+            #
+            # None outside a request (a handler driven directly by a unit test),
+            # which the repository treats as "nothing to record".
+            ws=turn_timings.details if turn_timings else None,
             actor=ctx_in.user.user_id,
         )
 
@@ -470,7 +545,7 @@ class OrchestrationService:
         #      the follow-up outranks the agent's closing line by seq. And
         #      _finalize itself cannot simply move down to join it -- step 11
         #      holds the conversation row lock (next_seq_for_update) until the
-        #      commit at step 13, and finalisation is a Mitra round trip.
+        #      commit at step 13, and finalisation is a remote round trip.
         if (
             finalization is not None
             and finalization.claimed
@@ -505,7 +580,45 @@ class OrchestrationService:
         else:
             self._conversations.touch(conv.id, title_from=_conversation_title(ctx_in.text))
         self._db.commit()
-        
+        # Steps 11 through 13 as one number: the assistant row, the follow-up,
+        # the tool traces and the closing commit. Measured with a Stopwatch
+        # rather than a `with` block because it spans three numbered steps that
+        # must not be re-indented -- the ordering comments between them are
+        # load-bearing.
+        timing.record("persist", persist.ms)
+
+        # ONE line per completed turn, all fields, no interpolation -- the
+        # pipeline previously logged only its failures, so "which agent, what
+        # model, how long" was answerable only from the database.
+        logger.info(
+            "turn completed",
+            extra={
+                "conversation_id": str(conv.id),
+                "tenant_id": turn_tenant_id,
+                "organization_id": turn_organization_id,
+                "user_id": ctx_in.user.user_id,
+                "agent_key": agent.key,
+                "agent_type": agent.spec.agent_type,
+                "route_reason": decision.reason,
+                "route_confidence": decision.confidence,
+                "router_latency_ms": decision.router_latency_ms,
+                "model": turn.model,
+                "latency_ms": turn.latency_ms,
+                "tool_call_count": len(turn.tool_traces),
+                # The breakdown behind `latency_ms`. Nested rather than
+                # flattened into a field each: JSONFormatter promotes every
+                # `extra` key to the top level, and a stage set that varies by
+                # agent type would give every turn a different log SCHEMA.
+                #
+                # Empty dicts when nothing recorded -- a handler exercised
+                # outside a request has no accumulator, and the keys should
+                # still be present so a consumer never has to test for them.
+                "stages": turn_timings.stages if turn_timings else {},
+                "counts": turn_timings.counts if turn_timings else {},
+                "ws": turn_timings.details if turn_timings else {},
+            },
+        )
+
         return TurnResult(
             conversation=conv,
             message=msg,
@@ -515,147 +628,69 @@ class OrchestrationService:
             session=session_view
         )
         
-    def _is_postgres(self) -> bool:
-        try:
-            return self._db.get_bind().dialect.name == "postgresql"
-        except Exception:
-            return False
-
-    def _turn_lock_key(self, conversation_id: uuid.UUID) -> str:
-        return f"saarthi:turn:{conversation_id}"
+    # The advisory turn lock lives in app/services/turn_lock.py. These
+    # delegations remain because handle_turn reads better naming the two halves
+    # of the claim, and tests/guards/test_turn_concurrency.py drives them.
 
     def _try_lock_conversation(self, conversation_id: uuid.UUID) -> bool:
-        """Claim the right to run a turn on this conversation. False if another
-        request already holds it.
-
-        SESSION-scoped (pg_try_advisory_lock), not transaction-scoped, and
-        deliberately so. A transaction-scoped lock would have to stay open
-        across handler.handle(), and handler.handle() is a Mitra round trip of
-        up to 60s -- holding a database transaction (and its pooled connection)
-        for that long is exactly what test_no_transaction_held_during_handler
-        exists to prevent. A session-scoped lock spans the commit at step 9
-        without keeping a transaction open, so it can guard the handler call
-        without reintroducing that problem.
-
-        NON-BLOCKING, so a genuine double-submit is refused rather than queued
-        and then executed a second time. Queueing would be the wrong answer
-        anyway: the second copy of the same answer is exactly what triggers
-        Mitra's consecutive-same-sender merge and destroys the first (§1.6).
-        """
-        if not self._is_postgres():
-            return True  # sqlite (unit tests) has no advisory locks
-        return bool(self._db.execute(
-            sql_text("SELECT pg_try_advisory_lock(hashtext(:key))"),
-            {"key": self._turn_lock_key(conversation_id)},
-        ).scalar())
+        return self._turn_lock.acquire(conversation_id)
 
     def _unlock_conversation(self, conversation_id: uuid.UUID) -> None:
-        """Release the turn lock. Required: a session-scoped advisory lock is
-        NOT released by commit, rollback, or by the connection being returned
-        to the pool -- only by an explicit unlock or the connection actually
-        closing."""
-        if not self._is_postgres():
-            return
-        try:
-            self._db.execute(
-                sql_text("SELECT pg_advisory_unlock(hashtext(:key))"),
-                {"key": self._turn_lock_key(conversation_id)},
-            )
-        except Exception as e:
-            logger.warning("failed to release turn lock for %s: %s", conversation_id, e)
+        self._turn_lock.release(conversation_id)
 
     def _close_remote_channel(self, conversation_id: uuid.UUID) -> None:
-        """Drop this conversation's pooled Mitra socket. Best-effort: the DB
-        change that prompted it is already committed-or-committing, and a
-        socket that fails to close is reaped by MitraSessionManager anyway."""
-        if self._mitra_sessions is None:
-            return
-        try:
-            self._mitra_sessions.close(conversation_id)
-        except Exception as e:
-            logger.warning("failed to close Mitra channel for %s: %s", conversation_id, e)
+        """Drop this conversation's pooled transport, in EVERY provider's pool.
 
-    # ------------------------------------------------------------------
-    # Lost-turn recovery (see src/integrations/mitra/turn_recovery.py)
-    # ------------------------------------------------------------------
+        Best-effort: the DB change that prompted it is already
+        committed-or-committing, and a socket that fails to close is reaped
+        anyway. The registry swallows per-pool failures for the same reason.
 
-    def _reconcile(self, agent, session_view, sent_text: str) -> Optional[Reconciliation]:
-        """Ask Mitra what became of ``sent_text``. None if not applicable."""
-        # Either wiring will do: production passes only the registry, tests and
-        # registry-less callers pass only the single client. Checking just
-        # mitra_rest would silently disable turn recovery in production.
-        if (self._mitra_clients is None and self._mitra_rest is None) or session_view is None:
-            return None
-        if getattr(agent.spec, "agent_type", None) != "remote_flow":
-            return None
-        if not session_view.remote_session_id or not session_view.remote_profile_id:
-            return None
-
-        # Same rule as _finalize: ask the Mitra this agent's scope actually
-        # interviewed against, not whichever one the default scope points at.
-        rows = self.rest_for(agent).recent_chat(
-            session_view.remote_session_id, session_view.remote_profile_id,
-        )
-        return reconcile(rows, sent_text)
-
-    def _recover_timed_out_turn(self, agent, session_view, sent_text, exc):
-        """Turn a MitraTurnTimeout into the reply Mitra already produced.
-
-        Returns an AgentTurn to carry on with, or None to let the timeout
-        propagate (the client then gets its 504 as before).
+        ACROSS ALL PROVIDERS, not one named platform's pool. This fires when a
+        conversation switches agents, and the agent it switches AWAY from may
+        belong to either platform -- so closing only one pool left the other's
+        socket alive and still authenticated against the abandoned session.
         """
-        try:
-            result = self._reconcile(agent, session_view, sent_text)
-        except Exception as recovery_error:
-            # Recovery is best-effort: never let it mask the original timeout.
-            logger.warning("turn recovery failed after %s: %s", exc, recovery_error)
-            return None
+        if self._providers is None:
+            return
+        self._providers.close_conversation(conversation_id)
 
-        if result is None or result.outcome is not TurnOutcome.ANSWERED:
-            logger.info(
-                "turn recovery: %s -- surfacing the timeout",
-                result.outcome.value if result else "not applicable",
-            )
-            return None
+    # ------------------------------------------------------------------
+    # Lost-turn recovery (see app/providers/recovery.py)
+    # ------------------------------------------------------------------
 
-        logger.info("turn recovery: recovered a reply Mitra had already sent (stage=%s)", result.stage)
+    # ------------------------------------------------------------------
+    # Finalisation and lost-turn recovery
+    #
+    # Both live in app/services/turn_finalization.py. These thin delegations
+    # remain because the turn pipeline calls them mid-sequence and the names are
+    # referenced from the numbered steps above.
+    # ------------------------------------------------------------------
 
-        # completion_poll_every_turn normally runs inside the handler, which
-        # never got that far. Without this an interview that COMPLETED during
-        # the timeout would never finalise.
-        done = False
-        try:
-            done = bool(
-                agent.spec.remote.completion_poll_every_turn
-                and self.rest_for(agent).is_session_completed(session_view.remote_session_id)
-            )
-        except Exception as poll_error:
-            logger.warning("turn recovery: completion poll failed: %s", poll_error)
+    def _reconcile(self, agent, session_view, sent_text: str, user) -> Optional[Reconciliation]:
+        return self._finalizer.reconcile_turn(agent, session_view, sent_text, user)
 
-        return AgentTurn(
-            text=result.bot_text,
-            # Deliberately no options: GET /api/companychat/ carries no
-            # extra_content, so choice buttons cannot be recovered. Flows that
-            # emit them degrade to text (record_stories/guided_guest never does).
-            options=[],
-            session_delta=SessionDelta(
-                state=SessionState.awaiting_user,
-                # step is left alone -- the REST payload has `stage`, not the
-                # numeric step, and step is display-only.
-                remote_session_id=session_view.remote_session_id,
-                remote_profile_id=session_view.remote_profile_id,
-                remote_flow=agent.spec.remote.flow_name,
-                remote_bot_route=session_view.remote_bot_route,
-            ),
-            terminal=done,
+    def _recover_timed_out_turn(self, agent, session_view, sent_text, exc, user):
+        return self._finalizer.recover_timed_out_turn(agent, session_view, sent_text, exc, user)
+
+    def _record_session_follow_up(
+        self, conversation_id, agent_id, user, request_id=None,
+    ) -> None:
+        self._finalizer.record_session_follow_up(
+            conversation_id, agent_id, user, request_id,
         )
+
+    def _finalize(self, session_view, agent, user):
+        return self._finalizer.finalize(session_view, agent, user)
+
+    def _finalize_claiming(self, session_view, agent, user):
+        return self._finalizer.finalize_claiming(session_view, agent, user)
 
     def resume_turn(self, session_id: uuid.UUID, user) -> Optional["ResumeResult"]:
         """Public entry point for POST /api/sessions/{id}/resume.
 
         The manual counterpart to _recover_timed_out_turn, for when automatic
-        recovery came back PENDING (Mitra was still generating) and the client
-        is polling. Read-only against Mitra: it never re-sends the user's turn.
+        recovery came back PENDING (the platform was still generating) and the
+        client is polling. Read-only: it never re-sends the user's turn.
         Returns None if no such session exists so the route can 404.
         """
         session_view = self._sessions.get(session_id)
@@ -667,7 +702,7 @@ class OrchestrationService:
         if agent is None or not last_user_text:
             return ResumeResult(outcome=TurnOutcome.NOT_DELIVERED, session=session_view)
 
-        result = self._reconcile(agent, session_view, last_user_text)
+        result = self._reconcile(agent, session_view, last_user_text, user)
         if result is None:
             return ResumeResult(outcome=TurnOutcome.NOT_DELIVERED, session=session_view)
         if result.outcome is not TurnOutcome.ANSWERED:
@@ -719,168 +754,3 @@ class OrchestrationService:
             )
         return result.session
 
-    def _record_session_follow_up(
-        self, conversation_id, agent_id, user, request_id=None,
-    ) -> None:
-        """Persist Saarthi's closing question as a real assistant message.
-
-        WHY STORED, when the completion notice right above it is not: the
-        notice ("Your discussion report is ready" + the download link) is a
-        RENDERING of the agent_sessions row, which is why
-        GET /api/conversations/{id}/messages returns sessions instead of a
-        synthetic message row for it. This is not that -- it is a
-        conversational turn. Stored, it survives a reload in the right place
-        and reaches the next agent as history, so the model that answers
-        "yes, one more thing" can see what was asked.
-
-        `agent_id` is the session's OWN agent, and it is not optional:
-        ck_conversation_messages_assistant_attribution requires every assistant
-        row to name a speaker (migration 0007 -- "no reply is ever anonymous"),
-        and it is what distinct_agent_sequence reads to rebuild the flow
-        breadcrumb. Naming the interview agent leaves that breadcrumb
-        unchanged (consecutive duplicates collapse) and matches how the client
-        already attributes the completion notice directly above. It says
-        nothing about who answers NEXT: the session is terminal, so
-        RouterService Gate 2 no longer finds it and the next turn routes free.
-
-        `agent_session_id` IS left null, deliberately: the client anchors
-        per-session UI after the LAST message carrying that id, so tagging this
-        row with the session would place the completion notice -- and its
-        Download PDF link -- BELOW the follow-up on replay, inverting the two.
-        """
-        self._messages.insert(
-            conversation_id,
-            self._conversations.next_seq_for_update(conversation_id),
-            role="assistant",
-            content=SESSION_FOLLOW_UP,
-            agent_id=agent_id,
-            request_id=request_id,
-            actor=getattr(user, "user_id", None) or SYSTEM_ACTOR,
-        )
-        self._conversations.touch(conversation_id)
-
-    def _finalize(self, session_view, agent, user):
-        """Finalisation, as a plain session -- the shape every caller that does
-        not care who won the claim wants. See _finalize_claiming."""
-        return self._finalize_claiming(session_view, agent, user).session
-
-    def _finalize_claiming(self, session_view, agent, user) -> _Finalization:
-        """Finalisation, triggered by AgentTurn.terminal (design doc §4.7, §8.5).
-
-        Mitra's Story.session is UNIQUE (story_models.py:30, verified against
-        real source) -- a second finalize() call for one session fails on
-        Mitra's side. claim_finalizing()'s conditional UPDATE + uq_agent_sessions_remote_session
-        together make a duplicate structurally impossible on Saarthi's side
-        too, which is why the claim is step 1 and everything else only runs
-        if it's won.
-        """
-        # 1. THE CLAIM.
-        claimed = self._sessions.claim_finalizing(session_view.id)
-        if claimed is None:
-            # Zero rows: another request already owns finalisation. Return
-            # whatever the DB actually shows right now (still 'finalizing',
-            # or already 'completed' with its real result_ref if the winner
-            # finished first) -- the client polls either way.
-            current = self._sessions.get(session_view.id)
-            return _Finalization(
-                session=current if current is not None else session_view, claimed=False,
-            )
-
-        # 2. Audit the claim.
-        self._audit.insert(
-            action="session_finalize",
-            entity_type="agent_session",
-            entity_id=claimed.id,
-            before=session_view.model_dump(mode="json"),
-            after=claimed.model_dump(mode="json"),
-        )
-
-        # 3. CLOSE THE CHANNEL cleanly BEFORE calling finalize.
-        if self._mitra_sessions is not None:
-            self._mitra_sessions.close(claimed.conversation_id)
-
-        # 4. finalize() with the user's token.
-        #    THROUGH THIS AGENT'S OWN CLIENT: `agent` is scope-resolved by the
-        #    caller, so for a tenant that points at its own Mitra this is that
-        #    tenant's endpoint, not the default one.
-        rest = self.rest_for(agent)
-        try:
-            story_id, _content = rest.finalize(
-                session_id=claimed.remote_session_id,
-                profile_id=claimed.remote_profile_id,
-                flow=agent.spec.remote.flow_name,
-                language=claimed.language,
-                token=user.token,
-                # Per-agent, because v1 and v2 resolve the story bot from
-                # different Mitra tables -- see MitraRestClient's module
-                # docstring. Sending a flow to the endpoint that cannot
-                # resolve it is a deterministic HTTP 500.
-                path=agent.spec.remote.finalize_path,
-                # Also per-agent: Mitra turns token presence into auth=True and
-                # picks the PDF template's user_type from it, so a guest flow
-                # finalised with a token renders a BLANK pdf rather than
-                # failing. Must match the socket's `access_token: None`.
-                as_guest=agent.spec.remote.finalize_as_guest,
-            )
-        except Exception as e:
-            # Don't leave the session stuck in 'finalizing' forever -- that
-            # state has no other way out. Not explicitly in the doc's
-            # sequence, but a session that can never reach a terminal state
-            # is a real bug.
-            self._sessions.apply(claimed, SessionDelta(state=SessionState.failed, error=str(e)))
-            raise
-
-        # 6. get_report() -- fetched BEFORE the completed-transition, not after.
-        # SessionService.apply() rejects every call on an already-terminal
-        # session, including same-state field-only updates (terminal states
-        # are final, by design -- see SessionService.ALLOWED). A second
-        # apply() call to attach report_url after transitioning to
-        # 'completed' would raise InvalidTransitionError. Fetching the
-        # report first lets result_ref and report_url land in the SAME
-        # apply() call instead.
-        # NON-FATAL, and it must stay that way. finalize() above already
-        # succeeded and is IRREVERSIBLE -- Mitra's Story.session is UNIQUE, so
-        # the story cannot be submitted a second time. Letting a report-URL
-        # problem propagate here left the session in 'finalizing' forever
-        # (the except above only guards finalize(), and nothing revisits
-        # 'finalizing'), with a story that exists in Mitra and can never be
-        # re-fetched. Observed live: Mitra serves report PDFs from a
-        # different host than MITRA_BASE_URL, so an incomplete
-        # MITRA_ALLOWED_HOSTS makes _validate_url raise MitraSSRFError on
-        # EVERY successful story.
-        #
-        # report_url is designed to be null here anyway -- generation lags,
-        # and GET /api/sessions/{id}/report polls for it later, where the
-        # identical failure is already treated as "not ready yet" (202).
-        try:
-            report_url = rest.get_report(
-                claimed.remote_session_id, media_type=agent.spec.remote.report_media_type,
-            )
-        except MitraError as e:
-            logger.warning(
-                "finalize: report fetch failed for session %s (%s); "
-                "completing without report_url -- the report route will retry",
-                claimed.id, e,
-            )
-            report_url = None
-
-        # 5. Transition to completed -- apply() sets ended_at/finalized_at itself.
-        #    report_url stays null if the report hasn't been generated yet;
-        #    a client polls /api/sessions/{id}/report for it later (outside
-        #    this method's scope).
-        delta_fields = {"result_ref": story_id}
-        if report_url:
-            delta_fields["report_url"] = report_url
-        #    Transitioning to 'completed' is itself the release: the session is
-        #    terminal, so RouterService Gate 2 stops finding it and the next
-        #    turn routes freely. The explicit conversations.unpin() that used to
-        #    follow this line is gone with the column.
-        completed = self._sessions.apply(
-            claimed, SessionDelta(state=SessionState.completed, **delta_fields),
-        )
-        # The follow-up message is NOT written here. This runs at step 10 of
-        # handle_turn, before the agent's own closing line is inserted at step
-        # 11, and seq is what orders the transcript -- writing it here would
-        # put "anything else?" ABOVE the reply it follows. The callers write it
-        # once they have, which is also why they need `claimed`.
-        return _Finalization(session=completed, claimed=True)

@@ -6,9 +6,10 @@ API -- so the source of truth these assert against is the migration's own
 SEED_AGENTS list, validated through the real adapter exactly as the application
 validates a row read out of agent_configs.
 
-RemoteSpec and its nested models don't set extra="forbid" (only BaseAgentSpec
-does), so a typo'd field name inside `remote:`/`routing:` would be silently
-ignored rather than rejected. These assertions are what catch that instead.
+Every model now sets extra="forbid", including the nested ones and the
+provider's own options block -- so a typo'd field name inside `remote:` is
+rejected rather than silently ignored. These assertions pin the VALUES; the
+schema pins the shape.
 """
 from __future__ import annotations
 
@@ -22,6 +23,15 @@ from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
+#: 0010 seeds the ORIGINAL shape; 0013 rewrites it into the provider-neutral
+#: envelope; 0018 moves this agent onto its own logged-in bot AND gives it a
+#: routing.intent grid. What the database actually holds -- and therefore what
+#: the application validates -- is all three applied in sequence, so that is
+#: what these assertions read. Composing them beats restating the end state: a
+#: migration whose edit changes and a pin that does not would otherwise agree
+#: with each other and disagree with the database.
+_GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
+_STORY_BOT = _VERSIONS / "0018_story_bot_route_and_routing_intent.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -38,10 +48,33 @@ def _seed_specs() -> dict:
     What it returns is the complete spec as stored -- there is no second
     migration left to merge in.
     """
-    spec = importlib.util.spec_from_file_location("_seed_0010", _MIGRATION)
+    seed = _load_migration("_seed_0010", _MIGRATION)
+    generalize = _load_migration("_generalize_0013", _GENERALIZE)
+    story_bot = _load_migration("_story_bot_0018", _STORY_BOT)
+
+    agents = {}
+    for agent in seed.seed_agents():
+        agent = copy.deepcopy(agent)
+        if isinstance(agent.get("remote"), dict):
+            agent["agent_type"] = "remote_flow"
+            agent["remote"] = generalize._to_envelope(agent["remote"])
+        # 0018 GUARDS BOTH ITS EDITS INTERNALLY -- the route move checks the
+        # provider, the flow name and the current route, so it will not convert
+        # a row that has drifted; the intent grid is only added to an agent that
+        # has one. It is therefore applied to every agent and is a no-op on the
+        # ones it does not own, which is exactly what the migration does.
+        agent = story_bot.apply(agent, agent["key"])
+        agents[agent["key"]] = agent
+    return agents
+
+
+def _load_migration(name: str, path: Path):
+    """Imported as a file rather than a module: `migrations/versions` is not a
+    package and alembic revision filenames are not importable identifiers."""
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return {a["key"]: a for a in module.seed_agents()}
+    return module
 
 
 def _raw() -> dict:
@@ -92,18 +125,52 @@ def test_bot_route_and_company_are_stored_literals():
     """`remote.bot_route` / `remote.company` are plain stored fields, which is
     what lets a tenant-scoped agent_configs row override them.
 
+    The route is the one 0018 moved this agent to: `/guided_guest` was a GUEST
+    interview whose opening steps asked a logged-in user for their own name and
+    profile. `/saarthi_story_flow` is the bot Mitra's own resolver answers with
+    for the portal URL `?flow=saarthi_story_flow`, verified against QA:
+    GET /api/flow-connection-info/?flow_route=saarthi_story_flow returns
+    `{"bot_route": "/saarthi_story_flow"}`.
+
+    `flow_name` is asserted UNCHANGED alongside the moved route, for the same
+    reason the sibling agent's is: it selects the story renderer at
+    finalisation, and moving it renders a blank PDF with a 200 from every call.
+
     Also asserts they carry no `${VAR}` reference: that substitution is gone,
     so one left behind would be sent to Mitra verbatim as a company slug.
     """
     raw = _raw()["remote"]
-    assert raw["bot_route"] == "/guided_guest"
-    assert raw["company"] == "shikshalokamstaging"
-    for value in (raw["bot_route"], raw["company"]):
+    assert raw["options"]["bot_route"] == "/saarthi_story_flow"
+    assert raw["options"]["company"] == "shikshalokamstaging"
+    for value in (raw["options"]["bot_route"], raw["options"]["company"]):
         assert "${" not in value
 
     remote = _load_spec().remote
     assert remote.provider == "mitra"
     assert remote.flow_name == "guest-mi-story"
+
+
+def test_this_agent_never_names_the_caller_to_mitra():
+    """THE regression pin for the sibling agent's report.
+
+    Mitra resolves a profile by (email, company), and this agent and
+    `capture_discussion` carry the SAME company and the same derived email --
+    so they share ONE Profile row. Mitra reads a non-empty `first_name` as "we
+    already know this person" and skips interview steps 1-5
+    (chatbot/consumers/async_consumer.py, create_chat_session), and those steps
+    are what populate `story.other_params`, where the minutes-of-meeting report
+    reads location, organization, participants_count, discussion_date,
+    district, village, pri_member and school_representative.
+
+    So opting THIS agent in would silently re-break Capture Discussion's
+    report -- the exact regression 0016 exists to prevent. 0018 moves the route and
+    nothing else; the profile questions are removed on the Mitra side instead,
+    which costs the sibling nothing.
+
+    Enabling this safely needs its own `company` slug first, which isolates the
+    Profile row. Do not flip the flag on the shared one.
+    """
+    assert _raw()["remote"]["options"].get("send_user_profile") in (None, False)
 
 
 def test_finalize_path_is_v1_because_mitra_has_no_flow_row_for_this_flow():
@@ -121,7 +188,7 @@ def test_finalize_path_is_v1_because_mitra_has_no_flow_row_for_this_flow():
     exactly the way that took several debugging rounds to find. Flip it only
     together with a Mitra-side Flow row for 'guest-mi-story'.
     """
-    assert _load_spec().remote.finalize_path == "/api/end-story/"
+    assert _load_spec().remote.options["finalize_path"] == "/api/end-story/"
 
 
 def test_the_two_agents_finalize_differently_per_agent():
@@ -143,10 +210,10 @@ def test_the_two_agents_finalize_differently_per_agent():
     sibling = _adapter.validate_python(sibling_raw)
 
     assert sibling.remote.flow_name == "guest-discussion"
-    assert sibling.remote.finalize_path == "/api/end-story/"
-    assert sibling.remote.finalize_as_guest is True
+    assert sibling.remote.options["finalize_path"] == "/api/end-story/"
+    assert sibling.remote.options["finalize_as_guest"] is True
 
-    assert _load_spec().remote.finalize_as_guest is False
+    assert _load_spec().remote.options["finalize_as_guest"] is False
 
 
 def test_router_and_direct_selectable():

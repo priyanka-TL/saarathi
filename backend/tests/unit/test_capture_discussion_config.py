@@ -6,9 +6,10 @@ API -- so the source of truth these assert against is the migration's own
 SEED_AGENTS list, validated through the real adapter exactly as the application
 validates a row read out of agent_configs.
 
-RemoteSpec and its nested models don't set extra="forbid" (only BaseAgentSpec
-does), so a typo'd field name inside `remote:`/`routing:` would be silently
-ignored rather than rejected. These assertions are what catch that instead.
+Every model now sets extra="forbid", including the nested ones and the
+provider's own options block -- so a typo'd field name inside `remote:` is
+rejected rather than silently ignored. These assertions pin the VALUES; the
+schema pins the shape.
 """
 from __future__ import annotations
 
@@ -22,6 +23,15 @@ from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
+#: 0010 seeds the ORIGINAL shape; 0013 rewrites it into the provider-neutral
+#: envelope; 0016 moves this agent onto its own bot and pins `send_user_profile`
+#: off. What the database actually holds -- and therefore what the application
+#: validates -- is all three applied in sequence, so that is what these
+#: assertions read. Composing them beats restating the end state: a migration
+#: whose edit changes and a pin that does not would otherwise agree with each
+#: other and disagree with the database.
+_GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
+_DISCUSSION_BOT = _VERSIONS / "0016_discussion_bot_route.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -38,10 +48,37 @@ def _seed_specs() -> dict:
     What it returns is the complete spec as stored -- there is no second
     migration left to merge in.
     """
-    spec = importlib.util.spec_from_file_location("_seed_0010", _MIGRATION)
+    seed = _load_migration("_seed_0010", _MIGRATION)
+    generalize = _load_migration("_generalize_0013", _GENERALIZE)
+    discussion_bot = _load_migration("_discussion_bot_0016", _DISCUSSION_BOT)
+
+    agents = {}
+    for agent in seed.seed_agents():
+        agent = copy.deepcopy(agent)
+        if isinstance(agent.get("remote"), dict):
+            agent["agent_type"] = "remote_flow"
+            agent["remote"] = generalize._to_envelope(agent["remote"])
+        # 0016 touches exactly one agent, and the guard below is the migration's
+        # own predicate: it will not convert a row whose bot_route has drifted.
+        # The route move and the `send_user_profile: false` pin are one edit now,
+        # so there is no second step to compose.
+        if (
+            agent["key"] == discussion_bot.AGENT_KEY
+            and agent.get("remote", {}).get("options", {}).get("bot_route")
+            == discussion_bot.OLD_BOT_ROUTE
+        ):
+            agent = discussion_bot.apply(agent)
+        agents[agent["key"]] = agent
+    return agents
+
+
+def _load_migration(name: str, path: Path):
+    """Imported as a file rather than a module: `migrations/versions` is not a
+    package and alembic revision filenames are not importable identifiers."""
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return {a["key"]: a for a in module.seed_agents()}
+    return module
 
 
 def _raw() -> dict:
@@ -70,13 +107,21 @@ def test_pin_session_is_true():
 
 
 def test_bot_route_and_company_are_stored_literals():
-    """These three are how the interview lands on the SAME company bot the
-    Mitra portal's chaupal socket uses: both consumers resolve it as
+    """These three are how the interview lands on the right Mitra bot: the
+    consumer resolves it as
     CompanyBot.objects.get(company=profile.company, route=bot_route), so
-    bot_route (-> /shikshalokam_chaupal) and company (-> the company slug)
-    together pick the bot, and flow_name selects the story branch at
-    finalisation. Nothing else in Mitra's story or PDF path distinguishes
-    Saarthi's socket from the portal's.
+    bot_route and company (-> the company slug) together pick the bot, while
+    flow_name selects the story branch at finalisation.
+
+    THE ROUTE AND THE FLOW MOVED SEPARATELY, AND ONLY ONE OF THEM MOVED.
+    Migration 0016 took this agent off /shikshalokam_chaupal -- a bot shared
+    with the Mitra web portal and the WhatsApp service -- and onto its own.
+    `flow_name` deliberately did NOT follow: Mitra's v1 /api/end-story/ branches
+    on flow == 'guest-discussion' to render the minutes-of-meeting report, and
+    any other value falls through to a generic path that renders an empty
+    template into a valid, downloadable, COMPLETELY BLANK PDF -- 200 from every
+    call, nothing logged. That asymmetry is the whole reason both halves are
+    pinned here rather than just the one that changed.
 
     They are plain stored fields rather than the old `*_env` indirection, which
     is what lets a tenant-scoped agent_configs row point this agent at its own
@@ -90,10 +135,37 @@ def test_bot_route_and_company_are_stored_literals():
     # NOT the story bot route. These two agents differ by exactly one route and
     # one flow name, and swapping either sends the interview to the wrong Mitra
     # bot with no error -- just the wrong questions.
-    assert raw["bot_route"] == "/shikshalokam_chaupal"
-    assert raw["company"] == "shikshalokamstaging"
-    for value in (raw["bot_route"], raw["company"]):
+    assert raw["options"]["bot_route"] == "/saarthi_discussion_flow"
+    assert raw["options"]["company"] == "shikshalokamstaging"
+    for value in (raw["options"]["bot_route"], raw["options"]["company"]):
         assert "${" not in value
+
+
+def test_the_caller_is_NOT_named_to_mitra():
+    """THE REGRESSION PIN FOR THE SKIPPED INTERVIEW. Turning this back on
+    without a Mitra-side change breaks the report, and does it silently.
+
+    The flag makes the profile upsert carry the caller's ELEVATE profile, which
+    means Saarthi writes `Profile.first_name`. Mitra reads a non-empty
+    first_name as "we already know this person" and starts the interview at the
+    CHALLENGES step instead of step 1
+    (chatbot/consumers/async_consumer.py::create_chat_session).
+
+    Steps 1-5 are what populate `story.other_params`, and other_params is where
+    mom_report.py::get_user_details reads EVERYTHING except the author --
+    location, organization, participants_count, discussion_date, district,
+    village, pri_member, school_representative. Observed live: a discussion
+    opened at current_step=6 with the autostart message recorded as the
+    CHALLENGES answer, and the report lost all of those sections. The flag
+    bought a reliable author line and cost four sections of the MOM report.
+
+    So it stays false until Mitra either exempts this bot from the skip or
+    falls back to the Profile for those fields. `record_stories` never opted in
+    at all -- see tests/unit/providers/test_mitra_profile_context.py, which
+    pins both the opted-in and opted-out wire bodies so the dormant code path
+    stays covered.
+    """
+    assert _raw()["remote"]["options"]["send_user_profile"] is False
 
 
 def test_finalize_is_v1_and_tokenless_because_only_that_renders_the_mom_report():
@@ -122,7 +194,7 @@ def test_finalize_is_v1_and_tokenless_because_only_that_renders_the_mom_report()
     it, so presenting a token on this guest flow misses a GUEST-typed template
     and lands in the same empty-string branch. Mitra's own client for this flow
     posts `access_token: null` (storyPostSessionService._callEndStory), and
-    MitraChannel._authenticate already sends `access_token: None` on the
+    WsChannel._authenticate already sends `access_token: None` on the
     socket -- finalising as an authenticated user contradicted both.
 
     Do not move either half back without the other, and not at all without a
@@ -130,8 +202,8 @@ def test_finalize_is_v1_and_tokenless_because_only_that_renders_the_mom_report()
     text-checked PDF (scripts/verify_discussion_report.py) to prove it.
     """
     remote = _load_spec().remote
-    assert remote.finalize_path == "/api/end-story/"
-    assert remote.finalize_as_guest is True
+    assert remote.options["finalize_path"] == "/api/end-story/"
+    assert remote.options["finalize_as_guest"] is True
 
 
 def test_memory_strategy_is_none_not_recent():

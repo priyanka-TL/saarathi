@@ -1,3 +1,12 @@
+"""The agent handler contract.
+
+Responsible for: TurnContext in, AgentTurn out -- plus the session view and
+delta types a handler may read and emit.
+Used by: every handler, and OrchestrationService which calls them.
+
+A Protocol rather than a base class: a handler is registered by decorator and
+needs no shared implementation.
+"""
 import enum
 from uuid import UUID
 from typing import Literal, List, Dict, Any, Optional, Protocol, ClassVar
@@ -58,6 +67,25 @@ class Option:
     value: str
 
 @dataclass(frozen=True)
+class Attachment:
+    """One downloadable document produced by a turn.
+
+    NOT an Option. An option is click-to-reply -- the SPA echoes its label and
+    posts its value back as the next turn -- so a URL there would be sent to the
+    agent as user input. An attachment is a link and nothing more.
+
+    One entry per FILE: a document offered as PDF and DOCX is two entries with
+    the same `file_name` and different `format`, which is what keeps "only one
+    format available" from being a special case anywhere.
+
+    `file_name` carries no extension; it names the saved file, not the button.
+    """
+    file_name: str
+    format: str
+    media_type: str
+    url: str
+
+@dataclass(frozen=True)
 class ToolTrace:
     tool_name: str
     iteration: int
@@ -84,6 +112,8 @@ class SessionDelta:
 class AgentTurn:
     text: str
     options: List[Option] = field(default_factory=list)
+    #: Downloadable documents, already allowlist-filtered by the provider.
+    attachments: List[Attachment] = field(default_factory=list)
     session_delta: Optional[SessionDelta] = None
     tool_traces: List[ToolTrace] = field(default_factory=list)
     model: Optional[str] = None

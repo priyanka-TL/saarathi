@@ -75,6 +75,8 @@ export function useSendMessage({ messages, onFlow, onUpsertConversation, onSessi
             html: renderAgentHtml(data.response),
             agentName: data.agent_name,
             options: data.options && data.options.length > 0 ? data.options : null,
+            attachments:
+              data.attachments && data.attachments.length > 0 ? data.attachments : null,
             agentSessionId: data.session?.id ?? null,
           });
 

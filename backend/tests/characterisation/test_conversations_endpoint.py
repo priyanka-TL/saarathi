@@ -3,9 +3,10 @@ the sidebar's recent-conversations list and resuming one into the chat pane.
 
 Real Flask app + real Postgres, matching this directory's established
 convention (see test_session_routes.py). Identity is controlled by
-monkeypatching Authenticator.authenticate (same pattern as
+monkeypatching Authenticator.authenticate directly (same pattern as
 tests/integration/test_config_versioning_lifecycle.py's admin_client
-fixture), so tests don't depend on a real LLM call just to resolve "who am I."
+fixture) rather than minting a real, ELEVATE_JWT_SECRET-verified bearer token,
+so tests don't depend on a real LLM call just to resolve "who am I."
 """
 from __future__ import annotations
 
@@ -58,6 +59,7 @@ def _general_support_agent() -> tuple[uuid.UUID, str]:
 def _seed_message(
     conversation_id: uuid.UUID, seq: int, role: str, content: str,
     agent_id=None, options=None, selected_option_id=None, agent_session_id=None,
+    attachments=None,
 ) -> uuid.UUID:
     db = SessionLocal()
     try:
@@ -65,14 +67,15 @@ def _seed_message(
         db.execute(text("""
             INSERT INTO conversation_messages
                 (id, conversation_id, seq, role, content, agent_id, options, selected_option_id,
-                 agent_session_id)
+                 agent_session_id, attachments)
             VALUES
                 (:id, :conversation_id, :seq, :role, :content, :agent_id, :options, :selected_option_id,
-                 :agent_session_id)
+                 :agent_session_id, :attachments)
         """), {
             "id": msg_id, "conversation_id": conversation_id, "seq": seq, "role": role, "content": content,
             "agent_id": agent_id, "options": json.dumps(options) if options is not None else None,
             "selected_option_id": selected_option_id, "agent_session_id": agent_session_id,
+            "attachments": json.dumps(attachments) if attachments is not None else None,
         })
         db.commit()
         return msg_id
@@ -84,15 +87,15 @@ def _seed_message(
 def as_user(monkeypatch):
     """Authenticate the test client as a fresh, controlled identity.
 
-    `get_current_user` reads only `Authenticator.authenticate()` -- identity is
-    resolved once from configuration, not per request (there is no login flow
-    upstream of this API that could supply a caller-specific token) -- so
-    patching that one method is sufficient.
+    Patches `Authenticator.authenticate()` directly -- simpler than minting a
+    real, ELEVATE_JWT_SECRET-verified bearer token per identity. The lambda
+    accepts and ignores a `token` argument, since `get_current_user` now always
+    passes one (None when the client sends no Authorization header).
     """
     def _patch(user: UserContext):
         monkeypatch.setattr(
             "app.services.identity.Authenticator.authenticate",
-            lambda self: user,
+            lambda self, token=None: user,
         )
         return user
     return _patch
@@ -595,3 +598,80 @@ def test_flow_is_empty_when_no_agent_has_spoken_yet(client, as_user):
 
     assert flow["stops"] == []
     assert flow["current_index"] == -1
+
+
+# ---------------------------------------------------------------------------
+# Documents survive a conversation being reopened
+# ---------------------------------------------------------------------------
+
+_PDF = {
+    "file_name": "MIP_student-focus-primary-grades",
+    "format": "pdf",
+    "media_type": "application/pdf",
+    "url": "https://qa-mohini-static.shikshalokam.org/chatbot/2/x/1786-MIP.pdf",
+}
+_DOCX = {
+    **_PDF,
+    "format": "docx",
+    "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "url": "https://qa-mohini-static.shikshalokam.org/chatbot/2/x/1786-MIP.docx",
+}
+
+
+def test_reopening_a_conversation_returns_its_documents(client, as_user):
+    """THE REQUIREMENT: the files are still there, and still on the right
+    message, when the conversation is reopened from the sidebar.
+
+    Nothing else in the UI links to a generated document, so an omission here
+    does not degrade the experience -- it loses the file.
+    """
+    user = _new_user()
+    as_user(user)
+    conv_id = _seed_conversation(user, "attendance is low", datetime.now(timezone.utc))
+    agent_id, _ = _general_support_agent()
+
+    _seed_message(conv_id, 1, "user", "attendance is low")
+    _seed_message(conv_id, 2, "assistant", "Tell me more.", agent_id=agent_id)
+    _seed_message(
+        conv_id, 3, "assistant", "Your plan is ready to download.",
+        agent_id=agent_id, attachments=[_PDF, _DOCX],
+    )
+    _seed_message(conv_id, 4, "assistant", "Anything else?", agent_id=agent_id)
+
+    body = client.get(f"/api/conversations/{conv_id}/messages").json()
+    msgs = body["messages"]
+
+    # RAW, exactly as stored -- the same asymmetry `options` documents.
+    assert msgs[2]["attachments"] == [_PDF, _DOCX]
+
+    # ...and nowhere else. A later turn must not inherit an earlier one's files.
+    assert msgs[0]["attachments"] is None
+    assert msgs[1]["attachments"] is None
+    assert msgs[3]["attachments"] is None
+
+
+def test_a_conversation_with_no_documents_reports_none(client, as_user):
+    user = _new_user()
+    as_user(user)
+    conv_id = _seed_conversation(user, "hello", datetime.now(timezone.utc))
+    agent_id, _ = _general_support_agent()
+    _seed_message(conv_id, 1, "user", "hello")
+    _seed_message(conv_id, 2, "assistant", "hi there", agent_id=agent_id)
+
+    body = client.get(f"/api/conversations/{conv_id}/messages").json()
+
+    assert all(m["attachments"] is None for m in body["messages"])
+
+
+def test_a_user_message_cannot_carry_documents(client, as_user):
+    """Enforced by ck_conversation_messages_attachments_only_assistant, the same
+    guard `options` has had since it was added. Nothing produces one, so the
+    constraint is what keeps that true."""
+    import sqlalchemy.exc
+
+    user = _new_user()
+    as_user(user)
+    conv_id = _seed_conversation(user, "hello", datetime.now(timezone.utc))
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError):
+        _seed_message(conv_id, 1, "user", "hello", attachments=[_PDF])

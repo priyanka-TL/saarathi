@@ -1,9 +1,9 @@
 """Test doubles for the characterisation suite.
 
 These stand in for the two external dependencies the application reaches for at
-runtime: the chat model (via ``app.llm.get_llm``) and the search provider (via
-``app.tools.DDGS``). Both are replaced so the suite is deterministic, offline,
-and free.
+runtime: the chat model (via ``app.llm.factory.LlmFactory.get``) and the search
+provider (via ``app.tools.DDGS``). Both are replaced so the suite is
+deterministic, offline, and free.
 """
 
 from __future__ import annotations
@@ -28,17 +28,17 @@ class ScriptExhausted(AssertionError):
 class ScriptedChatModel(BaseChatModel):
     """A chat model that returns pre-scripted responses, in order.
 
-    One shared instance is returned by every ``get_llm()`` call, so the script is
-    a single ordered queue across all five call sites (four agents plus the
-    router). That makes call *ordering* explicit and assertable: on the router
-    path, response 1 is the classification and response 2 is the agent reply.
+    One shared instance is returned by every ``LlmFactory.get()`` call, so the
+    script is a single ordered queue across all five call sites (four agents
+    plus the router). That makes call *ordering* explicit and assertable: on the
+    router path, response 1 is the classification and response 2 is the agent
+    reply.
 
     Satisfies the three things the real client must do for the app to work:
 
-    1. Behave as a Runnable inside an LCEL chain --- toolless agents build
-       ``prompt | llm | StrOutputParser()`` (``src/agents/base.py:40``).
-    2. Support ``bind_tools`` --- ``ResearchAgent`` calls it
-       (``src/agents/base.py:65``); ``BaseChatModel.bind_tools`` raises
+    1. Behave as a Runnable inside an LCEL chain.
+    2. Support ``bind_tools`` --- ``LlmAgentHandler`` calls it for any spec that
+       declares tools; ``BaseChatModel.bind_tools`` raises
        ``NotImplementedError`` by default.
     3. Record what it was asked, so tests can assert on the router prompt and on
        history growth.

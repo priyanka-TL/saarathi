@@ -21,99 +21,124 @@ def mock_settings():
     return Settings(
         OPENROUTER_API_KEY="test",
         auth_check=True,
-        saarthi_static_token=SAMPLE_TOKEN
     )
 
 def test_context_from_token_derives_email_and_roles(mock_settings):
-    # TRAP 1 & 3 test
+    # TRAP 1 & 3 test. verify=False (the default) -- this is testing the
+    # decode/mapping logic itself, independent of trust level.
     ctx = context_from_token(SAMPLE_TOKEN, mock_settings)
-    
+
     # Assert Trap 1: Email derivation
     assert ctx.user_id == "1355"
     assert ctx.email == "1355@shikshalokam.org"
-    
+
     # Assert other basic fields
     assert ctx.display_name == "Priyanka Pradeep"
     assert ctx.tenant_code == "shikshalokam"
     assert ctx.active_org_id == "62"
     assert len(ctx.orgs) == 1
-    
+
     org = ctx.orgs[0]
     assert org.org_id == "62"
     assert org.org_code == "sot"
-    
+
     # Assert Trap 3: Roles from containing org
     assert "mentee" in org.roles
     assert "creator" in org.roles
     assert "program_designer" in org.roles
-    
+
     # Assert the active roles property
     assert set(ctx.roles) == {"mentee", "creator", "program_designer"}
 
 def test_context_from_token_roles_not_flattened(mock_settings):
     # If the user switches active_org_id to something else, they shouldn't see org 62's roles.
     ctx = context_from_token(SAMPLE_TOKEN, mock_settings)
-    
+
     # Manually simulate a request where the active org is different or None
     # We use a dataclass replace equivalent (object.__setattr__ since frozen, or just mock)
     object.__setattr__(ctx, 'active_org_id', "999")
-    
+
     assert len(ctx.roles) == 0
 
-def test_expired_token_is_accepted():
-    # Saarthi has already validated the token. Expiry is NOT re-checked here:
-    # rejecting it would refuse a request Saarthi accepted, and (because the
-    # Authenticator resolves at construction) would take the process down.
-    expired_payload = {
-        "data": {"id": 1},
-        "exp": int(time.time()) - 3600
-    }
-    expired_token = jwt.encode(expired_payload, "secret", algorithm="HS256")
 
-    settings = Settings(
-        OPENROUTER_API_KEY="test",
-        auth_check=True,
-        saarthi_static_token=expired_token
-    )
+# ---------------------------------------------------------------------------
+# AUTH_CHECK=true: a bearer token is REQUIRED, always -- no fallback identity
+# for a request with none. One existed briefly (a boot-provisioned
+# SAARTHI_STATIC_TOKEN, decoded unverified and served to any caller that sent
+# nothing) and was removed: it was an authentication bypass, reachable by
+# anyone regardless of whether they had ever logged in.
+# ---------------------------------------------------------------------------
 
-    assert Authenticator(settings).authenticate().user_id == "1"
+def test_auth_check_true_with_no_bearer_token_raises():
+    settings = Settings(OPENROUTER_API_KEY="test", auth_check=True)
 
-def test_signature_is_not_verified():
-    # No secret is configured anywhere; a token signed with an unknown key must
-    # still decode. Same reason as above -- Saarthi is the only validator.
-    token = jwt.encode({"data": {"id": 7, "tenant_code": "t"}}, "some-other-secret", algorithm="HS256")
+    with pytest.raises(InvalidTokenError, match="No bearer token"):
+        Authenticator(settings).authenticate()
 
-    settings = Settings(OPENROUTER_API_KEY="test", auth_check=True, saarthi_static_token=token)
+def test_auth_check_true_construction_never_requires_a_token_upfront():
+    # Nothing is decoded at BOOT any more -- identity is resolved per request,
+    # from whatever that request's own Authorization header carries. A
+    # deployment with no bearer token yet configured anywhere must still
+    # start; it will 401 real requests until one is actually sent, which is
+    # the point.
+    settings = Settings(OPENROUTER_API_KEY="test", auth_check=True)
 
-    ctx = Authenticator(settings).authenticate()
-    assert ctx.user_id == "7"
-    assert ctx.tenant_code == "t"
+    Authenticator(settings)  # must not raise
 
-def test_auth_check_true_uses_env_token(mock_settings):
-    # The identity comes from SAARTHI_STATIC_TOKEN, and the raw token is kept
-    # on the context (OrchestrationService relays it to Mitra's finalize).
-    ctx = Authenticator(mock_settings).authenticate()
 
-    assert ctx.user_id == "1355"
-    assert ctx.email == "1355@shikshalokam.org"
-    assert ctx.tenant_code == "shikshalokam"
-    assert ctx.token == SAMPLE_TOKEN
+# ---------------------------------------------------------------------------
+# Per-request bearer tokens: verified against ELEVATE_JWT_SECRET
+# ---------------------------------------------------------------------------
 
-def test_auth_check_true_requires_token():
-    settings = Settings(OPENROUTER_API_KEY="test", auth_check=True, saarthi_static_token=None)
+def test_authenticate_returns_the_bearer_tokens_own_identity(mock_settings):
+    mock_settings.elevate_jwt_secret = "shared-secret"
+    bearer = jwt.encode({"data": {"id": "999", "tenant_code": "other"}}, "shared-secret", algorithm="HS256")
 
-    with pytest.raises(ValueError, match="SAARTHI_STATIC_TOKEN is required"):
-        Authenticator(settings)
+    ctx = Authenticator(mock_settings).authenticate(bearer)
 
-def test_auth_check_true_rejects_undecodable_token():
-    settings = Settings(OPENROUTER_API_KEY="test", auth_check=True, saarthi_static_token="not-a-jwt")
+    assert ctx.user_id == "999"
+    assert ctx.tenant_code == "other"
+
+def test_authenticate_rejects_a_bearer_token_with_the_wrong_signature(mock_settings):
+    mock_settings.elevate_jwt_secret = "shared-secret"
+    forged = jwt.encode({"data": {"id": "999"}}, "wrong-secret", algorithm="HS256")
 
     with pytest.raises(InvalidTokenError):
-        Authenticator(settings)
+        Authenticator(mock_settings).authenticate(forged)
+
+def test_authenticate_rejects_an_expired_bearer_token(mock_settings):
+    # A per-request token's expiry IS enforced -- unlike the removed static
+    # token (operator-provisioned, never attacker-reachable), this one comes
+    # straight from the request.
+    mock_settings.elevate_jwt_secret = "shared-secret"
+    expired = jwt.encode(
+        {"data": {"id": "999"}, "exp": int(time.time()) - 3600},
+        "shared-secret",
+        algorithm="HS256",
+    )
+
+    with pytest.raises(InvalidTokenError):
+        Authenticator(mock_settings).authenticate(expired)
+
+def test_authenticate_refuses_a_bearer_token_when_no_secret_is_configured(mock_settings):
+    # The suite configures ELEVATE_JWT_SECRET globally (see conftest.py), so
+    # this test explicitly blanks it on its own settings object -- a
+    # per-request token cannot be trusted unverified, so it is refused rather
+    # than silently accepted. There is no fallback identity to serve instead.
+    mock_settings.elevate_jwt_secret = ""
+    bearer = jwt.encode({"data": {"id": "999"}}, "anything", algorithm="HS256")
+
+    with pytest.raises(InvalidTokenError, match="ELEVATE_JWT_SECRET"):
+        Authenticator(mock_settings).authenticate(bearer)
+
+
+# ---------------------------------------------------------------------------
+# AUTH_CHECK=false: a separate, explicit switch -- not a per-request fallback
+# ---------------------------------------------------------------------------
 
 def test_auth_check_false_returns_hardcoded_identity():
     # No token at all, and none required.
-    settings = Settings(OPENROUTER_API_KEY="test", auth_check=False, saarthi_static_token=None)
+    settings = Settings(OPENROUTER_API_KEY="test", auth_check=False)
 
     ctx = Authenticator(settings).authenticate()
 
@@ -125,8 +150,10 @@ def test_auth_check_false_returns_hardcoded_identity():
     # There is no token to relay when auth is off.
     assert ctx.token is None
 
-def test_auth_check_false_ignores_any_configured_token(mock_settings):
-    # A leftover SAARTHI_STATIC_TOKEN must not leak back in once auth is off.
+def test_auth_check_false_ignores_any_bearer_token(mock_settings):
+    # Flipping auth_check off on an otherwise-normal settings object must
+    # still serve the hardcoded identity -- the dev switch is unconditional,
+    # not "unless a token happens to be configured."
     mock_settings.auth_check = False
 
     ctx = Authenticator(mock_settings).authenticate()

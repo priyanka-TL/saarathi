@@ -22,6 +22,7 @@ THREE PROPERTIES MATTER ENOUGH TO PIN
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 from pathlib import Path
 
@@ -34,6 +35,13 @@ from app.domain.agent_spec import AgentSpec, canonical_json
 
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
+#: 0010 writes the original `remote` shape; 0013 rewrites it into the
+#: provider-neutral envelope; 0015 strips Saathi's now-retired token-minting
+#: auth fields. The database holds all three applied in sequence, so
+#: validation and checksum assertions read THAT -- otherwise this suite would
+#: pin a shape the application no longer accepts.
+_GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
+_SAATHI_AUTH_DROP = _VERSIONS / "0015_saathi_config_end_state.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -48,8 +56,42 @@ def _module(path: Path, name: str):
 
 
 @pytest.fixture(scope="module")
-def seed():
-    return _module(_MIGRATION, "_seed_0010")
+def generalize():
+    return _module(_GENERALIZE, "_generalize_0013")
+
+
+@pytest.fixture(scope="module")
+def saathi_auth_drop():
+    return _module(_SAATHI_AUTH_DROP, "_saathi_auth_drop_0015")
+
+
+@pytest.fixture(scope="module")
+def seed(generalize, saathi_auth_drop):
+    """0010's seed, as 0013 then 0015 leave it.
+
+    Wrapped rather than read raw: `seed_agents()` is the SOURCE, and what the
+    application ever sees is the migrated form. A test asserting on the source
+    alone would go green while every stored row failed to validate.
+    """
+    module = _module(_MIGRATION, "_seed_0010")
+    original = module.seed_agents
+
+    def seed_agents():
+        agents = []
+        for agent in original():
+            agent = copy.deepcopy(agent)
+            if isinstance(agent.get("remote"), dict):
+                agent["agent_type"] = "remote_flow"
+                agent["remote"] = generalize._to_envelope(agent["remote"])
+                if agent["remote"].get("provider") == "saathi":
+                    agent["remote"]["auth"] = saathi_auth_drop.new_auth_block(
+                        agent["remote"]["auth"]
+                    )
+            agents.append(agent)
+        return agents
+
+    module.seed_agents = seed_agents
+    return module
 
 
 def test_every_seeded_spec_validates(seed):
@@ -69,7 +111,10 @@ def test_a_seeded_remote_spec_is_complete_as_written(seed):
     remote = [s for s in seed.seed_agents() if s.get("agent_type") == "remote_flow"]
     assert remote, "0010 should seed the remote_flow agents"
     for raw in remote:
-        assert "connection" in raw["remote"], raw["key"]
+        # The endpoint is on the envelope itself now rather than in a nested
+        # `connection` block -- the core reads it, so it is not the provider's.
+        assert raw["remote"]["base_url"], raw["key"]
+        assert raw["remote"]["auth"]["credential_env"], raw["key"]
         _adapter.validate_python(raw)
 
 
@@ -165,6 +210,86 @@ def test_the_seeded_configs_in_the_database_still_validate():
     assert rows, "a migrated database must have an active default-scope config"
     for row in rows:
         _adapter.validate_python(row.config)
+
+
+def test_each_delegated_agent_drives_its_own_bot():
+    """THE REGRESSION PIN FOR MIGRATIONS 0016 AND 0018, read off the migrated
+    database rather than off any migration's source -- this is the one assertion
+    that sees what all of them actually produced, in order, and it is the same
+    on a fresh `make migrate` as on an upgraded live database.
+
+    Both delegated Mitra agents have now been moved onto their own dedicated
+    bot, one migration each: 0016 moved `capture_discussion` off the shared
+    /shikshalokam_chaupal, and 0018 moved `record_stories` off the guest
+    /guided_guest. Each was allowed to move exactly one of them, and the routes
+    must still be DISTINCT. A migration whose predicate is too broad does not
+    fail loudly: it points a working interview at a bot that answers, with
+    different questions.
+
+    BOTH flow_names are asserted UNCHANGED alongside their moved routes, and
+    that pairing is the point of this test. The bot and the flow are separate
+    keys on separate Mitra tables: bot_route picks the CompanyBot, flow_name
+    picks the story branch at finalisation. Mitra's v1 /api/end-story/ branches
+    on flow == 'guest-discussion' to render the minutes-of-meeting report and
+    resolves 'guest-mi-story' from the SessionFlowName enum; any other value
+    renders an empty template into a valid, downloadable, COMPLETELY BLANK PDF
+    and returns 200.
+    """
+    session = SessionLocal()
+    try:
+        rows = session.execute(
+            text("""
+                SELECT a.key,
+                       c.config->'remote'->>'provider'                AS provider,
+                       c.config->'remote'->>'flow_name'               AS flow_name,
+                       c.config->'remote'->'options'->>'bot_route'    AS bot_route,
+                       c.config->'remote'->'options'->>'send_user_profile'
+                                                                      AS send_user_profile
+                  FROM agents a
+                  JOIN agent_configs c ON c.agent_id = a.id
+                 WHERE c.is_active
+                   AND c.tenant_id = 'default' AND c.organization_id = 'default'
+                   AND a.key IN ('capture_discussion', 'record_stories')
+            """)
+        ).fetchall()
+    finally:
+        session.close()
+
+    by_key = {r.key: r for r in rows}
+    assert set(by_key) == {"capture_discussion", "record_stories"}
+
+    discussion = by_key["capture_discussion"]
+    assert discussion.provider == "mitra"
+    assert discussion.bot_route == "/saarthi_discussion_flow"
+    assert discussion.flow_name == "guest-discussion", (
+        "the flow selects the MOM renderer; moving it renders a blank PDF"
+    )
+    assert discussion.send_user_profile == "false", (
+        "0016 pins this off: writing Profile.first_name makes Mitra skip to "
+        "the CHALLENGES step, and the skipped steps are what fill the MOM report"
+    )
+
+    story = by_key["record_stories"]
+    assert story.provider == "mitra"
+    assert story.bot_route == "/saarthi_story_flow", (
+        "0018 moves this agent off the guest /guided_guest bot, whose opening "
+        "steps asked a logged-in user for their own name and profile"
+    )
+    assert story.flow_name == "guest-mi-story", (
+        "the flow selects the story renderer; moving it renders a blank PDF"
+    )
+    assert story.send_user_profile is None, (
+        "the story flow never opted in, and 0018 kept it that way: this agent "
+        "shares one Mitra Profile row with capture_discussion -- same (email, "
+        "company) -- so writing first_name here would make the DISCUSSION skip "
+        "to CHALLENGES and empty its MOM report. That is 0016's regression"
+    )
+
+    assert discussion.bot_route != story.bot_route, (
+        "each delegated agent must drive its OWN bot -- a too-broad predicate "
+        "points a working interview at a bot that answers, with the wrong "
+        "questions"
+    )
 
 
 def test_capability_membership_is_seeded_on_the_first_run():

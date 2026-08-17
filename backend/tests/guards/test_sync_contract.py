@@ -24,7 +24,7 @@ def test_no_endpoint_is_a_coroutine(api_app):
     Starlette runs a non-coroutine endpoint in the anyio worker threadpool.
     That is what lets the turn pipeline hold a SESSION-scoped
     `pg_try_advisory_lock` on one connection across a commit and across a
-    handler call of up to 60s, and what lets MitraChannel use `threading.Lock`
+    handler call of up to 60s, and what lets WsChannel use `threading.Lock`
     and a blocking `queue.Queue`.
 
     An `async def` endpoint here would block the event loop for the length of a
@@ -130,8 +130,8 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
 
     GET / is deliberately absent -- the React app serves the shell now.
 
-    Two groups of ADDITIONS to the Flask surface, both from making the sidebar
-    database-driven and multi-tenant:
+    Four groups of ADDITIONS to the Flask surface. The first two come from
+    making the sidebar database-driven and multi-tenant:
 
       * GET /api/ui/capabilities -- the capability document the sidebar
         renders. Under Flask this was literal markup in templates/index.html,
@@ -141,6 +141,30 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
       * /api/admin/capabilities... -- the CRUD that makes "add a capability
         without a deployment" true. Admin-gated, so a deployment with
         SAARTHI_ADMIN_ENABLED=0 answers 404 to all of them.
+
+    The third is the voice feature (speech-to-text and text-to-speech via
+    Bhashini), which Flask had no equivalent of:
+
+      * /api/voice/... -- three endpoints, gated on VOICE_ENABLED, which answer
+        503 VOICE_DISABLED when it is off. They do NOT touch the turn pipeline:
+        transcription produces text the user reviews in the composer before
+        sending it through /api/chat as normal, and synthesis consumes text
+        that pipeline already produced. /api/chat's contract is unchanged.
+
+      * PUT /api/voice/upload-local/{key:path} -- dev only. It exists so a
+        developer can run voice with CLOUD_STORAGE_PROVIDER=local and no cloud
+        account; under any other provider it 404s, because the browser uploads
+        to the storage origin instead.
+
+    The fourth is the profile surface, which Flask had no equivalent of either
+    -- under Mitra these five fields were only ever collected conversationally,
+    by an LLM tool over a WebSocket:
+
+      * GET/PATCH /api/profile -- the caller's own ELEVATE profile, read and
+        updated with the CALLER's token, which is why neither takes a user id.
+        Gated on ELEVATE_BASE_URL, answering 503 PROFILE_UNAVAILABLE when it is
+        unset. They feed the sidebar's Profile section and the completion
+        dialog shown after login; the turn pipeline is untouched.
 
     Every other entry below is a Flask path that must keep existing.
     """
@@ -168,6 +192,12 @@ def test_every_api_path_from_the_flask_app_still_exists(api_app):
         ("PATCH", "/api/admin/capabilities/{key}"),
         ("DELETE", "/api/admin/capabilities/{key}"),
         ("PUT", "/api/admin/capabilities/{key}/agents"),
+        ("POST", "/api/voice/upload-url"),
+        ("POST", "/api/voice/transcribe"),
+        ("POST", "/api/voice/speak"),
+        ("PUT", "/api/voice/upload-local/{key:path}"),
+        ("GET", "/api/profile"),
+        ("PATCH", "/api/profile"),
     }
     actual = {
         (m, r.path)

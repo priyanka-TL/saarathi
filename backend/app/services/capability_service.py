@@ -1,40 +1,8 @@
-"""Resolves the sidebar's capability document for one caller's scope.
+"""The sidebar capability document.
 
-Answers the EXACT shape the frontend already consumes, so making this
-database-driven changed no frontend code at all:
-
-    {"version": 1, "capabilities": [ {..., "agents": [...]}, ... ]}
-
-SCOPE RESOLUTION: most specific wins
-------------------------------------
-Every `capabilities` row carries `tenant_id` + `organization_id`, defaulting to
-the sentinel 'default'. Three levels are consulted per capability KEY:
-
-    (tenant, org)  >  (tenant, 'default')  >  ('default', 'default')
-
-so a tenant inherits the default catalogue until it inserts a row of its own,
-and onboarding a tenant costs zero writes. Implemented as one DISTINCT ON,
-because picking the winner per key in SQL is what keeps this two queries rather
-than one per capability -- one request holds one thread and one DB connection
-for its whole lifetime (see app/main.py), so an N+1 here would be the wrong
-shape at any size.
-
-FOUR GATES DECIDE WHETHER AN AGENT APPEARS, and all four must pass:
-
-  1. agents.status = 'enabled'          -- the global kill switch
-  2. capability_agents.is_visible       -- hidden in THIS capability
-  3. an ACTIVE agent_configs row exists in the caller's scope
-  4. spec.access.matches(user)          -- AccessSpec, evaluated in Python
-
-Gate 4 cannot be SQL: AccessSpec lives inside the JSONB config and its rules
-(tenant_codes / organization_codes / required_roles, ANDed, empty == no
-restriction) are already implemented in the domain layer. It is applied by
-calling that same method -- there must never be a second access check to drift
-out of step with it.
-
-This module is deliberately framework-free (the .importlinter contracts forbid
-app.services importing fastapi/starlette): it takes a Session and a
-UserContext and returns plain dicts.
+Responsible for: resolving which capabilities and agents a caller can see, with
+most-specific-wins scope inheritance.
+Used by: GET /api/ui/capabilities.
 """
 from __future__ import annotations
 
@@ -44,11 +12,13 @@ from sqlalchemy import text
 
 from app.core.logger import get_logger
 from app.domain.core import UserContext
+from app.domain.scope import DEFAULT_SCOPE, scope_for_user
+from app.repositories.scope_sql import (
+    scope_candidate_filter,
+    scope_precedence_order_by,
+)
 
 logger = get_logger("capability_service")
-
-#: Matches migration 0006. The sentinel meaning "applies to everyone".
-DEFAULT_SCOPE = "default"
 
 #: Bumped only if the document's SHAPE changes in a way the frontend's
 #: normaliser would have to know about. Content changes are not a version bump.
@@ -63,39 +33,30 @@ _STATUS_OUT = {
     "disabled": "disabled",
 }
 
-# DISTINCT ON (key) with the ORDER BY below picks the most specific row per
-# capability key. The two CASE expressions rank scope specificity: an exact
-# organization match sorts first, then a tenant-wide row, then the default.
-# Postgres requires the DISTINCT ON expression to lead the ORDER BY, which is
-# why `key` comes first and the display ordering is applied by the outer query.
+# DISTINCT ON picks the most specific row per key; Postgres requires that
+# expression to lead the ORDER BY, so display ordering moves to the outer query.
 #
-# THE STATUS FILTER BELONGS IN THE OUTER QUERY, NOT THE INNER ONE. Filtering
-# `status <> 'disabled'` before DISTINCT ON would drop a tenant's disabled row
-# from the candidate set, and the default row would then win -- so a tenant
-# disabling a capability would SEE THE DEFAULT ONE INSTEAD OF HIDING IT, which
-# is the exact opposite of what it asked for. Resolve the winner first, then
-# decide whether the winner is showable.
-_CAPABILITIES_SQL = text("""
+# THE STATUS FILTER MUST STAY IN THE OUTER QUERY. Filtering before DISTINCT ON
+# drops a tenant's disabled row from the candidate set, letting the default win
+# -- so disabling a capability would SHOW THE DEFAULT rather than hide it.
+_CAPABILITIES_SQL = text(f"""
     SELECT * FROM (
         SELECT DISTINCT ON (c.key)
                c.id, c.key, c.name, c.description, c.icon, c.badge,
                c.status, c.display_order, c.metadata
         FROM capabilities c
-        WHERE c.tenant_id IN (:tenant_id, :default_scope)
-          AND c.organization_id IN (:organization_id, :default_scope)
+        WHERE {scope_candidate_filter("c")}
         ORDER BY c.key,
-                 CASE WHEN c.organization_id = :organization_id THEN 0 ELSE 1 END,
-                 CASE WHEN c.tenant_id = :tenant_id THEN 0 ELSE 1 END
+                 {scope_precedence_order_by("c")}
     ) resolved
     WHERE resolved.status <> 'disabled'
     ORDER BY resolved.display_order, resolved.key
 """)
 
-# Membership inherits the capability's scope, so this needs no scope filter of
-# its own -- it is joined against the ids the query above already resolved.
-# The agent's CONFIG, however, is scoped, and is resolved with the same
-# most-specific-wins rule via a LATERAL subquery.
-_AGENTS_SQL = text("""
+# Membership inherits the capability's scope, so it needs no filter of its own.
+# The agent's CONFIG is scoped, and is resolved with the same most-specific-wins
+# rule via the LATERAL below.
+_AGENTS_SQL = text(f"""
     SELECT ca.capability_id,
            a.key                                        AS agent_key,
            COALESCE(ca.label_override, a.name)          AS label,
@@ -103,7 +64,18 @@ _AGENTS_SQL = text("""
            a.icon                                       AS icon,
            ca.display_order                             AS display_order,
            ca.metadata                                  AS metadata,
-           cfg.config                                   AS config
+           cfg.config                                   AS config,
+           -- Gate 5, as a FLAG rather than a filter. Selecting gated rows and
+           -- dropping them in Python is what lets the caller tell "this card
+           -- has no agents configured" (legitimate -- SG Commons, or a tenant's
+           -- own new card) from "this card's agents were all filtered out"
+           -- (a dead end, hidden below).
+           --
+           -- COMPARED AS TEXT, not as the enum: a bare literal is cast to
+           -- agent_type_enum and raises InvalidTextRepresentation for a label
+           -- the enum does not carry yet, so this would break on a database
+           -- whose migrations lag the code.
+           a.agent_type::text                           AS agent_type
     FROM capability_agents ca
     JOIN agents a ON a.id = ca.agent_id
     JOIN LATERAL (
@@ -111,56 +83,51 @@ _AGENTS_SQL = text("""
         FROM agent_configs ac
         WHERE ac.agent_id = a.id
           AND ac.is_active
-          AND ac.tenant_id IN (:tenant_id, :default_scope)
-          AND ac.organization_id IN (:organization_id, :default_scope)
-        ORDER BY CASE WHEN ac.organization_id = :organization_id THEN 0 ELSE 1 END,
-                 CASE WHEN ac.tenant_id = :tenant_id THEN 0 ELSE 1 END
+          AND {scope_candidate_filter("ac")}
+        ORDER BY {scope_precedence_order_by("ac")}
         LIMIT 1
     ) cfg ON TRUE
     WHERE ca.capability_id = ANY(:capability_ids)
       AND ca.is_visible
       AND a.status = 'enabled'
-      -- GATE 5: MITRA_ENABLED. A remote_flow agent has nothing to serve it when
-      -- Mitra is off, so advertising it renders a button that raises at click
-      -- time. This used to be enforced by ConfigSyncService writing
-      -- status='disabled' at startup; with the YAML sync gone it is a runtime
-      -- filter, matching AgentRegistry.reload().
-      AND (:mitra_enabled OR a.agent_type <> 'remote_flow')
+
     ORDER BY ca.display_order, a.key
 """)
 
 
 def _scope(user: Optional[UserContext]) -> Tuple[str, str]:
-    """The caller's (tenant_id, organization_id).
-
-    An anonymous caller resolves to the default scope, which is the same thing
-    an unknown tenant resolves to -- there is no tenants table to validate
-    against (tenants belong to the user service), so an unrecognised code
-    simply matches no tenant-specific row and inherits the default. Inert, not
-    an error.
-    """
-    if user is None:
-        return DEFAULT_SCOPE, DEFAULT_SCOPE
-    return (user.tenant_code or DEFAULT_SCOPE), (user.active_org_id or DEFAULT_SCOPE)
+    """The caller's (tenant_id, organization_id). See domain/scope.py."""
+    return scope_for_user(user)
 
 
 def _action_from(metadata: Optional[Dict[str, Any]], fallback: Dict[str, Any]) -> Dict[str, Any]:
-    """`action` lives inside `metadata` rather than in its own column.
-
-    Keeps the table to the agreed columns while leaving room for future
-    presentation keys without another migration. A row with no action falls
-    back rather than producing a capability nothing can do.
-    """
+    """`action` lives inside `metadata` rather than its own column, so new
+    presentation keys need no migration. A row with no action falls back rather
+    than producing a capability nothing can do."""
     action = (metadata or {}).get("action")
     return action if isinstance(action, dict) and action.get("type") else fallback
+
+
+def _launches_an_agent(action: Dict[str, Any]) -> bool:
+    """Whether a CARD's own action starts an agent.
+
+    Requires a non-empty `agentKey`, matching the frontend: `start_agent`
+    without one is normalised to an inert `none` there, because a card that
+    routed to `undefined` would reset the conversation and pin nothing. A card
+    that cannot actually route must keep its nested buttons.
+    """
+    return (
+        action.get("type") == "start_agent"
+        and isinstance(action.get("agentKey"), str)
+        and bool(action["agentKey"].strip())
+    )
 
 
 def _access_permits(config: Dict[str, Any], user: Optional[UserContext]) -> bool:
     """Gate 4, via the domain layer's own AccessSpec.
 
-    A config that will not parse is treated as NOT permitted: an agent whose
-    spec is unreadable cannot have its access rules evaluated, and rendering a
-    button the router will refuse is worse than rendering nothing.
+    An unparseable config is treated as NOT permitted: rendering a button the
+    router will refuse is worse than rendering nothing.
     """
     from app.domain.agent_spec import AccessSpec
 
@@ -172,9 +139,28 @@ def _access_permits(config: Dict[str, Any], user: Optional[UserContext]) -> bool
     return access.matches(user)
 
 
+def _provider_of(config: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The provider a config row names, or None for a non-delegated agent.
+
+    Read straight off the JSONB rather than through the spec model: this runs
+    for every card on every sidebar load, and an unparseable config must hide
+    one agent, not raise.
+    """
+    remote = (config or {}).get("remote")
+    if not isinstance(remote, dict):
+        return None
+    provider = remote.get("provider")
+    return provider if isinstance(provider, str) else None
+
+
 def resolve_for_user(session, user: Optional[UserContext],
-                     mitra_enabled: bool = True) -> Dict[str, Any]:
-    """The capability document for this caller's tenant and organization."""
+                     enabled_providers: Optional[frozenset] = None) -> Dict[str, Any]:
+    """The capability document for this caller's tenant and organization.
+
+    `enabled_providers` is None for a caller with no deployment opinion (tests,
+    and anything that wants the unfiltered catalogue); an empty frozenset really
+    does hide every delegated agent.
+    """
     tenant_id, organization_id = _scope(user)
     params = {
         "tenant_id": tenant_id,
@@ -186,15 +172,30 @@ def resolve_for_user(session, user: Optional[UserContext],
     if not capability_rows:
         return {"version": DOCUMENT_VERSION, "capabilities": []}
 
+    # The two enable flags used to be bound here and were dead: the SQL stopped
+    # referencing them when this gate moved into Python, and nothing removed
+    # them.
     agent_rows = session.execute(
         _AGENTS_SQL,
-        {**params,
-         "capability_ids": [r.id for r in capability_rows],
-         "mitra_enabled": mitra_enabled},
+        {**params, "capability_ids": [r.id for r in capability_rows]},
     ).fetchall()
 
     by_capability: Dict[Any, List[Dict[str, Any]]] = {}
+    #: Capabilities that HAVE membership, whatever survives filtering below.
+    #: The distinction between "no agents configured" and "every agent filtered
+    #: out" is what decides whether a card is legitimate or a dead end.
+    configured: set = set()
+
     for row in agent_rows:
+        configured.add(row.capability_id)
+        # Gate 5: the provider this agent names is switched off for this
+        # deployment. Keyed on the provider rather than on the agent type, so a
+        # new platform is a new value in the set and not a new key in a dict
+        # that has to be edited here.
+        provider = _provider_of(row.config)
+        if provider is not None and enabled_providers is not None:
+            if provider not in enabled_providers:
+                continue
         if not _access_permits(row.config or {}, user):
             continue
         action = _action_from(row.metadata, {"type": "start_agent"})
@@ -206,14 +207,46 @@ def resolve_for_user(session, user: Optional[UserContext],
             "status": "enabled",
             "order": row.display_order,
             "visible": True,
-            # `agentKey` is injected from the join rather than stored in the
-            # metadata JSON, so renaming an agent key cannot leave a stale copy
-            # of it behind in a blob nothing validates.
+            # From the join, not the metadata blob, so renaming an agent key
+            # cannot leave a stale copy behind.
             "action": {**action, "agentKey": row.agent_key},
         })
 
     capabilities = []
     for row in capability_rows:
+        agents = by_capability.get(row.id, [])
+
+        # A CARD WHOSE AGENTS WERE ALL FILTERED OUT IS A DEAD END, so hide it.
+        #
+        # Only when the card HAS membership. Two situations look identical in
+        # the output and are not:
+        #
+        #   no membership at all -- legitimate. SG Commons Portal ships that
+        #     way, and a tenant may add a card before wiring agents to it.
+        #     Shown, and the frontend omits the actions block.
+        #   membership, none surviving -- the provider is disabled or the
+        #     caller lacks access, for a reason the user cannot see. The card
+        #     would render a heading with nothing to click, which is the same
+        #     mistake as listing an agent the router would refuse.
+        if not agents and row.id in configured:
+            continue
+
+        card_action = _action_from(row.metadata, {"type": "display_card"})
+
+        # A CARD THAT LAUNCHES AN AGENT ITSELF NEEDS NO NESTED BUTTONS.
+        #
+        # `Listening at Scale` groups two agents and is display-only, so its
+        # buttons are the controls. A card whose OWN action is start_agent is
+        # already the control -- rendering a button beside it shows the same
+        # name twice and gives two ways to do one thing.
+        #
+        # The membership rows are NOT dead: they are what the gate above reads
+        # to tell "no agents configured" from "every agent filtered out", which
+        # is what hides this card when its provider is switched off. Suppress
+        # them here, AFTER that decision, never by deleting the rows.
+        if _launches_an_agent(card_action):
+            agents = []
+
         capabilities.append({
             "id": row.key,
             "title": row.name,
@@ -223,11 +256,8 @@ def resolve_for_user(session, user: Optional[UserContext],
             "status": _STATUS_OUT.get(row.status, "enabled"),
             "order": row.display_order,
             "visible": True,
-            "action": _action_from(row.metadata, {"type": "display_card"}),
-            # An empty list is legitimate -- SG Commons Portal has no agents --
-            # and the frontend omits the actions block entirely rather than
-            # rendering an empty one.
-            "agents": by_capability.get(row.id, []),
+            "action": card_action,
+            "agents": agents,
         })
 
     return {"version": DOCUMENT_VERSION, "capabilities": capabilities}

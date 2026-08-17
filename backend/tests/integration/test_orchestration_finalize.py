@@ -2,7 +2,7 @@
 
 Real Postgres for SessionService/repositories (the whole point is exercising
 the real claim_finalizing/apply/audit/unpin logic together) -- only the
-Mitra-facing REST client and channel pool are faked, matching
+The provider is faked, matching
 tests/unit/test_remote_flow_handler.py's established fake style.
 """
 from __future__ import annotations
@@ -18,17 +18,12 @@ from app.database.engine import SessionLocal
 from app.models.orm import Conversation
 from app.domain.core import UserContext
 from app.domain.agent_spec import (
-    MitraConnectionSpec,
     RemoteFlowAgentSpec,
     RemoteSpec,
     RoutingSpec,
 )
 
-#: Required on every RemoteSpec now -- the MITRA_* environment floor is gone.
-_CONNECTION = MitraConnectionSpec(
-    base_url="https://mitra.example.com",
-    ws_url="wss://mitra.example.com/ws/common/",
-)
+from tests.provider_factories import FakeProvider, FakeProviderRegistry, remote_spec
 from app.agents.protocol import SessionDelta, SessionState
 from app.repositories.conversations import ConversationRepository
 from app.repositories.sessions import AgentSessionRepository
@@ -40,44 +35,6 @@ from app.services.orchestration import OrchestrationService
 # ---------------------------------------------------------------------------
 
 
-class _FakeMitraRest:
-    def __init__(self, call_order: List[str]):
-        self._call_order = call_order
-        self.finalize_calls: List[Tuple] = []
-        self.finalize_paths: List[str] = []
-        self.finalize_as_guest: List[bool] = []
-        self.get_report_calls: List[Tuple] = []
-        self._story_id = "9931"
-        self._content = "narrative content"
-        self._report_url: Optional[str] = None
-        self._finalize_error: Optional[Exception] = None
-
-    def finalize(
-        self, session_id, profile_id, flow, language, token,
-        path="/api/end-story/v2/", as_guest=False,
-    ):
-        self._call_order.append("finalize")
-        self.finalize_calls.append((session_id, profile_id, flow, language, token))
-        self.finalize_paths.append(path)
-        self.finalize_as_guest.append(as_guest)
-        if self._finalize_error is not None:
-            raise self._finalize_error
-        return self._story_id, self._content
-
-    def get_report(self, session_id, media_type="application/pdf"):
-        self._call_order.append("get_report")
-        self.get_report_calls.append((session_id, media_type))
-        return self._report_url
-
-
-class _FakeMitraSessions:
-    def __init__(self, call_order: List[str]):
-        self._call_order = call_order
-        self.close_calls: List[uuid.UUID] = []
-
-    def close(self, conversation_id):
-        self._call_order.append("close")
-        self.close_calls.append(conversation_id)
 
 
 # ---------------------------------------------------------------------------
@@ -121,12 +78,10 @@ class _Agent:
 
 
 def _remote_agent(agent_id: uuid.UUID) -> _Agent:
-    remote = RemoteSpec(
-        provider="mitra",
+    remote = remote_spec(
         flow_name="guest-mi-story",
         bot_route="/test-bot-route",
         company="test-company",
-        connection=_CONNECTION,
         report_media_type="application/pdf",
         finalize_path="/api/end-story/",
     )
@@ -173,11 +128,10 @@ def test_won_claim_runs_full_sequence_in_order():
         session.commit()
 
         call_order: List[str] = []
-        rest = _FakeMitraRest(call_order)
-        pool = _FakeMitraSessions(call_order)
+        provider = FakeProvider(call_order)
         orch = OrchestrationService(
             session=session, registry=None, handler_factory=None, llm_factory=None,
-            mitra_rest=rest, mitra_sessions=pool,
+            providers=FakeProviderRegistry(provider, calls=call_order),
         )
 
         user = _new_user(token="the-real-token")
@@ -189,27 +143,23 @@ def test_won_claim_runs_full_sequence_in_order():
         assert call_order.index("close") < call_order.index("finalize")
 
         # finalize() called with the right args.
-        assert len(rest.finalize_calls) == 1
-        called_sid, called_pid, called_flow, called_lang, called_token = rest.finalize_calls[0]
+        assert len(provider.finalize_calls) == 1
+        called_sid, called_pid, called_flow, called_lang, called_token = provider.finalize_calls[0]
         assert called_sid == sess_view.remote_session_id
         assert called_pid == sess_view.remote_profile_id
         assert called_flow == "guest-mi-story"
         assert called_lang == sess_view.language
         assert called_token == "the-real-token"
 
-        # ...and at the endpoint the AGENT declares, not a hardcoded one.
-        # 'guest-mi-story' has no Flow row in Mitra, so v2 answers it with an
-        # HTTP 500; the spec's finalize_path is what keeps this flow off v2.
-        assert rest.finalize_paths == [agent.spec.remote.finalize_path]
-
-        # Same for the token-presence flag. This agent sends its token; the
-        # discussion agent does not, because Mitra picks the PDF template's
-        # user_type from token presence and a guest flow finalised WITH a token
-        # renders a blank PDF. Hardcoding either value here would break one of
-        # the two agents silently -- one with an HTTP 500, one with an empty
-        # file and no error at all.
-        assert rest.finalize_as_guest == [agent.spec.remote.finalize_as_guest]
-        assert rest.finalize_as_guest == [False], "record_stories sends its token"
+        # WHICH ENDPOINT, and whether the user's token goes with it, are no
+        # longer asserted here: they are the provider's decision now, not the
+        # orchestrator's. The orchestrator asks for finalisation and is handed
+        # a result reference; it cannot express a preference about v1 vs v2 or
+        # about guest mode, which is precisely the coupling that was removed.
+        # Those two properties are pinned where the decision lives, in
+        # tests/unit/providers/test_mitra_provider.py -- and they are worth
+        # pinning: one wrong value is an HTTP 500, the other is a valid but
+        # completely blank PDF with nothing logged anywhere.
 
         # Resulting session is completed with result_ref/finalized_at/ended_at.
         assert result.state == "completed"
@@ -254,22 +204,25 @@ def test_a_guest_flow_agent_finalizes_without_the_users_token():
         session.commit()
 
         call_order: List[str] = []
-        rest = _FakeMitraRest(call_order)
+        provider = FakeProvider(call_order)
         orch = OrchestrationService(
             session=session, registry=None, handler_factory=None, llm_factory=None,
-            mitra_rest=rest, mitra_sessions=_FakeMitraSessions(call_order),
+            providers=FakeProviderRegistry(provider, calls=call_order),
         )
 
         agent = _remote_agent(agent_id)
         agent.spec.remote.flow_name = "guest-discussion"
-        agent.spec.remote.finalize_as_guest = True
+        # `finalize_as_guest` moved into the provider's own options block, which
+        # is the point: the orchestrator can no longer read it, so it can no
+        # longer get it wrong.
+        agent.spec.remote.options["finalize_as_guest"] = True
 
         orch._finalize(sess_view, agent, _new_user(token="the-real-token"))
         session.commit()
 
-        assert rest.finalize_as_guest == [True]
-        assert rest.finalize_calls[0][4] == "the-real-token", (
-            "the token is still passed; only the client decides to drop it"
+        assert provider.finalize_calls[0][4] == "the-real-token", (
+            "the user's token still reaches the provider; whether it is SENT is "
+            "the provider's decision -- see tests/unit/providers/test_mitra_provider.py"
         )
     finally:
         session.close()
@@ -284,12 +237,14 @@ def test_report_url_set_when_present():
         session.commit()
 
         call_order: List[str] = []
-        rest = _FakeMitraRest(call_order)
-        rest._report_url = "https://example.com/story.pdf"
-        pool = _FakeMitraSessions(call_order)
+        provider = FakeProvider(call_order)
+        # The real providers fetch the artifact INSIDE finalize(), because
+        # SessionService.apply() refuses a second call on a terminal session --
+        # so result_ref and report_url have to land in one transition.
+        provider.artifact_url = "https://example.com/story.pdf"
         orch = OrchestrationService(
             session=session, registry=None, handler_factory=None, llm_factory=None,
-            mitra_rest=rest, mitra_sessions=pool,
+            providers=FakeProviderRegistry(provider, calls=call_order),
         )
 
         result = orch._finalize(sess_view, _remote_agent(agent_id), _new_user())
@@ -309,11 +264,10 @@ def test_report_url_left_null_when_absent():
         session.commit()
 
         call_order: List[str] = []
-        rest = _FakeMitraRest(call_order)  # _report_url stays None
-        pool = _FakeMitraSessions(call_order)
+        provider = FakeProvider(call_order)  # artifact_url stays None
         orch = OrchestrationService(
             session=session, registry=None, handler_factory=None, llm_factory=None,
-            mitra_rest=rest, mitra_sessions=pool,
+            providers=FakeProviderRegistry(provider, calls=call_order),
         )
 
         result = orch._finalize(sess_view, _remote_agent(agent_id), _new_user())
@@ -334,12 +288,11 @@ def test_finalize_exception_transitions_to_failed_and_propagates():
         session.commit()
 
         call_order: List[str] = []
-        rest = _FakeMitraRest(call_order)
-        rest._finalize_error = RuntimeError("upstream exploded")
-        pool = _FakeMitraSessions(call_order)
+        provider = FakeProvider(call_order)
+        provider.finalize_error = RuntimeError("upstream exploded")
         orch = OrchestrationService(
             session=session, registry=None, handler_factory=None, llm_factory=None,
-            mitra_rest=rest, mitra_sessions=pool,
+            providers=FakeProviderRegistry(provider, calls=call_order),
         )
 
         with pytest.raises(RuntimeError, match="upstream exploded"):
@@ -367,18 +320,17 @@ def test_losing_claim_returns_cached_state_without_calling_finalize():
         session.commit()
 
         call_order: List[str] = []
-        rest = _FakeMitraRest(call_order)
-        pool = _FakeMitraSessions(call_order)
+        provider = FakeProvider(call_order)
         orch = OrchestrationService(
             session=session, registry=None, handler_factory=None, llm_factory=None,
-            mitra_rest=rest, mitra_sessions=pool,
+            providers=FakeProviderRegistry(provider, calls=call_order),
         )
 
         result = orch._finalize(sess_view, _remote_agent(agent_id), _new_user())
 
         assert result.state == "finalizing"
-        assert len(rest.finalize_calls) == 0
-        assert len(pool.close_calls) == 0
+        assert len(provider.finalize_calls) == 0
+        assert len(provider.close_calls) == 0
 
         audit_rows = session.execute(text(
             "SELECT count(*) FROM audit_logs WHERE entity_id = :id"
@@ -471,8 +423,7 @@ def test_handle_turn_with_terminal_delta_actually_reaches_completed():
         session.commit()
 
         call_order: List[str] = []
-        rest = _FakeMitraRest(call_order)
-        pool = _FakeMitraSessions(call_order)
+        provider = FakeProvider(call_order)
         agent = _remote_agent(agent_id)
 
         orch = OrchestrationService(
@@ -481,8 +432,7 @@ def test_handle_turn_with_terminal_delta_actually_reaches_completed():
             handler_factory=_FakeHandlerFactory(_FakeTerminalHandler()),
             llm_factory=None,
             router_service=_FakeRouter(agent),
-            mitra_rest=rest,
-            mitra_sessions=pool,
+            providers=FakeProviderRegistry(provider, calls=call_order),
         )
 
         from app.services.orchestration import TurnInput
@@ -498,7 +448,7 @@ def test_handle_turn_with_terminal_delta_actually_reaches_completed():
             "not get stuck in 'finalizing'"
         )
         assert result.session.result_ref == "9931"
-        assert len(rest.finalize_calls) == 1
+        assert len(provider.finalize_calls) == 1
 
         fresh = AgentSessionRepository(session).get(sess_view.id)
         assert fresh.state == "completed"
@@ -547,8 +497,7 @@ def test_a_completed_interview_asks_the_user_what_else_they_need():
             handler_factory=_FakeHandlerFactory(_FakeTerminalHandler()),
             llm_factory=None,
             router_service=_FakeRouter(agent),
-            mitra_rest=_FakeMitraRest([]),
-            mitra_sessions=_FakeMitraSessions([]),
+            providers=FakeProviderRegistry(),
         )
 
         from app.services.orchestration import SESSION_FOLLOW_UP, TurnInput
@@ -592,10 +541,10 @@ def test_a_repeated_forced_finalize_does_not_ask_twice():
         session.commit()
 
         agent = _remote_agent(agent_id)
-        rest = _FakeMitraRest([])
+        provider = FakeProvider()
         orch = OrchestrationService(
             session=session, registry=_FakeRegistry(agent), handler_factory=None,
-            llm_factory=None, mitra_rest=rest, mitra_sessions=_FakeMitraSessions([]),
+            llm_factory=None, providers=FakeProviderRegistry(provider),
         )
 
         from app.services.orchestration import SESSION_FOLLOW_UP
@@ -605,7 +554,7 @@ def test_a_repeated_forced_finalize_does_not_ask_twice():
 
         assert first.state == "completed"
         assert second.state == "completed", "the repeat still reports the real state"
-        assert len(rest.finalize_calls) == 1, "the claim guard itself must still hold"
+        assert len(provider.finalize_calls) == 1, "the claim guard itself must still hold"
 
         contents = [r[0] for r in _transcript(session, conv_id)]
         assert contents.count(SESSION_FOLLOW_UP) == 1

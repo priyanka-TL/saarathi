@@ -20,9 +20,21 @@ export const UI_CAPABILITIES = 'ui/capabilities';
 export const CHAT = 'chat';
 export const RESET = 'reset';
 
+// The caller's own ELEVATE profile -- GET reads it, PATCH updates it. No user
+// id in the path: the bearer token IS the identity, so a caller can only ever
+// reach their own. Answers 503 PROFILE_UNAVAILABLE when the backend has no
+// ELEVATE_BASE_URL, which is how the UI knows to hide the Profile section.
+export const PROFILE = 'profile';
+
 export const CONVERSATIONS = 'conversations';
 export const conversationMessages = (conversationId) =>
   `conversations/${conversationId}/messages`;
+
+// Voice. All three answer 503 VOICE_DISABLED when the backend has
+// VOICE_ENABLED=0, which is how the UI knows to hide the mic and speaker.
+export const VOICE_UPLOAD_URL = 'voice/upload-url';
+export const VOICE_TRANSCRIBE = 'voice/transcribe';
+export const VOICE_SPEAK = 'voice/speak';
 
 export const session = (sessionId) => `sessions/${sessionId}`;
 export const sessionReport = (sessionId) => `sessions/${sessionId}/report`;

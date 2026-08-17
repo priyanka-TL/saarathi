@@ -185,3 +185,207 @@ First triage question if it fails: does `other_params` contain `location`? If
 not, the discussion finalised through v2's generic pipeline
 (`save_generic_story` treats `location` as a Story column and never copies it
 into `other_params`), and no PDF fix will help until the endpoint is corrected.
+
+### 10. A Capture Discussion opens mid-interview (wrong first question)
+
+Symptom: the interview does not start at the beginning. The bot's first reply is
+a later question (SOLUTIONS, say), and the user's opening message has been
+recorded with `stage: CHALLENGES` instead of being answered.
+
+**Cause is on Mitra's side, and it is triggered by data, not by config.**
+`create_chat_session` in `chatbot/consumers/async_consumer.py` starts the session
+at the CHALLENGES step whenever the Mitra `Profile` has a non-empty
+`first_name`:
+
+```python
+step_number = 1
+if profile and profile.first_name and profile.first_name != '':
+    challenges_step = CompanyStateMachine.objects.get(
+        company_bot=..., name="CHALLENGES")
+    step_number = challenges_step.step
+```
+
+That is reasonable for a logged-in portal user, whose name Mitra already knows.
+It is wrong for Saarthi's guest interview, because steps 1-5 are what populate
+`story.other_params` -- `location`, `organization`, `participants_count`,
+`discussion_date`, `district`, `village`, `pri_member`,
+`school_representative`. Skip them and the MOM report loses those sections
+(see §9 for what a healthy `other_params` looks like).
+
+Diagnose:
+
+```bash
+# 1. Which step did the session actually open at? Anything but 1 is the bug.
+curl -sH "Origin: $MITRA_ORIGIN_URL" \
+  "$MITRA_BASE_URL/api/chatsession/?session=<mitra_session_id>"
+
+# 2. Does the Mitra profile carry a first_name?
+curl -sH "Origin: $MITRA_ORIGIN_URL" \
+  "$MITRA_BASE_URL/api/profileuser/?email=<user_id>@shikshalokam.org"
+```
+
+Fix, in this order -- **both halves are required**:
+
+1. Confirm `remote.options.send_user_profile` is `false` for `capture_discussion`,
+   so Saarthi stops writing the field. Migration 0020 set it; verify with the
+   query in §6.
+2. **Clear the value Mitra already stored.** The skip reads the stored profile,
+   not what the last upsert sent, so step 1 alone changes nothing for a user who
+   has already run one discussion:
+
+   ```bash
+   curl -X PATCH "$MITRA_BASE_URL/api/profileuser/<profile_id>/" \
+        -H "Origin: $MITRA_ORIGIN_URL" -H "Content-Type: application/json" \
+        -d '{"first_name": ""}'
+   ```
+
+   `ProfileRetrieveUpdateDestroyView` is a `RetrieveUpdateAPIView`, so PATCH is
+   partial -- `designation`, `location` and `org_associated` are untouched and
+   should be left alone; none of them triggers the skip.
+
+An in-flight session cannot be repaired; abandon it and start a new discussion.
+
+**`record_stories` is subject to the same trap, and that is why it does not opt
+in either.** Mitra resolves a profile by `(email, company)`, and both delegated
+agents carry the same company (`shikshalokamstaging`) and the same derived
+email -- so they share ONE Profile row. Turning on `send_user_profile` for the
+STORY agent would write `first_name` on the row the DISCUSSION agent reads, and
+re-create everything above. Migration 0023 therefore moved only its route.
+
+If the richer profile is ever wanted on either agent, the safe order is: give
+that agent its own Mitra `company` slug first (which isolates its Profile row,
+at the cost of splitting that user's past history), and only then set the flag.
+Enabling it on the shared row is the unsafe route, and it is the one that has
+already been reverted once.
+
+### 11. Record Stories asks a logged-in user for their name
+
+Symptom: the story interview opens by asking for the user's name, role, school
+or district -- all of which Saarthi already has from the ELEVATE session.
+
+**Cause is the bot the agent is pointed at, not the profile data.**
+`/guided_guest` is a GUEST interview and collects that information in its
+opening steps by design. Migration 0023 moved `record_stories` to
+`/saarthi_story_flow`, a bot configured for the logged-in flow with those steps
+removed.
+
+Diagnose -- confirm which bot the turn actually used:
+
+```bash
+# What the active config says (see §6 for the full config-history query)
+psql "$DATABASE_URL" -c "
+  SELECT c.config->'remote'->'options'->>'bot_route' AS bot_route,
+         c.config->'remote'->>'flow_name'            AS flow_name
+    FROM agents a JOIN agent_configs c ON c.agent_id = a.id
+   WHERE c.is_active AND a.key = 'record_stories';"
+
+# What Mitra resolves the portal URL to -- these two must agree
+curl -sH "Origin: $MITRA_ORIGIN_URL" \
+  "$MITRA_BASE_URL/api/flow-connection-info/?flow_route=saarthi_story_flow"
+```
+
+If `bot_route` is still `/guided_guest`, migration 0018 has not been applied to
+this scope, or a tenant-scoped row overrides the default one. If it is
+`/saarthi_story_flow` and the questions persist, the Saarthi side is correct and
+the remaining work is on that bot's Mitra-side state machine: the profile steps
+have not actually been removed from it. Confirm with the `bot_question` query in
+§12 and raise it with the Story Bot team -- there is nothing to change here.
+
+For the *different* symptom of a correct question arriving with an extra
+sentence in front of it, see §12.
+
+**Note on in-flight sessions when 0023 is applied.**
+`MitraProvider.open_session` re-supplies `bot_route` from the current config on
+every turn, so a story interview that was mid-flight keeps its
+`remote_session_id` but starts handshaking with the new bot, while Mitra's
+`ChatSession` row still references the old `CompanyBot`. Apply during a quiet
+window, or abandon open story sessions afterwards so users restart cleanly:
+
+```sql
+SELECT s.id, s.state, s.remote_bot_route
+  FROM agent_sessions s JOIN agents a ON a.id = s.agent_id
+ WHERE a.key = 'record_stories'
+   AND s.state NOT IN ('completed', 'failed', 'abandoned');
+```
+
+### 12. Record Stories opens with a preamble the portal does not show
+
+Symptom: the question itself is right, but Saarthi puts a sentence or two in
+front of it that the Mitra portal does not. Reported form:
+
+```
+portal:   Nice to meet you. Are you connected with any educational work,
+          system, or activity in any way?
+
+Saarthi:  I appreciate you sharing that with me. Let's continue with our
+          current discussion about school, learning, and community. Are you
+          connected with any educational work, system, or activity in any way?
+```
+
+**This is not a duplicated question, and the fix is not in this repo.** Both
+clients read the same `chatbot_companystatemachine.bot_question` row, and Saarthi
+passes the reply through verbatim -- it has no prompt, persona or topic to add
+one with. What differs is the FIRST USER TURN, and the opener is an LLM reply to
+it: the portal's user opens with a greeting and the state transitions cleanly,
+while Saarthi's capability card posts `"I want to record a story"`, which the
+opening state's LLM reads as a topic change and answers conversationally.
+
+Full root cause, the code path, and the one-field Mitra fix
+(`operation_type = NON_LLM` on the opening state) are in
+`backend/docs/story-bot-opening-state.md`.
+
+Diagnose -- everything below is read-only:
+
+```sql
+-- 1. Same bot, same opening state, for both clients?
+--    Run against MITRA's database. <session> is the mitra session id.
+SELECT sm.step, sm.name, sm.operation_type, sm.preprocess_output_mode,
+       sm.bot_question
+  FROM chatbot_companystatemachine sm
+  JOIN chatbot_companybot b ON b.id = sm.company_bot_id
+ WHERE b.route = '/saarthi_story_flow'
+ ORDER BY sm.step;
+
+-- 2. What did each client actually send as turn 1, and at which stage?
+SELECT initiated_by, stage, left(message, 80) AS message, created_at
+  FROM chatbot_companychat
+ WHERE session = '<session>'
+ ORDER BY created_at
+ LIMIT 6;
+```
+
+Read it as follows:
+
+- `operation_type` is `LLM` on the opening step -> **this is the cause.** The
+  opener is LLM-mediated, so it varies with whatever the client sent. Ask the
+  Story Bot team for the change in `story-bot-opening-state.md`.
+- `operation_type` is already `NON_LLM` but a preamble persists -> check
+  `preprocess_output_mode` on that step and the next. `MODIFY_QUESTION` rewrites
+  `bot_question` after the fact
+  (`chatbot/services/preprocessing/output_handlers.py`).
+- Turn 1 in query 2 is recorded at a LATER stage than the opening step -> that is
+  a different fault; see §10.
+
+**Parity check -- run this after any Story Bot change to that flow.** Both
+openers must be byte-identical:
+
+1. Open `.../mohini/common-chat?flow=saarthi_story_flow` and start the flow.
+2. Open Saarthi and click **Record Stories**.
+3. Diff the first bot message. Then cross-check that both sessions progressed
+   identically with query 2 above.
+4. Entry-text independence, which is the property `NON_LLM` buys: type an
+   unrelated opener into the portal (including `"I want to record a story"`
+   itself, and something plainly off-topic). Every opener must match.
+
+**Confirming propagation works.** The question text needs no Saarthi deploy to
+change -- edit `bot_question` on that step in Mitra admin, start a FRESH
+conversation in each client, and both show the new text. Revert afterwards. If
+one client updates and the other does not, they are on different `CompanyBot`
+rows: re-run the `bot_route` / `flow-connection-info` comparison in §11.
+
+**Do not "fix" this by changing the autostart text.** `"I want to record a
+story"` also matches `record_stories`' own `routing.keywords`, so it is what
+lands the turn on the right agent at router Gate 3 if a client ever posts an
+autostart without `agent_key`. Replacing it with a neutral greeting removes that
+fallback and fails silently -- the default agent answers and the interview never
+starts.

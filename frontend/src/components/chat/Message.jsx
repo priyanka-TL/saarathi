@@ -1,8 +1,10 @@
 import { COPY } from '../../constants';
 import { formatTime } from '../../utils/time';
-import { safeReportUrl } from '../../utils/url';
-import { BotIcon } from '../icons';
+import { safeHttpsUrl } from '../../utils/url';
+import { BotIcon, UserIcon } from '../icons';
+import MessageAttachments from './MessageAttachments';
 import MessageOptions from './MessageOptions';
+import SpeakerButton from './SpeakerButton';
 
 /**
  * One transcript item.
@@ -25,8 +27,10 @@ function Meta({ timestamp, agentName, showAgent }) {
   );
 }
 
-export default function Message({ item, onSelectOption }) {
-  const { kind, content, agentName, timestamp, options, readOnly, selectedOptionId } = item;
+export default function Message({ item, onSelectOption, speech }) {
+  const {
+    kind, content, agentName, timestamp, options, readOnly, selectedOptionId, attachments,
+  } = item;
 
   // Centred pill. Bare .message-content, nothing else.
   if (kind === 'context-switch') {
@@ -37,15 +41,25 @@ export default function Message({ item, onSelectOption }) {
     );
   }
 
-  // No avatar, meta shows the time only.
+  // Avatar sits AFTER the body, so flex order puts it on the right -- the
+  // mirror of the agent row. Attribution reads 'Chat History' for a replayed
+  // turn (`readOnly`, set only by useConversation's restore path) and the
+  // current context name for one typed this session.
   if (kind === 'user') {
     return (
       <div className="message user">
         <div className="message-body">
           <div className="message-content">
             <div className="message-text">{content}</div>
-            <Meta timestamp={timestamp} showAgent={false} />
+            <Meta
+              timestamp={timestamp}
+              agentName={readOnly ? COPY.chatHistoryContext : agentName}
+              showAgent
+            />
           </div>
+        </div>
+        <div className="message-avatar">
+          <UserIcon />
         </div>
       </div>
     );
@@ -56,7 +70,7 @@ export default function Message({ item, onSelectOption }) {
   // 'session-complete' carries a report link appended INSIDE .message-text,
   // which is what the original's _appendReportAction did -- not into
   // .message-content, which also holds the meta row.
-  const reportUrl = kind === 'session-complete' ? safeReportUrl(item.reportUrl) : null;
+  const reportUrl = kind === 'session-complete' ? safeHttpsUrl(item.reportUrl) : null;
 
   return (
     <div className={`message ${isAgent ? 'agent' : 'system'}`}>
@@ -83,7 +97,39 @@ export default function Message({ item, onSelectOption }) {
               )}
             </div>
           )}
-          <Meta timestamp={timestamp} agentName={agentName} showAgent />
+          {/*
+            INSIDE .message-content, between the text and the meta row -- the
+            same place the Mitra report link sits, so a document reads as part
+            of the reply rather than as a separate control below it.
+
+            It cannot go inside .message-text for an agent bubble: that div is
+            dangerouslySetInnerHTML, so React children cannot be appended to it.
+            Directly after it is the same thing visually and is as close as the
+            two can be brought.
+
+            Being inside .message-content is why the CSS has to be qualified --
+            see the specificity note in style.css.
+          */}
+          <MessageAttachments attachments={attachments} />
+          <div className="message-footer">
+            <Meta timestamp={timestamp} agentName={agentName} showAgent />
+            {/*
+              Agent replies only, and fed `content` -- the RAW MARKDOWN -- not
+              `item.html`. strip_markdown_for_tts on the backend is written
+              against markdown; handing it rendered HTML would make it strip
+              tags it was never designed for and read table markup aloud.
+
+              `speech` is absent in tests and any other caller that does not
+              wire up the hook, so the button simply does not render there.
+            */}
+            {isAgent && speech && content && (
+              <SpeakerButton
+                isPlaying={speech.playingId === item.id}
+                isLoading={speech.loadingId === item.id}
+                onToggle={() => speech.toggle(item.id, content)}
+              />
+            )}
+          </div>
         </div>
         {options && options.length > 0 && (
           <MessageOptions

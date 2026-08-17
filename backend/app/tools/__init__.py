@@ -1,3 +1,9 @@
+"""The tools package.
+
+Responsible for: importing every tool module so its @registry.register
+decorators fire.
+Used by: build_container, which imports this once, before any spec is resolved.
+"""
 import os
 import pkgutil
 import importlib

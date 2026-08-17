@@ -47,9 +47,11 @@ def _document_for(tenant_code: str, *, org_id: str = "default") -> dict:
 def admin_client(flask_app, monkeypatch):
     """A client authenticated as an admin.
 
-    Patches `Authenticator.authenticate()`, the single identity source now --
-    see app/services/identity.py. The `Authorization` header sent below is
-    inert (nothing reads it) but harmless to include.
+    Patches `Authenticator.authenticate()` directly rather than sending a real
+    bearer token: simplest way to force this specific admin identity
+    regardless of AUTH_CHECK/ELEVATE_JWT_SECRET in the test environment. The
+    lambda ignores its `token` argument on purpose -- this fixture wants THIS
+    admin, not whatever a header would decode to.
     """
     from app.domain.core import OrgMembership
 
@@ -60,7 +62,8 @@ def admin_client(flask_app, monkeypatch):
         active_org_id="o",
     )
     monkeypatch.setattr(
-        "app.services.identity.Authenticator.authenticate", lambda self: admin_user
+        "app.services.identity.Authenticator.authenticate",
+        lambda self, token=None: admin_user,
     )
 
     from starlette.testclient import TestClient
@@ -345,3 +348,57 @@ def _enable_interview_agents():
     ))
     session.commit()
     session.close()
+
+
+# ---------------------------------------------------------------------------
+# The malformed-key path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        "Uppercase",       # ck_capabilities_key_slug demands lowercase
+        "1leading_digit",  # must start with a letter
+        "has-a-hyphen",    # only [a-z0-9_] after the first character
+        "x",               # minimum length is 2
+    ],
+)
+def test_a_key_the_check_constraint_rejects_is_a_422_not_a_500(admin_client, bad_key):
+    """`ck_capabilities_key_slug` is enforced by the database, not by a
+    validator, so this is the one create path where the INSERT itself is what
+    rejects the request.
+
+    Previously caught with a bare `except Exception`, which reported ANY
+    database failure -- a dropped connection, a permissions error -- as a 422
+    complaining about the key format. It is now narrowed to IntegrityError,
+    and this pins that the narrowing did not lose the case it exists for.
+    """
+    response = admin_client.post("/api/admin/capabilities", json={
+        "tenant_id": TENANT, "key": bad_key, "name": "Bad key",
+    })
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "CAPABILITY_INVALID"
+    assert body["path"] == ["key"]
+
+
+def test_the_session_is_usable_after_a_rejected_key(admin_client):
+    """The rejected INSERT must roll back cleanly.
+
+    A failed statement poisons the transaction until it is rolled back, so
+    without that rollback the NEXT write in the same request would fail with
+    InFailedSqlTransaction rather than doing its job.
+    """
+    admin_client.post("/api/admin/capabilities", json={
+        "tenant_id": TENANT, "key": "BAD KEY", "name": "Bad",
+    })
+
+    good = _key()
+    response = admin_client.post("/api/admin/capabilities", json={
+        "tenant_id": TENANT, "key": good, "name": "Good",
+    })
+
+    assert response.status_code == 200
+    assert response.json()["key"] == good
