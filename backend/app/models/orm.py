@@ -514,7 +514,7 @@ class ConversationMessage(AuditMixin, Base):
     # `latency_ms` alone cannot separate "the platform thought for nine seconds"
     # from "it answered in one and we then waited out an eight-second idle gap".
     # `ws_end_reason` is the field that can, and `latency_ms - ws_last_frame_ms`
-    # is what the second case cost. See migration 0022.
+    # is what the second case cost. See migration 0014.
     ws_end_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     ws_first_frame_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ws_last_frame_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -534,7 +534,7 @@ class ConversationMessage(AuditMixin, Base):
         # The three values TurnEnd can produce. Pinned so a typo in a future
         # writer fails at the row rather than becoming a fourth category in the
         # reporting query. Must stay in step with
-        # app.providers.transport.frames.TurnEnd and migration 0022.
+        # app.providers.transport.frames.TurnEnd and migration 0014.
         CheckConstraint(
             "ws_end_reason IS NULL OR "
             "ws_end_reason IN ('finish_reason', 'idle_gap', 'turn_timeout')",

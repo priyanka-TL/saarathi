@@ -1011,7 +1011,7 @@ def test_the_classifier_still_gets_its_history_window():
 
 
 # ---------------------------------------------------------------------------
-# routing.intent -- the verb x noun grid (migration 0024)
+# routing.intent -- the verb x noun grid (migration 0018)
 # ---------------------------------------------------------------------------
 
 

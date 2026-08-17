@@ -36,12 +36,12 @@ from app.domain.agent_spec import AgentSpec, canonical_json
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 #: 0010 writes the original `remote` shape; 0013 rewrites it into the
-#: provider-neutral envelope; 0018 strips Saathi's now-retired token-minting
+#: provider-neutral envelope; 0015 strips Saathi's now-retired token-minting
 #: auth fields. The database holds all three applied in sequence, so
 #: validation and checksum assertions read THAT -- otherwise this suite would
 #: pin a shape the application no longer accepts.
 _GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
-_SAATHI_AUTH_DROP = _VERSIONS / "0018_saathi_auth_drops_token_minting.py"
+_SAATHI_AUTH_DROP = _VERSIONS / "0015_saathi_config_end_state.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -62,12 +62,12 @@ def generalize():
 
 @pytest.fixture(scope="module")
 def saathi_auth_drop():
-    return _module(_SAATHI_AUTH_DROP, "_saathi_auth_drop_0018")
+    return _module(_SAATHI_AUTH_DROP, "_saathi_auth_drop_0015")
 
 
 @pytest.fixture(scope="module")
 def seed(generalize, saathi_auth_drop):
-    """0010's seed, as 0013 then 0018 leave it.
+    """0010's seed, as 0013 then 0015 leave it.
 
     Wrapped rather than read raw: `seed_agents()` is the SOURCE, and what the
     application ever sees is the migrated form. A test asserting on the source
@@ -213,14 +213,14 @@ def test_the_seeded_configs_in_the_database_still_validate():
 
 
 def test_each_delegated_agent_drives_its_own_bot():
-    """THE REGRESSION PIN FOR MIGRATIONS 0019 AND 0023, read off the migrated
+    """THE REGRESSION PIN FOR MIGRATIONS 0016 AND 0018, read off the migrated
     database rather than off any migration's source -- this is the one assertion
     that sees what all of them actually produced, in order, and it is the same
     on a fresh `make migrate` as on an upgraded live database.
 
     Both delegated Mitra agents have now been moved onto their own dedicated
-    bot, one migration each: 0019 moved `capture_discussion` off the shared
-    /shikshalokam_chaupal, and 0023 moved `record_stories` off the guest
+    bot, one migration each: 0016 moved `capture_discussion` off the shared
+    /shikshalokam_chaupal, and 0018 moved `record_stories` off the guest
     /guided_guest. Each was allowed to move exactly one of them, and the routes
     must still be DISTINCT. A migration whose predicate is too broad does not
     fail loudly: it points a working interview at a bot that answers, with
@@ -265,24 +265,24 @@ def test_each_delegated_agent_drives_its_own_bot():
         "the flow selects the MOM renderer; moving it renders a blank PDF"
     )
     assert discussion.send_user_profile == "false", (
-        "0020 turned this off: writing Profile.first_name makes Mitra skip to "
+        "0016 pins this off: writing Profile.first_name makes Mitra skip to "
         "the CHALLENGES step, and the skipped steps are what fill the MOM report"
     )
 
     story = by_key["record_stories"]
     assert story.provider == "mitra"
     assert story.bot_route == "/saarthi_story_flow", (
-        "0023 moves this agent off the guest /guided_guest bot, whose opening "
+        "0018 moves this agent off the guest /guided_guest bot, whose opening "
         "steps asked a logged-in user for their own name and profile"
     )
     assert story.flow_name == "guest-mi-story", (
         "the flow selects the story renderer; moving it renders a blank PDF"
     )
     assert story.send_user_profile is None, (
-        "the story flow never opted in, and 0023 kept it that way: this agent "
+        "the story flow never opted in, and 0018 kept it that way: this agent "
         "shares one Mitra Profile row with capture_discussion -- same (email, "
         "company) -- so writing first_name here would make the DISCUSSION skip "
-        "to CHALLENGES and empty its MOM report. That is 0020's regression"
+        "to CHALLENGES and empty its MOM report. That is 0016's regression"
     )
 
     assert discussion.bot_route != story.bot_route, (

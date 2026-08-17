@@ -24,14 +24,14 @@ from app.domain.agent_spec import AgentSpec, RemoteFlowAgentSpec
 _VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 _MIGRATION = _VERSIONS / "0010_seed_default_data.py"
 #: 0010 seeds the ORIGINAL shape; 0013 rewrites it into the provider-neutral
-#: envelope; 0023 moves this agent onto its own logged-in bot. What the database
-#: actually holds -- and therefore what the application validates -- is all
-#: three applied in sequence, so that is what these assertions read. Composing
-#: them beats restating the end state: a migration whose edit changes and a pin
-#: that does not would otherwise agree with each other and disagree with the
-#: database.
+#: envelope; 0018 moves this agent onto its own logged-in bot AND gives it a
+#: routing.intent grid. What the database actually holds -- and therefore what
+#: the application validates -- is all three applied in sequence, so that is
+#: what these assertions read. Composing them beats restating the end state: a
+#: migration whose edit changes and a pin that does not would otherwise agree
+#: with each other and disagree with the database.
 _GENERALIZE = _VERSIONS / "0013_generalize_remote_providers.py"
-_STORY_BOT = _VERSIONS / "0023_story_bot_route.py"
+_STORY_BOT = _VERSIONS / "0018_story_bot_route_and_routing_intent.py"
 
 _adapter = TypeAdapter(AgentSpec)
 
@@ -50,7 +50,7 @@ def _seed_specs() -> dict:
     """
     seed = _load_migration("_seed_0010", _MIGRATION)
     generalize = _load_migration("_generalize_0013", _GENERALIZE)
-    story_bot = _load_migration("_story_bot_0023", _STORY_BOT)
+    story_bot = _load_migration("_story_bot_0018", _STORY_BOT)
 
     agents = {}
     for agent in seed.seed_agents():
@@ -58,14 +58,12 @@ def _seed_specs() -> dict:
         if isinstance(agent.get("remote"), dict):
             agent["agent_type"] = "remote_flow"
             agent["remote"] = generalize._to_envelope(agent["remote"])
-        # 0023 touches exactly one agent, and the guard below is the migration's
-        # own predicate: it will not convert a row whose bot_route has drifted.
-        if (
-            agent["key"] == story_bot.AGENT_KEY
-            and agent.get("remote", {}).get("options", {}).get("bot_route")
-            == story_bot.OLD_BOT_ROUTE
-        ):
-            agent = story_bot.apply(agent)
+        # 0018 GUARDS BOTH ITS EDITS INTERNALLY -- the route move checks the
+        # provider, the flow name and the current route, so it will not convert
+        # a row that has drifted; the intent grid is only added to an agent that
+        # has one. It is therefore applied to every agent and is a no-op on the
+        # ones it does not own, which is exactly what the migration does.
+        agent = story_bot.apply(agent, agent["key"])
         agents[agent["key"]] = agent
     return agents
 
@@ -127,7 +125,7 @@ def test_bot_route_and_company_are_stored_literals():
     """`remote.bot_route` / `remote.company` are plain stored fields, which is
     what lets a tenant-scoped agent_configs row override them.
 
-    The route is the one 0023 moved this agent to: `/guided_guest` was a GUEST
+    The route is the one 0018 moved this agent to: `/guided_guest` was a GUEST
     interview whose opening steps asked a logged-in user for their own name and
     profile. `/saarthi_story_flow` is the bot Mitra's own resolver answers with
     for the portal URL `?flow=saarthi_story_flow`, verified against QA:
@@ -165,7 +163,7 @@ def test_this_agent_never_names_the_caller_to_mitra():
     district, village, pri_member and school_representative.
 
     So opting THIS agent in would silently re-break Capture Discussion's
-    report -- the exact regression 0020 exists to undo. 0023 moves the route and
+    report -- the exact regression 0016 exists to prevent. 0018 moves the route and
     nothing else; the profile questions are removed on the Mitra side instead,
     which costs the sibling nothing.
 

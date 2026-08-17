@@ -65,21 +65,21 @@ def test_the_router_ceiling_is_far_below_a_context_window():
 
 
 # ---------------------------------------------------------------------------
-# Path 2: LLM agents -- config, set by migration 0021
+# Path 2: LLM agents -- config, set by migration 0017
 # ---------------------------------------------------------------------------
 
-def test_migration_0021_bounds_every_llm_agent():
+def test_migration_0017_bounds_every_llm_agent():
     """Applied to the seeded general_support spec, exactly as the database
     holds it."""
     seed = _load("_seed_0010", _VERSIONS / "0010_seed_default_data.py")
-    bound = _load("_bound_0021", _VERSIONS / "0021_llm_agents_bound_max_tokens.py")
+    bound = _load("_bound_0017", _VERSIONS / "0017_llm_agents_bound_max_tokens.py")
 
     llm_specs = [a for a in seed.seed_agents() if "model" in a]
     assert llm_specs, "the seed must still ship at least one llm agent"
 
     for spec in llm_specs:
         # The state the defect left behind: the key is PRESENT holding null,
-        # which is why 0021's predicate has to use `->>` and not `->`.
+        # which is why 0017's predicate has to use `->>` and not `->`.
         assert spec["model"].get("max_tokens") is None
 
         after = bound.apply(copy.deepcopy(spec))
@@ -87,11 +87,11 @@ def test_migration_0021_bounds_every_llm_agent():
         assert after["model"]["max_tokens"] > 0
 
 
-def test_0021_leaves_everything_but_the_ceiling_alone():
+def test_0017_leaves_everything_but_the_ceiling_alone():
     """A config rewrite that changed anything else would be a silent
     re-configuration riding along with a bug fix."""
     seed = _load("_seed_0010", _VERSIONS / "0010_seed_default_data.py")
-    bound = _load("_bound_0021", _VERSIONS / "0021_llm_agents_bound_max_tokens.py")
+    bound = _load("_bound_0017", _VERSIONS / "0017_llm_agents_bound_max_tokens.py")
 
     before = next(a for a in seed.seed_agents() if "model" in a)
     after = bound.apply(copy.deepcopy(before))

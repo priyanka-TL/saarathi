@@ -5,7 +5,7 @@ Used by: create_app(), once at import time.
 
 THERE IS NO CONFIG SYNC. `agents` + `agent_configs` are the only source of agent
 configuration -- no YAML, no CONFIG_SYNC_MODE, and so no drift. The catalogue is
-seeded by migration 0007 and edited through POST /api/agents/{key}/config.
+seeded by migration 0010 and edited through POST /api/agents/{key}/config.
 """
 from app.core.logger import get_logger
 
@@ -19,9 +19,10 @@ def sync_and_reload(container) -> None:
     synced any more -- this is a read of the database into the in-process
     snapshot.
     """
-    # Repairs a database where migrations 0006 (capabilities) and 0007 (agents,
-    # membership) got out of step. Only ever fills a default-scope capability
-    # with NO members at all, so a curated membership is never contradicted.
+    # Repairs a database where migrations 0003 (capabilities) and 0004
+    # (capability membership) got out of step with 0010's seed. Only ever fills
+    # a default-scope capability with NO members at all, so a curated
+    # membership is never contradicted.
     session_seed = container.session_factory()
     try:
         from app.services.capability_seed import seed_default_membership
@@ -48,7 +49,7 @@ def sync_and_reload(container) -> None:
         # STARTUP fail silently, so promote it back to fatal here.
         raise RuntimeError(
             "AgentRegistry loaded 0 agents at startup. The catalogue is seeded by "
-            "migration 0007 -- check that migrations are applied (`make migrate`) "
+            "migration 0010 -- check that migrations are applied (`make migrate`) "
             "and that agents/agent_configs hold an active default-scope config "
             "per enabled agent."
         )

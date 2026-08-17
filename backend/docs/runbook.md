@@ -284,7 +284,7 @@ curl -sH "Origin: $MITRA_ORIGIN_URL" \
   "$MITRA_BASE_URL/api/flow-connection-info/?flow_route=saarthi_story_flow"
 ```
 
-If `bot_route` is still `/guided_guest`, migration 0023 has not been applied to
+If `bot_route` is still `/guided_guest`, migration 0018 has not been applied to
 this scope, or a tenant-scoped row overrides the default one. If it is
 `/saarthi_story_flow` and the questions persist, the Saarthi side is correct and
 the remaining work is on that bot's Mitra-side state machine: the profile steps
