@@ -10,6 +10,7 @@ it, or one tenant is served another's configuration.
 """
 from dataclasses import dataclass
 from typing import Optional, List, Dict
+import threading
 import time
 from sqlalchemy import text
 
@@ -65,6 +66,9 @@ class AgentRegistry:
         self._version: int = 0
         self._loaded_at: float = 0.0
         self._max_updated_at = None
+        # Held only by maybe_reload, and only ever tried without blocking --
+        # see there for why a queue of waiters would be the wrong answer.
+        self._reload_lock = threading.Lock()
         # The registry version is part of the key, so a reload invalidates
         # every scoped entry for free.
         self._scope_cache: Dict[tuple, "RegisteredAgent"] = {}
@@ -155,14 +159,37 @@ class AgentRegistry:
         return self._version
 
     def maybe_reload(self, session):
-        """Called from before_request. Cheap: one indexed MAX(), TTL-gated."""
+        """Called from get_db on every /api/ request. Cheap: one indexed MAX(),
+        TTL-gated.
+
+        ONE THREAD PAYS, THE REST KEEP SERVING. Every request runs on its own
+        worker thread, so when the TTL lapses each thread that arrives would
+        otherwise run its own MAX() -- and, on a real change, its own full
+        catalogue reload -- against the same database at the same moment. The
+        lock collapses that to one.
+
+        TRIED WITHOUT BLOCKING, DELIBERATELY. A thread that loses the race
+        returns immediately on the cached snapshot rather than queueing behind a
+        database round trip it does not need: the snapshot it already has is at
+        most one TTL stale, which is the staleness this design already accepts.
+        Blocking here would convert a stampede into a latency spike on every
+        request unlucky enough to arrive at the TTL boundary.
+        """
         if time.monotonic() - self._loaded_at < self._ttl_s:
             return
-            
+
+        if not self._reload_lock.acquire(blocking=False):
+            return
+
         try:
+            # The winner may have finished between our TTL check and our
+            # acquire, which would make this reload pure duplicate work.
+            if time.monotonic() - self._loaded_at < self._ttl_s:
+                return
+
             query = text("SELECT MAX(updated_at) FROM agents WHERE status = 'enabled'")
             db_max = session.execute(query).scalar()
-            
+
             if db_max != self._max_updated_at:
                 self.reload(session)
             else:
@@ -172,6 +199,8 @@ class AgentRegistry:
                 "Failed to check for AgentRegistry updates: %s", e,
                 extra={"registry_version": self._version},
             )
+        finally:
+            self._reload_lock.release()
 
     @property
     def version(self) -> int:

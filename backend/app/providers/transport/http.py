@@ -37,6 +37,7 @@ from app.providers.errors import (
     ProviderRedirectError,
     ProviderSSRFError,
 )
+from app.utils.http_pool import size_connection_pool
 
 #: Error-envelope keys read out of a failed response, in preference order. A
 #: provider may override; the default covers the DRF-shaped envelopes seen so far.
@@ -124,7 +125,9 @@ class RestTransport:
             self._fixed_headers.update(extra_headers)
 
         # One reusable session: shared connection pool, fixed headers once.
-        self._session: HTTPSession = requests.Session()
+        # The pool is sized rather than left at urllib3's ten, which is below
+        # this process's worker-thread count -- see app/utils/http_pool.py.
+        self._session: HTTPSession = size_connection_pool(requests.Session())
         self._session.headers.update(self._fixed_headers)
 
     def __repr__(self) -> str:

@@ -6,12 +6,14 @@ wall-clock timing logic for the idle reaper.
 """
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
 from app.providers.connection import RemoteConnection
+from app.providers.errors import ProviderChannelClosed
 from app.providers.transport.pool import ChannelPool
 
 
@@ -161,7 +163,7 @@ def test_lru_eviction_respects_bound_and_closes_evicted():
         ch2 = _acquire(mgr, factory, spec, sess2, _CONN)
         ch3 = _acquire(mgr, factory, spec, sess3, _CONN)  # bound is 2 -> evicts ch1 (least recently used)
 
-        assert len(mgr._chans) == 2
+        assert len(mgr._entries) == 2
         assert ch1.alive is False
         assert ch1.close_calls == [True]
 
@@ -188,7 +190,7 @@ def test_lru_touch_on_hit_changes_eviction_order():
 
         assert ch2.alive is False
         assert ch1.alive is True
-        assert len(mgr._chans) == 2
+        assert len(mgr._entries) == 2
     finally:
         mgr.stop_reaper()
 
@@ -276,8 +278,8 @@ def test_close_removes_and_closes_only_that_conversation():
 
         assert ch1.alive is False
         assert ch2.alive is True
-        assert sess1.conversation_id not in mgr._chans
-        assert sess2.conversation_id in mgr._chans
+        assert sess1.conversation_id not in mgr._entries
+        assert sess2.conversation_id in mgr._entries
     finally:
         mgr.stop_reaper()
 
@@ -307,7 +309,7 @@ def test_close_all_closes_every_channel():
 
         assert all(ch.alive is False for ch in chans)
         assert all(ch.close_calls == [True] for ch in chans)
-        assert len(mgr._chans) == 0
+        assert len(mgr._entries) == 0
     finally:
         mgr.stop_reaper()
 
@@ -331,7 +333,7 @@ def test_atexit_registers_close_all(monkeypatch):
         registered["fn"]()  # simulate process exit invoking the registered hook
 
         assert ch.alive is False
-        assert len(mgr._chans) == 0
+        assert len(mgr._entries) == 0
     finally:
         mgr.stop_reaper()
 
@@ -352,7 +354,7 @@ def test_idle_reaper_closes_channels_idle_beyond_threshold():
         time.sleep(0.2)
 
         assert ch.alive is False
-        assert sess.conversation_id not in mgr._chans
+        assert sess.conversation_id not in mgr._entries
     finally:
         mgr.stop_reaper()
 
@@ -367,7 +369,7 @@ def test_idle_reaper_cleans_up_dead_channels_before_idle_threshold():
 
         time.sleep(0.1)
 
-        assert sess.conversation_id not in mgr._chans
+        assert sess.conversation_id not in mgr._entries
     finally:
         mgr.stop_reaper()
 
@@ -377,4 +379,106 @@ def test_reaper_thread_is_daemon():
     try:
         assert mgr._reaper.daemon is True
     finally:
+        mgr.stop_reaper()
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: the pool lock covers METADATA ONLY
+#
+# Both tests below are deterministic -- a Barrier or an Event decides the
+# interleaving, never a sleep. A wall-clock assertion ("finished in ~1s, not
+# ~2s") would prove the same thing and fail randomly on a loaded CI box.
+# ---------------------------------------------------------------------------
+
+
+def test_different_conversations_build_concurrently():
+    """Two cold starts must be inside factory() AT THE SAME TIME.
+
+    Fails against a pool that calls the factory under its own lock: the second
+    thread cannot reach the barrier until the first has returned, so the barrier
+    times out. That serialisation is invisible in production except as latency --
+    N simultaneous first turns cost N handshakes end to end, and one unreachable
+    remote stalls every other conversation for its full connect timeout.
+    """
+    both_inside = threading.Barrier(2, timeout=5)
+    factory = _FakeChannelFactory()
+    mgr = _pool(factory, reap_interval_s=1000)
+
+    def blocking_factory(spec, sess, conn):
+        both_inside.wait()  # raises BrokenBarrierError on timeout
+        return factory(spec, sess, conn)
+
+    errors: List[BaseException] = []
+
+    def run(sess):
+        try:
+            _acquire(mgr, blocking_factory, _Spec(), sess, _CONN)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    try:
+        threads = [threading.Thread(target=run, args=(_new_sess(),)) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"builds did not overlap: {errors!r}"
+        assert len(factory.calls) == 2
+    finally:
+        mgr.stop_reaper()
+
+
+def test_close_during_build_does_not_leave_a_duplicate_channel():
+    """One conversation must never build twice, even across a close().
+
+    THE REGRESSION THIS PINS. A build lock kept in a dict of its own would be
+    dropped by close() here -- the conversation is absent from the channel map
+    for the whole build, because acquire() took the stale channel out and has
+    not put a new one in -- so the second caller would mint a fresh lock and open
+    a SECOND socket, with nothing raised and nothing logged. Refcounting the
+    entry (`waiters`) is what makes that impossible; see ChannelPool._maybe_drop.
+
+    close() landing mid-build must also still take effect: before the factory
+    moved out from under the pool lock, close() simply waited and then closed the
+    channel, so a conversation that was closed must not come back holding a live
+    socket.
+    """
+    in_factory = threading.Event()
+    release = threading.Event()
+    factory = _FakeChannelFactory()
+    mgr = _pool(factory, reap_interval_s=1000)
+
+    def blocking_factory(spec, sess, conn):
+        in_factory.set()
+        release.wait(timeout=5)
+        return factory(spec, sess, conn)
+
+    sess = _new_sess()
+    outcome: List[BaseException] = []
+
+    def build():
+        try:
+            _acquire(mgr, blocking_factory, _Spec(), sess, _CONN)
+        except BaseException as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    try:
+        builder = threading.Thread(target=build)
+        builder.start()
+        assert in_factory.wait(timeout=5), "factory never ran"
+
+        # The entry is pinned by the in-flight build, so this cannot drop it.
+        mgr.close(sess.conversation_id)
+        release.set()
+        builder.join(timeout=10)
+
+        # Exactly one socket was ever opened for this conversation...
+        assert len(factory.calls) == 1
+        # ...it was not cached, and it was closed rather than leaked.
+        assert sess.conversation_id not in mgr._entries
+        assert factory.channels[0].alive is False
+        assert outcome and isinstance(outcome[0], ProviderChannelClosed)
+    finally:
+        release.set()
         mgr.stop_reaper()

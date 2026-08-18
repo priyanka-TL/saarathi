@@ -37,6 +37,7 @@ from app.integrations.bhashini.service_ids import (
     TTS_SERVICE_IDS,
 )
 from app.integrations.bhashini.text import split_text_for_tts, strip_markdown_for_tts
+from app.utils.http_pool import size_connection_pool
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,10 @@ class BhashiniClient:
         self.tts_byte_limit = tts_byte_limit
         self.asr_max_workers = max(1, asr_max_workers)
         self.ffmpeg_timeout_s = ffmpeg_timeout_s
-        self._session = requests.Session()
+        # Sized, not default: `transcribe` fans out asr_max_workers calls to
+        # this one host per recording, so ten connections is below what a
+        # SINGLE user's request needs before any concurrency is involved.
+        self._session = size_connection_pool(requests.Session())
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         # Explicit: the default would print _authorization, _api_key and _user_id.

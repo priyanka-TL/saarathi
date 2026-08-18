@@ -28,6 +28,7 @@ from app.integrations.elevate.exceptions import (
     ElevateUpstreamError,
 )
 from app.integrations.elevate.mapping import to_profile, to_update_body
+from app.utils.http_pool import size_connection_pool
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class ElevateUserClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._timeout: Tuple[float, float] = (connect_timeout, read_timeout)
-        self._session = requests.Session()
+        self._session = size_connection_pool(requests.Session())
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return f"<ElevateUserClient base_url={self.base_url}>"
